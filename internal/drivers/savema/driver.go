@@ -3,10 +3,10 @@ package savema
 import (
 	"fmt"
 	"net"
+	"strings" // Обязательно добавляем пакет для работы со строками
 	"time"
 )
 
-// Driver реализует интерфейс core.Printer
 type Driver struct {
 	Address string
 	Timeout time.Duration
@@ -14,7 +14,7 @@ type Driver struct {
 
 func New(ip string) *Driver {
 	return &Driver{
-		Address: ip + ":9100", // Savema обычно работает по порту 9100
+		Address: ip + ":9100",
 		Timeout: 3 * time.Second,
 	}
 }
@@ -36,34 +36,75 @@ func (d *Driver) SendCommand(cmdBody string) (string, error) {
 	return string(buffer[:n]), nil
 }
 
-// GetStatus запрашивает статус (реализует интерфейс)
-func (d *Driver) GetStatus() (string, error) {
-	// Используем команду SPPSTA из протокола SPPL
-	return d.SendCommand("SPPSTA")
+// CleanResponse — наш "очиститель" протокола
+func CleanResponse(raw string) string {
+	// 1. Убираем пробелы и переносы каретки (\r, \n)
+	clean := strings.TrimSpace(raw)
+	// 2. Отрезаем тильду и крышку (~ ... ^)
+	clean = strings.TrimPrefix(clean, "~")
+	clean = strings.TrimSuffix(clean, "^")
+
+	// 3. В SPPL успешный ответ часто идет в формате "00|Данные"
+	parts := strings.SplitN(clean, "|", 2)
+	if len(parts) == 2 {
+		return parts[1] // Возвращаем только полезные данные после пайпа
+	}
+
+	return clean
 }
 
-// PrintTemplate реализует печать (реализует интерфейс)
+// GetStatus запрашивает статус и переводит его на русский
+func (d *Driver) GetStatus() (string, error) {
+	raw, err := d.SendCommand("SPPSTA")
+	if err != nil {
+		return "", err
+	}
+
+	clean := CleanResponse(raw)
+	upperStatus := strings.ToUpper(clean)
+
+	// Маппинг (Словарь) статусов принтера
+	switch {
+	case strings.Contains(upperStatus, "READY") || clean == "00":
+		return "ГОТОВ", nil
+	case strings.Contains(upperStatus, "PRINTING") || clean == "01":
+		return "ПЕЧАТАЕТ", nil
+	case strings.Contains(upperStatus, "WARNING"):
+		return "ВНИМАНИЕ (ПРЕДУПРЕЖДЕНИЕ)", nil
+	case strings.Contains(upperStatus, "FAULT") || strings.Contains(upperStatus, "ERROR"):
+		return "ОШИБКА ОБОРУДОВАНИЯ", nil
+	default:
+		// Если статус неизвестен, возвращаем его очищенным,
+		// чтобы ты мог увидеть его в UI и потом добавить в этот switch
+		return clean, nil
+	}
+}
+
+// GetRemainingRibbon возвращает только чистое число (метры)
+func (d *Driver) GetRemainingRibbon() (string, error) {
+	raw, err := d.SendCommand("SPGGRR")
+	if err != nil {
+		return "", err
+	}
+	return CleanResponse(raw), nil
+}
+
+// GetQueueCapacity возвращает только чистое число кодов
+func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
+	raw, err := d.SendCommand(fmt.Sprintf("SPLGMQ{%s}", queueName))
+	if err != nil {
+		return "", err
+	}
+	return CleanResponse(raw), nil
+}
+
 func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
-	// 1. Загрузка шаблона
 	_, err := d.SendCommand(fmt.Sprintf("SPLLTF{%s}", template))
 	if err != nil {
 		return err
 	}
-	// 2. Установка полей
 	for k, v := range fields {
 		d.SendCommand(fmt.Sprintf("SPMCTV{%s~gt~%s}", k, v))
 	}
 	return nil
-}
-
-// GetRemainingRibbon запрашивает остаток риббона
-func (d *Driver) GetRemainingRibbon() (string, error) {
-	// Возвращает число (обычно в метрах)
-	return d.SendCommand("SPGGRR")
-}
-
-// GetQueueCapacity запрашивает количество кодов в очереди
-func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
-	// Синтаксис: SPLGMQ{ИмяПоля}
-	return d.SendCommand(fmt.Sprintf("SPLGMQ{%s}", queueName))
 }
