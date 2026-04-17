@@ -169,16 +169,20 @@
                     <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
                     <span class="status-badge">${p.status || 'ИНИЦИАЛИЗАЦИЯ'}</span>
                 </div>
-                <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; justify-content: space-between;">
-                    <div>
-                        <div style="font-size: 0.8rem; color: var(--text-muted);">Риббон</div>
-                        <div style="font-weight: bold;">${p.ribbon} м.</div>
-                    </div>
-                    <div style="text-align: right;">
-                        <div style="font-size: 0.8rem; color: var(--text-muted);">Очередь "ЧЗ"</div>
-                        <div style="font-weight: bold; ${queueWarning}">${p.queue} шт.</div>
-                    </div>
+                <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
+                <div>
+                <div style="font-size: 0.8rem; color: var(--text-muted);">Риббон</div>
+                <div style="font-weight: bold;">${p.ribbon} м.</div>
                 </div>
+                <div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">Скорость</div>
+                    <div style="font-weight: bold;">${p.speed} мм/с</div>
+                </div>
+                <div style="text-align: right;">
+                    <div style="font-size: 0.8rem; color: var(--text-muted);">Очередь "ЧЗ"</div>
+                    <div style="font-weight: bold; ${queueWarning}">${p.queue} шт.</div>
+                </div>
+            </div>
                 <div style="color: var(--text-muted); font-size: 0.8rem;">IP: ${p.ip}</div>
             </div>`;
         });

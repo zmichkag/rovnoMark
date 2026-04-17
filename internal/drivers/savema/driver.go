@@ -40,14 +40,12 @@ func (d *Driver) SendCommand(cmdBody string) (string, error) {
 func CleanResponse(raw string) string {
 	// 1. Убираем пробелы и переносы каретки (\r, \n)
 	clean := strings.TrimSpace(raw)
-	// 2. Отрезаем тильду и крышку (~ ... ^)
-	clean = strings.TrimPrefix(clean, "~")
-	clean = strings.TrimSuffix(clean, "^")
 
-	// 3. В SPPL успешный ответ часто идет в формате "00|Данные"
-	parts := strings.SplitN(clean, "|", 2)
-	if len(parts) == 2 {
-		return parts[1] // Возвращаем только полезные данные после пайпа
+	start := strings.Index(clean, ":")
+	end := strings.Index(clean, "}")
+	if start != -1 && end != -1 {
+		clean = clean[start+1 : end]
+		return clean
 	}
 
 	return clean
@@ -63,19 +61,18 @@ func (d *Driver) GetStatus() (string, error) {
 	clean := CleanResponse(raw)
 	upperStatus := strings.ToUpper(clean)
 
-	// Маппинг (Словарь) статусов принтера
+	// Маппинг (Словарь) статусов принтера INIT, WAITING, RUNNING and ERROR
 	switch {
-	case strings.Contains(upperStatus, "READY") || clean == "00":
-		return "ГОТОВ", nil
-	case strings.Contains(upperStatus, "PRINTING") || clean == "01":
+	case strings.Contains(upperStatus, "INIT") || clean == "00":
+		return "ЗАПУСК", nil
+	case strings.Contains(upperStatus, "RUNNING") || clean == "01":
 		return "ПЕЧАТАЕТ", nil
-	case strings.Contains(upperStatus, "WARNING"):
+	case strings.Contains(upperStatus, "WAITING"):
 		return "ВНИМАНИЕ (ПРЕДУПРЕЖДЕНИЕ)", nil
-	case strings.Contains(upperStatus, "FAULT") || strings.Contains(upperStatus, "ERROR"):
+	case strings.Contains(upperStatus, "ERROR") || strings.Contains(upperStatus, "ERROR"):
 		return "ОШИБКА ОБОРУДОВАНИЯ", nil
 	default:
-		// Если статус неизвестен, возвращаем его очищенным,
-		// чтобы ты мог увидеть его в UI и потом добавить в этот switch
+		// Если статус неизвестен, возвращаем его очищенным
 		return clean, nil
 	}
 }
@@ -107,4 +104,12 @@ func (d *Driver) PrintTemplate(template string, fields map[string]string) error 
 		d.SendCommand(fmt.Sprintf("SPMCTV{%s~gt~%s}", k, v))
 	}
 	return nil
+}
+
+func (d *Driver) GetPrintSpeed(string, error) {
+	raw, err := d.SendCommand("SPCGPS")
+	if err != nil {
+		return "", err
+	}
+	return CleanResponse(raw), nil
 }

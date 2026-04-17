@@ -13,8 +13,8 @@ type Printer interface {
 	PrintTemplate(template string, fields map[string]string) error
 	GetRemainingRibbon() (string, error)
 	GetQueueCapacity(queueName string) (string, error)
+	GetPrintSpeed() (string, error)
 }
-
 type PrinterConfig struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -27,6 +27,7 @@ type PrinterState struct {
 	Status string `json:"status"`
 	Ribbon string `json:"ribbon"`
 	Queue  string `json:"queue"`
+	Speed  string `json:"speed"`
 }
 
 // LogEntry - запись для журнала событий
@@ -106,18 +107,23 @@ func (pm *PrinterManager) backgroundPoller() {
 			// Собираем телеметрию
 			status, err := p.GetStatus()
 
-			// Если принтер отвечает, запрашиваем доп. данные
-			var ribbon, queue string
+			// 1. Объявляем переменные ДО проверки, чтобы они были доступны везде
+			var ribbon, queue, speed string
+
+			// 2. Запрашиваем данные, если нет ошибки
 			if err == nil {
+				// ВАЖНО: используем обычное '=', так как переменные уже созданы строчкой выше!
 				ribbon, _ = p.GetRemainingRibbon()
-				queue, _ = p.GetQueueCapacity("code") // Пока захардкодим поле 'code'
+				queue, _ = p.GetQueueCapacity("code") // Пока хардкодим поле 'code'
+				speed, _ = p.GetPrintSpeed()          // Твоя новая скорость
 			}
 
+			// 3. Блокируем память для записи
 			pm.mu.Lock()
 			oldState := pm.states[id]
 			newState := PrinterState{}
 
-			// STATE MACHINE: Детектор событий
+			// 4. STATE MACHINE: Детектор событий
 			isOfflineNow := err != nil
 			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
 
@@ -126,19 +132,24 @@ func (pm *PrinterManager) backgroundPoller() {
 				newState.Status = fmt.Sprintf("ОФФЛАЙН: %v", err)
 				newState.Ribbon = "N/A"
 				newState.Queue = "N/A"
+				newState.Speed = "N/A" // Сбрасываем скорость
 			} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
 				pm.addLogNoLock(id, "Связь восстановлена. Статус: "+status)
 				newState.Status = status
 				newState.Ribbon = ribbon
 				newState.Queue = queue
+				newState.Speed = speed
 			} else if isOfflineNow {
 				newState.Status = oldState.Status // Оставляем старую ошибку
 			} else {
+				// Все хорошо, просто обновляем данные
 				newState.Status = status
 				newState.Ribbon = ribbon
 				newState.Queue = queue
+				newState.Speed = speed
 			}
 
+			// 5. Сохраняем и открываем замок
 			pm.states[id] = newState
 			pm.mu.Unlock()
 		}
