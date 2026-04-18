@@ -20,13 +20,13 @@ func New(path string) *Store {
 
 	// Создаем таблицу для парка принтеров
 	query := `
-		CREATE TABLE IF NOT EXISTS printers (
-			id TEXT PRIMARY KEY,
-			name TEXT,
-			ip TEXT,
-			port INTEGER, 
-			driver_type TEXT
-		                                    );`
+	CREATE TABLE IF NOT EXISTS printers (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		ip TEXT,
+		port INTEGER,
+		driver_type TEXT
+	);`
 	db.Exec(query)
 
 	return &Store{db: db}
