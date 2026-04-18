@@ -34,14 +34,14 @@ func New(path string) *Store {
 
 // SavePrinter сохраняет или обновляет принтер
 func (s *Store) SavePrinter(p core.PrinterConfig) error {
-	query := `INSERT OR REPLACE INTO printers (id, name, ip, driver_type) VALUES (?, ?, ?, ?)`
-	_, err := s.db.Exec(query, p.ID, p.Name, p.IP, p.DriverType)
+	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type) VALUES (?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, p.ID, p.Name, p.IP, p.Port, p.DriverType)
 	return err
 }
 
 // GetAllPrinters вычитывает весь список для инициализации системы
 func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, driver_type FROM printers")
+	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type FROM printers")
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
 	var list []core.PrinterConfig
 	for rows.Next() {
 		var p core.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.DriverType); err == nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType); err == nil {
 			list = append(list, p)
 		}
 	}
