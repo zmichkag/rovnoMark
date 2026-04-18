@@ -14,6 +14,7 @@ type Printer interface {
 	GetRemainingRibbon() (string, error)
 	GetQueueCapacity(queueName string) (string, error)
 	GetPrintSpeed() (string, error)
+	GetCurrentPrintCount() (string, error)
 }
 type PrinterConfig struct {
 	ID         string `json:"id"`
@@ -24,10 +25,11 @@ type PrinterConfig struct {
 
 // PrinterState хранит полную телеметрию
 type PrinterState struct {
-	Status string `json:"status"`
-	Ribbon string `json:"ribbon"`
-	Queue  string `json:"queue"`
-	Speed  string `json:"speed"`
+	Status   string `json:"status"`
+	Ribbon   string `json:"ribbon"`
+	Queue    string `json:"queue"`
+	Speed    string `json:"speed"`
+	CurCount string `json:"cur_count"`
 }
 
 // LogEntry - запись для журнала событий
@@ -108,14 +110,15 @@ func (pm *PrinterManager) backgroundPoller() {
 			status, err := p.GetStatus()
 
 			// 1. Объявляем переменные ДО проверки, чтобы они были доступны везде
-			var ribbon, queue, speed string
+
+			var ribbon, queue, speed, curCount string
 
 			// 2. Запрашиваем данные, если нет ошибки
 			if err == nil {
-				// ВАЖНО: используем обычное '=', так как переменные уже созданы строчкой выше!
 				ribbon, _ = p.GetRemainingRibbon()
 				queue, _ = p.GetQueueCapacity("code") // Пока хардкодим поле 'code'
-				speed, _ = p.GetPrintSpeed()          // Твоя новая скорость
+				speed, _ = p.GetPrintSpeed()
+				curCount, _ = p.GetCurrentPrintCount() // Твоя новая скорость
 			}
 
 			// 3. Блокируем память для записи
@@ -133,12 +136,14 @@ func (pm *PrinterManager) backgroundPoller() {
 				newState.Ribbon = "N/A"
 				newState.Queue = "N/A"
 				newState.Speed = "N/A" // Сбрасываем скорость
+				newState.CurCount = "N/A"
 			} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
 				pm.addLogNoLock(id, "Связь восстановлена. Статус: "+status)
 				newState.Status = status
 				newState.Ribbon = ribbon
 				newState.Queue = queue
 				newState.Speed = speed
+				newState.CurCount = curCount
 			} else if isOfflineNow {
 				newState.Status = oldState.Status // Оставляем старую ошибку
 			} else {
@@ -147,6 +152,7 @@ func (pm *PrinterManager) backgroundPoller() {
 				newState.Ribbon = ribbon
 				newState.Queue = queue
 				newState.Speed = speed
+				newState.CurCount = curCount
 			}
 
 			// 5. Сохраняем и открываем замок

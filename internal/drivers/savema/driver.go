@@ -106,8 +106,16 @@ func (d *Driver) PrintTemplate(template string, fields map[string]string) error 
 	return nil
 }
 
-func (d *Driver) GetPrintSpeed(string, error) {
+func (d *Driver) GetPrintSpeed() (string, error) { // Скобки для параметров, потом типы возврата
 	raw, err := d.SendCommand("SPCGPS")
+	if err != nil {
+		return "", err
+	}
+	return CleanResponse(raw), nil
+}
+
+func (d *Driver) GetCurrentPrintCount() (string, error) {
+	raw, err := d.SendCommand("SPGGCP")
 	if err != nil {
 		return "", err
 	}
