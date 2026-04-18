@@ -48,7 +48,15 @@ func main() {
 		store.SavePrinter(cfg)
 
 		// Сразу добавляем в активный пул (чтобы не перезапускать .exe)
-		manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
+		switch cfg.DriverType {
+		case "savema":
+			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
+		case "videojet":
+			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		default:
+			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
+			return
+		}
 
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, "Принтер добавлен в систему")

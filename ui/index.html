@@ -270,7 +270,7 @@
         });
     }
 
-    function editPrinter(id, name, ip, driver) {
+    function editPrinter(id, name, ip, port, driver) {
         document.getElementById('p_id').value = id;
         document.getElementById('p_name').value = name;
         document.getElementById('p_ip').value = ip;
@@ -284,7 +284,7 @@
             id: document.getElementById('p_id').value,
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
-            port: document.getElementById('p_port').value,
+            port: parseInt(document.getElementById('p_port').value) || 0,
             driver_type: document.getElementById('p_driver').value
         };
 
