@@ -3,24 +3,34 @@ package savema
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings" // Обязательно добавляем пакет для работы со строками
+	"sync"
 	"time"
 )
 
 type Driver struct {
 	Address string
+	Port    int
 	Timeout time.Duration
+	mu      sync.Mutex
 }
 
-func New(ip string) *Driver {
+func New(ip string, port int) *Driver {
 	return &Driver{
-		Address: ip + ":9100",
+		Address: ip,
+		Port:    port,
 		Timeout: 3 * time.Second,
 	}
 }
 
 func (d *Driver) SendCommand(cmdBody string) (string, error) {
-	conn, err := net.DialTimeout("tcp", d.Address, d.Timeout)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+
+	conn, err := net.DialTimeout("tcp", address, d.Timeout)
 	if err != nil {
 		return "", err
 	}

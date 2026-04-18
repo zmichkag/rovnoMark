@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
 
 	"rovnoMark/internal/core"
@@ -20,12 +21,13 @@ func main() {
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
 
-	// 1. При запуске загружаем все принтеры из базы в работу
+	// Загружаем все принтеры из базы в работу
 	savedPrinters, _ := store.GetAllPrinters()
 	for _, cfg := range savedPrinters {
-		// Создаем драйвер в зависимости от типа (пока только Savema)
 		if cfg.DriverType == "savema" {
-			manager.AddPrinter(cfg, savema.New(cfg.IP))
+			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
+		} else if cfg.DriverType == "videojet" {
+			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		}
 	}
 
@@ -46,7 +48,7 @@ func main() {
 		store.SavePrinter(cfg)
 
 		// Сразу добавляем в активный пул (чтобы не перезапускать .exe)
-		manager.AddPrinter(cfg, savema.New(cfg.IP))
+		manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, "Принтер добавлен в систему")
