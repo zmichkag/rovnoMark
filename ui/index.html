@@ -103,11 +103,12 @@
         <div class="field"><label>ID (Уникальный, англ.):</label><input type="text" id="p_id" placeholder="L1" style="width:100%; padding:8px;"></div>
         <div class="field"><label>Имя линии:</label><input type="text" id="p_name" placeholder="Линия Упаковки" style="width:100%; padding:8px;"></div>
         <div class="field"><label>IP адрес:</label><input type="text" id="p_ip" placeholder="192.168.1.100" style="width:100%; padding:8px;"></div>
+        <div class="field"><label>Порт:</label><input type="text" id="p_port" placeholder="9100" style="width:100%; padding:8px;"></div>
         <div class="field">
             <label>Тип драйвера:</label>
             <select id="p_driver" style="width:100%; padding:8px; margin-bottom:20px;">
                 <option value="savema">Savema (SPPL)</option>
-                <option value="videojet">Videojet (Zipher) - скоро</option>
+                <option value="videojet">Videojet (Zipher)</option>
             </select>
         </div>
         <button class="btn" style="background: var(--success); width: 100%;" onclick="addPrinter()">СОХРАНИТЬ</button>
@@ -118,7 +119,7 @@
     <table style="width: 100%; border-collapse: collapse; background: var(--surface);">
         <thead>
         <tr style="text-align: left; border-bottom: 1px solid #444;">
-            <th style="padding: 10px;">ID</th><th>Имя</th><th>IP</th><th>Действие</th>
+            <th style="padding: 10px;">ID</th><th>Имя</th><th>IP</th><th>Порт</th><th>Действие</th>
         </tr>
         </thead>
         <tbody id="printers-list-table"></tbody>
@@ -187,7 +188,7 @@
                     <div style="font-weight: bold; ${queueWarning}">${p.queue} шт.</div>
                 </div>
             </div>
-                <div style="color: var(--text-muted); font-size: 0.8rem;">IP: ${p.ip}</div>
+                <div style="color: var(--text-muted); font-size: 0.8rem;">IP: ${p.ip}:${p.port}</div>
             </div>`;
         });
     }
@@ -263,16 +264,17 @@
         data.printers.forEach(p => {
             table.innerHTML += `
             <tr style="border-bottom: 1px solid #333;">
-                <td style="padding: 10px;">${p.id}</td><td>${p.name}</td><td>${p.ip}</td>
-                <td><button class="btn" onclick="editPrinter('${p.id}', '${p.name}', '${p.ip}', '${p.driver_type}')">⚙️ Изменить</button></td>
+                <td style="padding: 10px;">${p.id}</td><td>${p.name}</td><td>${p.ip}</td><td>${p.port}</td>
+                <td><button class="btn" onclick="editPrinter('${p.id}', '${p.name}', '${p.ip}', '${p.port}','${p.driver_type}')">⚙️ Изменить</button></td>
             </tr>`;
         });
     }
 
-    function editPrinter(id, name, ip, driver) {
+    function editPrinter(id, name, ip, port, driver) {
         document.getElementById('p_id').value = id;
         document.getElementById('p_name').value = name;
         document.getElementById('p_ip').value = ip;
+        document.getElementById('p_port').value = port;
         document.getElementById('p_driver').value = driver;
         window.scrollTo(0,0);
     }
@@ -282,6 +284,7 @@
             id: document.getElementById('p_id').value,
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
+            port: parseInt(document.getElementById('p_port').value) || 0,
             driver_type: document.getElementById('p_driver').value
         };
 
@@ -294,6 +297,8 @@
             document.getElementById('p_id').value = '';
             document.getElementById('p_name').value = '';
             document.getElementById('p_ip').value = '';
+            document.getElementById('p_port').value = '';
+            document.getElementById('p_driver').value = '';
             switchTab('monitoring');
         } else {
             alert("Ошибка при сохранении");

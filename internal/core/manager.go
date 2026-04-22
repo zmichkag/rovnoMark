@@ -16,12 +16,15 @@ type Printer interface {
 	GetPrintSpeed() (string, error)
 	GetCurrentPrintCount() (string, error)
 }
-type PrinterConfig struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	IP         string `json:"ip"`
-	DriverType string `json:"driver_type"`
-}
+type (
+	PrinterConfig struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		IP         string `json:"ip"`
+		Port       int    `json:"port"`
+		DriverType string `json:"driver_type"`
+	}
+)
 
 // PrinterState хранит полную телеметрию
 type PrinterState struct {
