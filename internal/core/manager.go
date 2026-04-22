@@ -16,15 +16,33 @@ type Printer interface {
 	GetPrintSpeed() (string, error)
 	GetCurrentPrintCount() (string, error)
 }
-type (
-	PrinterConfig struct {
-		ID         string `json:"id"`
-		Name       string `json:"name"`
-		IP         string `json:"ip"`
-		Port       int    `json:"port"`
-		DriverType string `json:"driver_type"`
-	}
-)
+
+// Физическое устройство
+type PrinterConfig struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	IP         string `json:"ip"`
+	Port       int    `json:"port"`
+	DriverType string `json:"driver_type"`
+	IsActive   bool   `json:"is_active"`
+	IsDeleted  bool   `json:"is_deleted"`
+}
+
+// Производственная линия
+type LineConfig struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	IsActive    bool   `json:"is_active"`
+	IsDeleted   bool   `json:"is_deleted"`
+}
+
+// Матрица связей (Линия <-> Принтер)
+type LineAssignment struct {
+	LineID    int    `json:"line_id"`
+	PrinterID int    `json:"printer_id"`
+	Role      string `json:"role"` // ITEM, SUMMARY, BOTTOM_INFO
+}
 
 // PrinterState хранит полную телеметрию
 type PrinterState struct {
@@ -114,14 +132,15 @@ func (pm *PrinterManager) backgroundPoller() {
 
 			// 1. Объявляем переменные ДО проверки, чтобы они были доступны везде
 
-			var ribbon, queue, speed, curCount string
+			var ribbon, queue, speed, curCount, curTemplate string
 
 			// 2. Запрашиваем данные, если нет ошибки
 			if err == nil {
 				ribbon, _ = p.GetRemainingRibbon()
 				queue, _ = p.GetQueueCapacity("code") // Пока хардкодим поле 'code'
 				speed, _ = p.GetPrintSpeed()
-				curCount, _ = p.GetCurrentPrintCount() // Твоя новая скорость
+				curCount, _ = p.GetCurrentPrintCount()
+				curTemplate, _ = p.GetCurrentTemplate()
 			}
 
 			// 3. Блокируем память для записи
@@ -140,6 +159,7 @@ func (pm *PrinterManager) backgroundPoller() {
 				newState.Queue = "N/A"
 				newState.Speed = "N/A" // Сбрасываем скорость
 				newState.CurCount = "N/A"
+				newState.CurTemplate = "N/A"
 			} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
 				pm.addLogNoLock(id, "Связь восстановлена. Статус: "+status)
 				newState.Status = status
@@ -147,6 +167,7 @@ func (pm *PrinterManager) backgroundPoller() {
 				newState.Queue = queue
 				newState.Speed = speed
 				newState.CurCount = curCount
+				newState.CurTemplate = curTemplate
 			} else if isOfflineNow {
 				newState.Status = oldState.Status // Оставляем старую ошибку
 			} else {
@@ -156,6 +177,7 @@ func (pm *PrinterManager) backgroundPoller() {
 				newState.Queue = queue
 				newState.Speed = speed
 				newState.CurCount = curCount
+				newState.CurTemplate = curTemplate
 			}
 
 			// 5. Сохраняем и открываем замок

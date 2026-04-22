@@ -131,3 +131,8 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	}
 	return CleanResponse(raw), nil
 }
+
+func (d *Driver) GetCurrentTemplate() (string, error) {
+
+	return "0", nil
+}
