@@ -3,6 +3,7 @@ package videojet
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -11,10 +12,12 @@ import (
 )
 
 type Driver struct {
-	Address string
-	Port    int
-	Timeout time.Duration
-	mu      sync.Mutex // Защита TCP-канала от одновременных запросов
+	Address     string
+	Port        int
+	Timeout     time.Duration
+	mu          sync.Mutex
+	currstate   string
+	CurTemplate string
 }
 
 func New(ip string, port int) *Driver {
@@ -39,7 +42,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	}
 	defer conn.Close()
 
-	conn.Write([]byte(cmd + "\r"))
+	//conn.Write([]byte(cmd + "\r"))
 
 	// Videojet требует терминатор \r
 	_, err = conn.Write([]byte(cmd + "\r"))
@@ -54,7 +57,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
+	log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	return strings.TrimSpace(reply), nil
 }
 
@@ -65,6 +68,8 @@ func (d *Driver) GetStatus() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	d.currstate = raw
 
 	parts := strings.Split(raw, "|")
 	if len(parts) < 2 {
@@ -83,16 +88,16 @@ func (d *Driver) GetStatus() (string, error) {
 	case "0":
 		return "ВЫКЛЮЧЕН", nil
 	case "1":
-		return "ЗАПУСК", nil
+		return "НЕ ГОТОВ", nil
 	case "2":
-		return "ОСТАНОВКА", nil
+		return "ГОТОВ", nil
 	case "3":
 		if errorCode == "2" {
 			return "ПЕЧАТЬ (ОШИБКА)", nil
 		}
-		return "ГОТОВ / ПЕЧАТЬ", nil
+		return "ПЕЧАТЬ", nil
 	case "4":
-		return "ОФФЛАЙН", nil
+		return "ГОТОВ", nil
 	default:
 		return "НЕИЗВЕСТНО", nil
 	}
@@ -144,18 +149,31 @@ func (d *Driver) PrintTemplate(template string, fields map[string]string) error 
 }
 
 func (d *Driver) GetPrintSpeed() (string, error) {
-	return "N/A", nil // В текстовом протоколе нет прямой команды скорости
+	return "N/A", nil
 }
 
 func (d *Driver) GetCurrentPrintCount() (string, error) {
-	raw, err := d.sendRaw("GPC") // Get Counts [cite: 567]
-	if err != nil {
-		return "", err
+	if d.currstate == "" {
+		return "0", nil
 	}
-	// PCS <success>|<fail>|<missed>|<remaining> [cite: 572]
-	parts := strings.Split(raw, "|")
-	if len(parts) >= 1 {
-		return strings.TrimPrefix(parts[0], "PCS "), nil
+
+	parts := strings.Split(d.currstate, "|")
+	if len(parts) < 5 {
+		return "0", nil
 	}
-	return "0", nil
+
+	return strings.TrimSpace(parts[4]), nil
+}
+
+func (d *Driver) GetCurrentTemplate() (string, error) {
+	if d.currstate == "" {
+		return "0", nil
+	}
+
+	parts := strings.Split(d.currstate, "|")
+	if len(parts) < 5 {
+		return "0", nil
+	}
+
+	return strings.TrimSpace(parts[3]), nil
 }

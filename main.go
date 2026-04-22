@@ -64,8 +64,6 @@ func main() {
 
 	// 2. Настраиваем API Маршруты
 
-	// Внутри main.go в блоке регистрации маршрутов
-
 	// API для дашборда (Мониторинг)
 	http.HandleFunc("/api/printers", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
