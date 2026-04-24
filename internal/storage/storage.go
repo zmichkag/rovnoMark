@@ -95,34 +95,56 @@ func createTables(db *sql.DB) {
 // runMigration перетаскивает данные из бэкапа прозрачно для пользователя
 func runMigration(db *sql.DB) {
 	// 1. Создаем дефолтную линию
-	res, _ := db.Exec(`INSERT INTO lines (name, description) VALUES ('Линия 1 (Авто-миграция)', 'Создана при обновлении системы')`)
-	defaultLineID, _ := res.LastInsertId()
+	res, err := db.Exec(`INSERT INTO lines (name, description) VALUES ('Линия 1 (Авто-миграция)', 'Создана при обновлении системы')`)
+	if err != nil {
+		log.Printf("Ошибка создания дефолтной линии: %v", err)
+		return
+	}
+
+	defaultLineID, err := res.LastInsertId()
+	if err != nil {
+		log.Printf("Ошибка получения ID линии: %v", err)
+		return
+	}
 
 	// 2. Читаем старые принтеры
 	rows, err := db.Query("SELECT name, ip, port, driver_type FROM printers_v1_backup")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var name, ip, driver string
-			var port int
-			rows.Scan(&name, &ip, &port, &driver)
+	if err != nil {
+		log.Printf("Ошибка чтения бэкапа: %v", err)
+		return
+	}
+	defer rows.Close()
 
-			// 3. Записываем в новую таблицу принтеров
-			pRes, _ := db.Exec(`INSERT INTO printers (name, ip, port, driver_type) VALUES (?, ?, ?, ?)`, name, ip, port, driver)
-			newPrinterID, _ := pRes.LastInsertId()
+	for rows.Next() {
+		var name, ip, driver string
+		var port int
+		if err := rows.Scan(&name, &ip, &port, &driver); err != nil {
+			continue // Пропускаем битую запись
+		}
 
-			// 4. Вяжем принтер к дефолтной линии с ролью ОСНОВНОЙ
-			db.Exec(`INSERT INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`, defaultLineID, newPrinterID, "PRIMARY")
+		// 3. Записываем в новую таблицу принтеров
+		pRes, err := db.Exec(`INSERT INTO printers (name, ip, port, driver_type) VALUES (?, ?, ?, ?)`, name, ip, port, driver)
+		if err != nil {
+			log.Printf("Ошибка переноса принтера %s: %v", name, err)
+			continue
+		}
+
+		newPrinterID, _ := pRes.LastInsertId()
+
+		// 4. Вяжем принтер к дефолтной линии
+		_, err = db.Exec(`INSERT INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`, defaultLineID, newPrinterID, "PRIMARY")
+		if err != nil {
+			log.Printf("Ошибка привязки принтера к линии: %v", err)
 		}
 	}
 
-	// 5. Удаляем бэкап, заметаем следы
+	// 5. Удаляем бэкап
 	db.Exec("DROP TABLE printers_v1_backup")
 	log.Println("=== МИГРАЦИЯ УСПЕШНО ЗАВЕРШЕНА ===")
 }
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
-func (s *Store) GetAllActivePrinters() ([]core.PrinterConfig, error) {
+func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
 	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
 	if err != nil {
 		return nil, err
@@ -137,4 +159,95 @@ func (s *Store) GetAllActivePrinters() ([]core.PrinterConfig, error) {
 		}
 	}
 	return list, nil
+}
+
+func (s *Store) GetPrinterLineMap() (map[int]int, error) {
+	rows, err := s.db.Query("SELECT printer_id, line_id FROM line_printers")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[int]int)
+	for rows.Next() {
+		var pid, lid int
+		rows.Scan(&pid, &lid)
+		m[pid] = lid
+	}
+	return m, nil
+}
+
+func (s *Store) SavePrinter(p core.PrinterConfig) (int64, error) {
+	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
+	var id interface{} = p.ID
+	if p.ID == 0 {
+		id = nil
+	}
+
+	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive)
+	if err != nil {
+		return 0, err
+	}
+
+	if p.ID == 0 {
+		return res.LastInsertId()
+	}
+	return int64(p.ID), nil
+}
+
+// Сохранить или обновить линию
+func (s *Store) SaveLine(l core.LineConfig) error {
+	query := `INSERT OR REPLACE INTO lines (id, name, description, is_active) VALUES (?, ?, ?, ?)`
+	var id interface{} = l.ID
+	if l.ID == 0 {
+		id = nil
+	}
+	_, err := s.db.Exec(query, id, l.Name, l.Description, l.IsActive)
+	return err
+}
+
+// Получить все активные линии
+func (s *Store) GetAllLines() ([]core.LineConfig, error) {
+	rows, err := s.db.Query("SELECT id, name, description, is_active FROM lines WHERE is_deleted = 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []core.LineConfig
+	for rows.Next() {
+		var l core.LineConfig
+		rows.Scan(&l.ID, &l.Name, &l.Description, &l.IsActive)
+		list = append(list, l)
+	}
+	return list, nil
+}
+
+// Привязать принтер к линии
+func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
+		lineID, printerID, role)
+	return err
+}
+
+func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
+	query := `
+		SELECT l.name as line_name, p.name as printer_name, lp.role 
+		FROM line_printers lp
+		JOIN lines l ON lp.line_id = l.id
+		JOIN printers p ON lp.printer_id = p.id
+	`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var lName, pName, role string
+		rows.Scan(&lName, &pName, &role)
+		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
+	}
+	return result, nil
 }

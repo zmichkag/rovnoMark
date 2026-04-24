@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>РОВНО v1.0 | Диспетчер</title>
+    <title>РОВНО v1.2 | Диспетчер</title>
     <style>
         /* Промышленная темная тема */
         :root {
@@ -100,19 +100,76 @@
 <div id="settings" class="tab-content">
     <div style="max-width: 500px; background: var(--surface); padding: 20px; border-radius: 8px;">
         <h3>Добавить / Обновить принтер</h3>
-        <div class="field"><label>ID (Уникальный, англ.):</label><input type="text" id="p_id" placeholder="L1" style="width:100%; padding:8px;"></div>
-        <div class="field"><label>Имя линии:</label><input type="text" id="p_name" placeholder="Линия Упаковки" style="width:100%; padding:8px;"></div>
-        <div class="field"><label>IP адрес:</label><input type="text" id="p_ip" placeholder="192.168.1.100" style="width:100%; padding:8px;"></div>
-        <div class="field"><label>Порт:</label><input type="text" id="p_port" placeholder="9100" style="width:100%; padding:8px;"></div>
-        <div class="field">
-            <label>Тип драйвера:</label>
-            <select id="p_driver" style="width:100%; padding:8px; margin-bottom:20px;">
-                <option value="savema">Savema (SPPL)</option>
-                <option value="videojet">Videojet (Zipher)</option>
-            </select>
+        <div style="max-width: 500px; background: var(--surface); padding: 20px; border-radius: 8px;">
+            <h3>Карточка устройства</h3>
+            <input type="number" id="p_id" readonly placeholder="ID Авто" style="width:100%; padding:8px; background: #333; margin-bottom: 5px;">
+            <div class="field">
+                <label>Название принтера (для мониторинга):</label>
+                <input type="text" id="p_name" placeholder="Savema 53-i (Линия 1)" style="width:100%; padding:8px;">
+            </div>
+            <div class="field">
+                <label>IP адрес:</label>
+                <input type="text" id="p_ip" placeholder="192.168.1.100" style="width:100%; padding:8px;">
+            </div>
+            <div class="field">
+                <label>Порт:</label>
+                <input type="text" id="p_port" value="9100" style="width:100%; padding:8px;">
+            </div>
+            <div class="field">
+                <label>Тип драйвера:</label>
+                <select id="p_driver" style="width:100%; padding:8px;">
+                    <option value="savema">Savema (SPPL)</option>
+                    <option value="videojet">Videojet (Zipher)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Привязать к линии при создании:</label>
+                <select id="p_line_id" style="width:100%; padding:8px;">
+                    <option value="0">-- Без линии --</option>
+                </select>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-top: 20px;">
+                <button class="btn" style="background: var(--success); flex: 2;" onclick="addPrinter()">СОХРАНИТЬ</button>
+                <button class="btn" style="background: #555; flex: 1;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
+            </div>
         </div>
-        <button class="btn" style="background: var(--success); width: 100%;" onclick="addPrinter()">СОХРАНИТЬ</button>
     </div>
+
+    <hr style="border: 1px solid #333; margin: 30px 0;">
+    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 300px; background: var(--surface); padding: 20px; border-radius: 8px;">
+            <h3>Создать производственную линию</h3>
+            <div class="field"><label>Название линии:</label><input type="text" id="l_name" placeholder="Линия розлива №1" style="width:100%; padding:8px;"></div>
+            <div class="field"><label>Описание:</label><input type="text" id="l_desc" placeholder="Цех А" style="width:100%; padding:8px;"></div>
+            <button class="btn" style="background: var(--primary); width: 100%; margin-top: 10px;" onclick="saveLine()">СОЗДАТЬ ЛИНИЮ</button>
+        </div>
+
+        <div style="flex: 1; min-width: 300px; background: var(--surface); padding: 20px; border-radius: 8px;">
+            <h3>Привязать принтер к линии</h3>
+            <div class="field"><label>Линия:</label><select id="assign_line" style="width:100%; padding:8px;"></select></div>
+            <div class="field"><label>Принтер:</label><select id="assign_printer" style="width:100%; padding:8px;"></select></div>
+            <div class="field">
+                <label>Роль принтера:</label>
+                <select id="assign_role" style="width:100%; padding:8px;">
+                    <option value="PRIMARY">Основной (Печать кодов)</option>
+                    <option value="SECONDARY">Дублирующий</option>
+                    <option value="BOX">Групповая упаковка</option>
+                </select>
+            </div>
+            <button class="btn" style="background: var(--warning); color: black; width: 100%; margin-top: 10px;" onclick="assignPrinter()">ПРИВЯЗАТЬ</button>
+        </div>
+    </div>
+
+    <h4>Текущие привязки (Линия <-> Принтер)</h4>
+    <table style="width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.8rem;">
+        <thead>
+        <tr style="text-align: left; border-bottom: 1px solid #444;">
+            <th>Линия</th><th>Принтер</th><th>Роль</th>
+        </tr>
+        </thead>
+        <tbody id="assignments-table"></tbody>
+    </table>
 
     <hr style="border: 1px solid #333; margin: 30px 0;">
     <h3>Список устройств в базе</h3>
@@ -131,147 +188,132 @@
     function switchTab(tabId) {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+
         document.getElementById(tabId).classList.add('active');
         if (event && event.currentTarget) event.currentTarget.classList.add('active');
 
-        // Обновляем данные при переходе на вкладки
-        if (tabId === 'settings') loadPrintersList();
+        if (tabId === 'settings') loadSettingsData();
         if (tabId === 'control') updatePrintTargets();
     }
 
-    // --- ВКЛАДКА 1: МОНИТОРИНГ ---
+    // --- МОНИТОРИНГ ---
     async function fetchPrintersStatus() {
         try {
             const response = await fetch('/api/printers');
             const data = await response.json();
-            // ВАЖНО: передаем именно data.printers и data.logs
-            renderPrintersGrid(data.printers);
-            renderLogs(data.logs);
+            if (data.printers) renderPrintersGrid(data.printers);
+            if (data.logs) renderLogs(data.logs);
         } catch (error) {
             console.error("Ошибка связи:", error);
         }
     }
 
-    function renderPrintersGrid(printers) {
+    function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
-        if (!printers || printers.length === 0) {
-            grid.innerHTML = '<div style="color: var(--text-muted);">Нет настроенных принтеров.</div>';
-            return;
+
+        // 1. Отрисовка Линий
+        if (data.lines) {
+            data.lines.forEach(line => {
+                if (!line.printers || line.printers.length === 0) return;
+
+                // Создаем заголовок линии
+                grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; border-left: 4px solid var(--primary); padding-left: 15px;">
+                    <h2 style="margin:0;">${line.name} <small style="color:var(--text-muted); font-size:0.9rem;">— ${line.description}</small></h2>
+                </div>`;
+
+                line.printers.forEach(p => grid.innerHTML += createPrinterCard(p));
+            });
         }
 
-        printers.forEach(p => {
-            let cardClass = p.status.includes('ОФФЛАЙН') ? 'offline' : (p.status && p.status !== 'INITIALIZING' ? 'online' : '');
-            let queueWarning = (parseInt(p.queue) < 20) ? 'color: var(--warning);' : '';
+        // 2. Отрисовка непривязанных принтеров
+        if (data.unassigned && data.unassigned.length > 0) {
+            grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;"><h3>Вне линий (Тест/Резерв)</h3></div>`;
+            data.unassigned.forEach(p => grid.innerHTML += createPrinterCard(p));
+        }
+    }
 
-            grid.innerHTML += `
-            <div class="card ${cardClass}">
-                <div class="card-header">
-                    <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
-                    <span class="status-badge">${p.status || 'ИНИЦИАЛИЗАЦИЯ'}</span>
-                </div>
-                <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
-                <div>
-                <div style="font-size: 0.8rem; color: var(--text-muted);">Риббон</div>
-                <div style="font-weight: bold;">${p.ribbon} м.</div>
-                </div>
-                <div>
-                    <div style="font-size: 0.8rem; color: var(--text-muted);">Скорость</div>
-                    <div style="font-weight: bold;">${p.speed} мм/с</div>
-                </div>
-                <div>
-                    <div style="font-size: 0.8rem; color: var(--text-muted);">Отпечатано</div>
-                    <div style="font-weight: bold; color: var(--primary);">${p.cur_count} шт.</div>
-                </div>
-                <div>
-                    <div style="font-size: 0.8rem; color: var(--text-muted);">Шаблон</div>
-                    <div style="font-weight: bold;">${p.cur_template}</div>
-                </div>
-                <div style="text-align: right;">
-                    <div style="font-size: 0.8rem; color: var(--text-muted);">Очередь "ЧЗ"</div>
-                    <div style="font-weight: bold; ${queueWarning}">${p.queue} шт.</div>
-                </div>
+    // Выносим создание карточки в отдельную функцию, чтобы не дублировать код
+    function createPrinterCard(p) {
+        let cardClass = p.status.includes('ОФФЛАЙН') ? 'offline' : (p.status && p.status !== 'INITIALIZING' ? 'online' : '');
+        let queueWarning = (parseInt(p.queue) < 20) ? 'color: var(--warning);' : '';
+
+        return `
+        <div class="card ${cardClass}">
+            <div class="card-header">
+                <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
+                <span class="status-badge">${p.status || 'ИНИЦИАЛИЗАЦИЯ'}</span>
             </div>
-                <div style="color: var(--text-muted); font-size: 0.8rem;">IP: ${p.ip}:${p.port}</div>
-            </div>`;
-        });
+            <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
+                <div><div style="font-size: 0.7rem; color: var(--text-muted);">Риббон</div><b>${p.ribbon} м.</b></div>
+                <div><div style="font-size: 0.7rem; color: var(--text-muted);">Скорость</div><b>${p.speed}</b></div>
+                <div><div style="font-size: 0.7rem; color: var(--text-muted);">Счетчик</div><b>${p.cur_count}</b></div>
+                <div style="text-align: right;"><div style="font-size: 0.7rem; color: var(--text-muted);">Очередь</div><b style="${queueWarning}">${p.queue}</b></div>
+            </div>
+            <div style="color: var(--text-muted); font-size: 0.8rem;">${p.ip}:${p.port} | ${p.cur_template || 'Нет шаблона'}</div>
+        </div>`;
     }
 
     function renderLogs(logs) {
         const logBox = document.getElementById('event-log');
-        logBox.innerHTML = '';
-        if (!logs) return;
-
-        logs.forEach(log => {
-            let color = "var(--text)";
-            if (log.event.includes("ПОТЕРЯ")) color = "var(--danger)";
-            if (log.event.includes("восстановлена") || log.event.includes("успешно")) color = "var(--success)";
-
-            logBox.innerHTML += `<div style="margin-bottom: 5px; color: ${color};">
-                <span style="color: var(--text-muted);">[${log.time}]</span>
-                <strong>${log.printer}:</strong> ${log.event}
-            </div>`;
-        });
+        if (!logBox) return;
+        logBox.innerHTML = logs.map(log => {
+            let color = log.event.includes("ПОТЕРЯ") ? "var(--danger)" : (log.event.includes("восстановлена") ? "var(--success)" : "var(--text)");
+            return `<div style="margin-bottom: 5px; color: ${color};"><span style="color: var(--text-muted);">[${log.time}]</span> <strong>${log.printer}:</strong> ${log.event}</div>`;
+        }).join('');
     }
 
-    // --- ВКЛАДКА 2: УПРАВЛЕНИЕ ---
-    async function updatePrintTargets() {
-        const res = await fetch('/api/printers');
-        const data = await res.json();
-        const select = document.getElementById('print_target');
-        select.innerHTML = '';
-        if (!data.printers) return;
-
-        data.printers.forEach(p => {
-            select.innerHTML += `<option value="${p.id}">${p.name} (${p.status})</option>`;
-        });
+    // --- НАСТРОЙКИ (ПРИНТЕРЫ) ---
+    function clearPrinterForm() {
+        document.getElementById('p_id').value = '';
+        document.getElementById('p_name').value = '';
+        document.getElementById('p_ip').value = '';
+        document.getElementById('p_port').value = '9100';
+        document.getElementById('p_line_id').value = '0';
     }
 
-    function addVarField() {
-        document.getElementById('print_fields_container').innerHTML += `
-            <div class="var-row" style="display:flex; gap:10px; margin-bottom:10px;">
-                <input type="text" class="var-key" placeholder="Имя поля" style="flex:1; padding:8px;">
-                <input type="text" class="var-val" placeholder="Значение" style="flex:2; padding:8px;">
-                <button class="btn" style="background: var(--danger);" onclick="this.parentElement.remove()">X</button>
-            </div>
-        `;
-    }
-
-    async function sendPrintJob() {
-        const job = {
-            printer_id: document.getElementById('print_target').value,
-            template: document.getElementById('print_template').value,
-            fields: {}
+    async function addPrinter() {
+        const printerData = {
+            id: parseInt(document.getElementById('p_id').value) || 0,
+            name: document.getElementById('p_name').value,
+            ip: document.getElementById('p_ip').value,
+            port: parseInt(document.getElementById('p_port').value) || 9100,
+            driver_type: document.getElementById('p_driver').value,
+            is_active: true
         };
 
-        document.querySelectorAll('.var-row').forEach(row => {
-            const key = row.querySelector('.var-key').value.trim();
-            const val = row.querySelector('.var-val').value.trim();
-            if (key) job.fields[key] = val;
+        const res = await fetch('/api/printers/add', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(printerData)
         });
 
-        try {
-            const res = await fetch('/api/print', { method: 'POST', body: JSON.stringify(job) });
-            const text = await res.text();
-            alert(res.ok ? "Успех: " + text : "Ошибка: " + text);
-        } catch (e) { alert("Сбой связи с сервером РОВНО"); }
+        if (res.ok) {
+            const result = await res.json();
+            const newPrinterID = result.id;
+            const lineId = parseInt(document.getElementById('p_line_id').value);
+
+            // Если в форме выбрана линия — сразу привязываем
+            if (lineId > 0) {
+                await fetch('/api/lines/assign', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ line_id: lineId, printer_id: newPrinterID, role: "PRIMARY" })
+                });
+            }
+            alert("Сохранено!");
+            loadSettingsData();
+            clearPrinterForm();
+        }
     }
 
-    // --- ВКЛАДКА 3: НАСТРОЙКИ ---
     async function loadPrintersList() {
         const res = await fetch('/api/printers');
         const data = await res.json();
         const table = document.getElementById('printers-list-table');
-        table.innerHTML = '';
-        if (!data.printers) return;
-
-        data.printers.forEach(p => {
-            table.innerHTML += `
+        table.innerHTML = (data.printers || []).map(p => `
             <tr style="border-bottom: 1px solid #333;">
                 <td style="padding: 10px;">${p.id}</td><td>${p.name}</td><td>${p.ip}</td><td>${p.port}</td>
-                <td><button class="btn" onclick="editPrinter('${p.id}', '${p.name}', '${p.ip}', '${p.port}','${p.driver_type}')">⚙️ Изменить</button></td>
-            </tr>`;
-        });
+                <td><button class="btn" onclick="editPrinter(${p.id}, '${p.name}', '${p.ip}', ${p.port}, '${p.driver_type}')">⚙️ Изменить</button></td>
+            </tr>`).join('');
     }
 
     function editPrinter(id, name, ip, port, driver) {
@@ -283,33 +325,106 @@
         window.scrollTo(0,0);
     }
 
-    async function addPrinter() {
+    // --- НАСТРОЙКИ (ЛИНИИ) ---
+    async function saveLine() {
         const data = {
-            id: document.getElementById('p_id').value,
-            name: document.getElementById('p_name').value,
-            ip: document.getElementById('p_ip').value,
-            port: parseInt(document.getElementById('p_port').value) || 0,
-            driver_type: document.getElementById('p_driver').value
+            name: document.getElementById('l_name').value,
+            description: document.getElementById('l_desc').value,
+            is_active: true
         };
-
-        const res = await fetch('/api/printers/add', {
-            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
+        const res = await fetch('/api/lines', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
         });
-
         if (res.ok) {
-            alert("Принтер успешно сохранен!");
-            document.getElementById('p_id').value = '';
-            document.getElementById('p_name').value = '';
-            document.getElementById('p_ip').value = '';
-            document.getElementById('p_port').value = '';
-            document.getElementById('p_driver').value = '';
-            switchTab('monitoring');
-        } else {
-            alert("Ошибка при сохранении");
+            alert("Линия создана!");
+            document.getElementById('l_name').value = '';
+            document.getElementById('l_desc').value = '';
+            loadSettingsData();
         }
     }
 
-    // Запускаем фоновый опрос раз в 2 секунды
+    async function assignPrinter() {
+        const data = {
+            line_id: parseInt(document.getElementById('assign_line').value),
+            printer_id: parseInt(document.getElementById('assign_printer').value),
+            role: document.getElementById('assign_role').value
+        };
+        const res = await fetch('/api/lines/assign', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        if (res.ok) alert("Принтер привязан к линии!");
+    }
+
+    async function loadSettingsData() {
+        loadPrintersList();
+
+        // 1. Загружаем Линии
+        const linesRes = await fetch('/api/lines');
+        const lines = await linesRes.json();
+        const lineOptions = lines ? lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('') : '';
+        document.getElementById('assign_line').innerHTML = lineOptions;
+        document.getElementById('p_line_id').innerHTML = `<option value="0">-- Без линии --</option>` + lineOptions;
+
+        // 2. Загружаем Принтеры
+        const printersRes = await fetch('/api/printers');
+        const data = await printersRes.json();
+        document.getElementById('assign_printer').innerHTML = (data.printers || []).map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+
+        // 3. НОВОЕ: Загружаем Текущие привязки в таблицу
+        const assignRes = await fetch('/api/assignments');
+        const assignments = await assignRes.json();
+        const assignTable = document.getElementById('assignments-table');
+
+        assignTable.innerHTML = (assignments || []).map(a => `
+            <tr style="border-bottom: 1px solid #333;">
+                <td style="padding: 8px;">${a.line_name}</td>
+                <td>${a.printer_name}</td>
+                <td><span style="font-size: 0.7rem; background: #444; padding: 2px 5px; border-radius: 3px;">${a.role}</span></td>
+            </tr>
+        `).join('');
+    }
+
+    // --- УПРАВЛЕНИЕ ПЕЧАТЬЮ ---
+    async function updatePrintTargets() {
+        const res = await fetch('/api/printers');
+        const data = await res.json();
+        const select = document.getElementById('print_target');
+        if (!select || !data.printers) return;
+        select.innerHTML = data.printers.map(p => `<option value="${p.id}">${p.name} (${p.status})</option>`).join('');
+    }
+
+    async function sendPrintJob() {
+        const job = {
+            printer_id: document.getElementById('print_target').value,
+            template: document.getElementById('print_template').value,
+            fields: {}
+        };
+        document.querySelectorAll('.var-row').forEach(row => {
+            const key = row.querySelector('.var-key').value.trim();
+            const val = row.querySelector('.var-val').value.trim();
+            if (key) job.fields[key] = val;
+        });
+        try {
+            const res = await fetch('/api/print', { method: 'POST', body: JSON.stringify(job) });
+            const text = await res.text();
+            alert(res.ok ? "Успех: " + text : "Ошибка: " + text);
+        } catch (e) { alert("Сбой связи"); }
+    }
+
+    function addVarField() {
+        document.getElementById('print_fields_container').insertAdjacentHTML('beforeend', `
+            <div class="var-row" style="display:flex; gap:10px; margin-bottom:10px;">
+                <input type="text" class="var-key" placeholder="Имя поля" style="flex:1; padding:8px;">
+                <input type="text" class="var-val" placeholder="Значение" style="flex:2; padding:8px;">
+                <button class="btn" style="background: var(--danger);" onclick="this.parentElement.remove()">X</button>
+            </div>
+        `);
+    }
+
     setInterval(fetchPrintersStatus, 2000);
     fetchPrintersStatus();
 </script>
