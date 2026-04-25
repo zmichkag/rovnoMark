@@ -201,8 +201,10 @@
         try {
             const response = await fetch('/api/printers');
             const data = await response.json();
-            if (data.printers) renderPrintersGrid(data.printers);
-            if (data.logs) renderLogs(data.logs);
+
+            // Теперь передаем весь объект, а не data.printers
+            renderPrintersGrid(data);
+            renderLogs(data.logs);
         } catch (error) {
             console.error("Ошибка связи:", error);
         }
@@ -212,25 +214,58 @@
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
 
-        // 1. Отрисовка Линий
+        // 1. Отрисовка сгруппированных по линиям принтеров
         if (data.lines) {
             data.lines.forEach(line => {
-                if (!line.printers || line.printers.length === 0) return;
+                // Если в линии есть принтеры — рисуем заголовок линии
+                if (line.printers && line.printers.length > 0) {
+                    grid.innerHTML += `
+                    <div style="grid-column: 1/-1; margin-top: 20px; border-left: 4px solid var(--primary); padding-left: 15px;">
+                        <h2 style="margin:0;">${line.name} <small style="color:var(--text-muted); font-size:0.9rem;">— ${line.description}</small></h2>
+                    </div>`;
 
-                // Создаем заголовок линии
-                grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; border-left: 4px solid var(--primary); padding-left: 15px;">
-                    <h2 style="margin:0;">${line.name} <small style="color:var(--text-muted); font-size:0.9rem;">— ${line.description}</small></h2>
-                </div>`;
-
-                line.printers.forEach(p => grid.innerHTML += createPrinterCard(p));
+                    line.printers.forEach(p => {
+                        grid.innerHTML += createPrinterCard(p);
+                    });
+                }
             });
         }
 
         // 2. Отрисовка непривязанных принтеров
         if (data.unassigned && data.unassigned.length > 0) {
-            grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;"><h3>Вне линий (Тест/Резерв)</h3></div>`;
-            data.unassigned.forEach(p => grid.innerHTML += createPrinterCard(p));
+            grid.innerHTML += `
+            <div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;">
+                <h3>Вне линий (Тест/Резерв)</h3>
+            </div>`;
+            data.unassigned.forEach(p => {
+                grid.innerHTML += createPrinterCard(p);
+            });
         }
+
+        if ((!data.lines || data.lines.length === 0) && (!data.unassigned || data.unassigned.length === 0)) {
+            grid.innerHTML = '<div style="color: var(--text-muted);">Нет настроенных принтеров.</div>';
+        }
+    }
+
+    // Вспомогательная функция, чтобы не дублировать код карточки
+    function createPrinterCard(p) {
+        let cardClass = p.status.includes('ОФФЛАЙН') ? 'offline' : (p.status && p.status !== 'INITIALIZING' ? 'online' : '');
+        let queueWarning = (parseInt(p.queue) < 20) ? 'color: var(--warning);' : '';
+
+        return `
+    <div class="card ${cardClass}">
+        <div class="card-header">
+            <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
+            <span class="status-badge">${p.status || 'ИНИЦИАЛИЗАЦИЯ'}</span>
+        </div>
+        <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
+            <div><div style="font-size: 0.7rem; color: var(--text-muted);">Риббон</div><b>${p.ribbon} м.</b></div>
+            <div><div style="font-size: 0.7rem; color: var(--text-muted);">Скорость</div><b>${p.speed || '0'}</b></div>
+            <div><div style="font-size: 0.7rem; color: var(--text-muted);">Счетчик</div><b>${p.cur_count || '0'}</b></div>
+            <div style="text-align: right;"><div style="font-size: 0.7rem; color: var(--text-muted);">Очередь</div><b style="${queueWarning}">${p.queue}</b></div>
+        </div>
+        <div style="color: var(--text-muted); font-size: 0.8rem;">${p.ip}:${p.port} | ${p.cur_template || 'Нет шаблона'}</div>
+    </div>`;
     }
 
     // Выносим создание карточки в отдельную функцию, чтобы не дублировать код

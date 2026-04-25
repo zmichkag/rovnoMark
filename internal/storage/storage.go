@@ -154,9 +154,11 @@ func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
 	var list []core.PrinterConfig
 	for rows.Next() {
 		var p core.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err == nil {
-			list = append(list, p)
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
+			log.Printf("ОШИБКА ЧТЕНИЯ ПРИНТЕРА ИЗ БД: %v", err)
+			continue
 		}
+		list = append(list, p)
 	}
 	return list, nil
 }
