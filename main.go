@@ -146,7 +146,7 @@ func main() {
 			return
 		}
 
-		// Находим нужный принтер в диспетчере (теперь по int)
+		// Находим нужный принтер в диспетчере
 		p := manager.GetPrinter(idInt)
 		if p == nil {
 			http.Error(w, "Принтер не найден", http.StatusNotFound)
