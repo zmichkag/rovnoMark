@@ -253,27 +253,6 @@
         let queueWarning = (parseInt(p.queue) < 20) ? 'color: var(--warning);' : '';
 
         return `
-    <div class="card ${cardClass}">
-        <div class="card-header">
-            <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
-            <span class="status-badge">${p.status || 'ИНИЦИАЛИЗАЦИЯ'}</span>
-        </div>
-        <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
-            <div><div style="font-size: 0.7rem; color: var(--text-muted);">Риббон</div><b>${p.ribbon} м.</b></div>
-            <div><div style="font-size: 0.7rem; color: var(--text-muted);">Скорость</div><b>${p.speed || '0'}</b></div>
-            <div><div style="font-size: 0.7rem; color: var(--text-muted);">Счетчик</div><b>${p.cur_count || '0'}</b></div>
-            <div style="text-align: right;"><div style="font-size: 0.7rem; color: var(--text-muted);">Очередь</div><b style="${queueWarning}">${p.queue}</b></div>
-        </div>
-        <div style="color: var(--text-muted); font-size: 0.8rem;">${p.ip}:${p.port} | ${p.cur_template || 'Нет шаблона'}</div>
-    </div>`;
-    }
-
-    // Выносим создание карточки в отдельную функцию, чтобы не дублировать код
-    function createPrinterCard(p) {
-        let cardClass = p.status.includes('ОФФЛАЙН') ? 'offline' : (p.status && p.status !== 'INITIALIZING' ? 'online' : '');
-        let queueWarning = (parseInt(p.queue) < 20) ? 'color: var(--warning);' : '';
-
-        return `
         <div class="card ${cardClass}">
             <div class="card-header">
                 <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
@@ -309,7 +288,7 @@
 
     async function addPrinter() {
         const printerData = {
-            id: parseInt(document.getElementById('p_id').value) || 0,
+            id: parseInt(document.getElementById('p_id').value)  || 0,
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value) || 9100,

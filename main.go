@@ -67,7 +67,7 @@ func main() {
 			return
 		}
 
-		w.WriteHeader(http.StatusCreated)
+		//w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, "Принтер добавлен в систему")
 	})
 
@@ -113,7 +113,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		// w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"lines":      responseLines,
 			"unassigned": unassigned,
