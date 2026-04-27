@@ -323,7 +323,8 @@
         const res = await fetch('/api/printers');
         const data = await res.json();
         const table = document.getElementById('printers-list-table');
-        table.innerHTML = (data.printers || []).map(p => `
+
+                table.innerHTML = (data.all_printers || []).map(p => `
             <tr style="border-bottom: 1px solid #333;">
                 <td style="padding: 10px;">${p.id}</td><td>${p.name}</td><td>${p.ip}</td><td>${p.port}</td>
                 <td><button class="btn" onclick="editPrinter(${p.id}, '${p.name}', '${p.ip}', ${p.port}, '${p.driver_type}')">⚙️ Изменить</button></td>
@@ -370,7 +371,15 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(data)
         });
-        if (res.ok) alert("Принтер привязан к линии!");
+
+        if (res.ok) {
+            alert("Принтер привязан к линии!");
+            loadSettingsData();
+        } else {
+            // Если сервер вернул ошибку, читаем её и показываем
+            const errText = await res.text();
+            alert("Ошибка привязки: " + errText);
+        }
     }
 
     async function loadSettingsData() {
@@ -383,12 +392,26 @@
         document.getElementById('assign_line').innerHTML = lineOptions;
         document.getElementById('p_line_id').innerHTML = `<option value="0">-- Без линии --</option>` + lineOptions;
 
-        // 2. Загружаем Принтеры
+        // 2. ИСПРАВЛЕНИЕ: Собираем всех принтеров для привязки
         const printersRes = await fetch('/api/printers');
         const data = await printersRes.json();
-        document.getElementById('assign_printer').innerHTML = (data.printers || []).map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 
-        // 3. НОВОЕ: Загружаем Текущие привязки в таблицу
+        let allPrinters = [];
+        // Собираем из линий
+        if (data.lines) {
+            data.lines.forEach(line => {
+                if (line.printers) allPrinters = allPrinters.concat(line.printers);
+            });
+        }
+        // Добавляем непривязанные
+        if (data.unassigned) {
+            allPrinters = allPrinters.concat(data.unassigned);
+        }
+
+        const printerSelect = document.getElementById('assign_printer');
+        printerSelect.innerHTML = allPrinters.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+
+        // 3. Загружаем Текущие привязки в таблицу
         const assignRes = await fetch('/api/assignments');
         const assignments = await assignRes.json();
         const assignTable = document.getElementById('assignments-table');

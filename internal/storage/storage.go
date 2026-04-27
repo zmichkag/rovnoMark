@@ -248,7 +248,11 @@ func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for rows.Next() {
 		var lName, pName, role string
-		rows.Scan(&lName, &pName, &role)
+
+		if err := rows.Scan(&lName, &pName, &role); err != nil {
+			log.Printf("ОШИБКА SCAN В ПРИВЯЗКАХ: %v", err)
+			continue
+		}
 		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
 	}
 	return result, nil

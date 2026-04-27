@@ -74,6 +74,7 @@ func main() {
 	// 2. Настраиваем API Маршруты
 
 	// API для дашборда (Мониторинг)
+	// API для дашборда (Мониторинг)
 	http.HandleFunc("/api/printers", func(w http.ResponseWriter, r *http.Request) {
 		states, logs := manager.GetDashboardData()
 		configs, _ := store.GetAllPrinters()
@@ -90,12 +91,14 @@ func main() {
 			Printers []PrinterInfo `json:"printers"`
 		}
 
-		// Группируем принтеры
 		grouped := make(map[int][]PrinterInfo)
 		var unassigned []PrinterInfo
+		var allForUI []PrinterInfo // Список для Настроек
 
 		for _, cfg := range configs {
 			info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
+			allForUI = append(allForUI, info) // Собираем всех в один список
+
 			if lineID, ok := lineMap[cfg.ID]; ok {
 				grouped[lineID] = append(grouped[lineID], info)
 			} else {
@@ -103,7 +106,6 @@ func main() {
 			}
 		}
 
-		// Формируем финальный ответ
 		var responseLines []LineGroup
 		for _, l := range lines {
 			responseLines = append(responseLines, LineGroup{
@@ -113,11 +115,12 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		// w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusOK) // Исправлено на 200 OK
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"lines":      responseLines,
-			"unassigned": unassigned,
-			"logs":       logs,
+			"lines":        responseLines,
+			"unassigned":   unassigned,
+			"all_printers": allForUI, // <--- Отдаем плоский список для таблиц и выпадаек
+			"logs":         logs,
 		})
 	})
 
@@ -187,7 +190,13 @@ func main() {
 			Role      string `json:"role"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
-		store.AssignPrinterToLine(req.LineID, req.PrinterID, req.Role)
+
+		// Ловим ошибку от БД
+		err := store.AssignPrinterToLine(req.LineID, req.PrinterID, req.Role)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 
