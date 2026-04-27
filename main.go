@@ -53,10 +53,7 @@ func main() {
 		}
 		cfg.ID = int(newID)
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"id": newID})
-
-		// Сразу добавляем в активный пул (чтобы не перезапускать .exe)
+		// Сразу добавляем в активный пул
 		switch cfg.DriverType {
 		case "savema":
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
@@ -67,8 +64,8 @@ func main() {
 			return
 		}
 
-		//w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, "Принтер добавлен в систему")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"id": newID})
 	})
 
 	// 2. Настраиваем API Маршруты

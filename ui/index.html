@@ -430,8 +430,13 @@
         const res = await fetch('/api/printers');
         const data = await res.json();
         const select = document.getElementById('print_target');
-        if (!select || !data.printers) return;
-        select.innerHTML = data.printers.map(p => `<option value="${p.id}">${p.name} (${p.status})</option>`).join('');
+
+        // Используем all_printers вместо printers
+        if (!select || !data.all_printers) return;
+
+        select.innerHTML = data.all_printers.map(p =>
+            `<option value="${p.id}">${p.name} (${p.status})</option>`
+        ).join('');
     }
 
     async function sendPrintJob() {
