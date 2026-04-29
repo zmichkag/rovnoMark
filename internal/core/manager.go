@@ -58,9 +58,9 @@ type LogEntry struct {
 
 type PrinterManager struct {
 	mu       sync.RWMutex
-	printers map[int]Printer       // Ключ теперь int
-	configs  map[int]PrinterConfig // Ключ теперь int
-	states   map[int]PrinterState  // Ключ теперь int
+	printers map[int]Printer
+	configs  map[int]PrinterConfig
+	states   map[int]PrinterState
 	logs     []LogEntry
 }
 
