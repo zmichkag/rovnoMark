@@ -177,3 +177,22 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 
 	return strings.TrimSpace(parts[3]), nil
 }
+
+func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
+
+	count := 0
+	for _, code := range codes {
+		// ВАЖНО: Если ваш шаблон ожидает ~1 вместо спецсимвола GS (\x1d),
+		// мы делаем замену прямо перед отправкой.
+		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
+
+		// Для Videojet: JDI|аллокация|поле=значение|[cite: 2]
+		cmd := fmt.Sprintf("JDI|1|%s=%s|", fieldName, cleanCode)
+		_, err := d.sendRaw(cmd)
+		if err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
+}

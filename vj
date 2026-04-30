@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<ImageDesign xml:space="default">
+    <Header DesignedFor="DataFlex 6320(32mm) - Continuous">
+        <ClStVersionInfo>PyOA!LMe37jF5gGD_OEeQJPAIR3Et2HVCOk4RKDB93Hl9AjBVgIOzL2x64vRUW8LPDPLLM!86mAHEGQD6UCQGlU9zB</ClStVersionInfo>
+        <LastDownloaded>45848.686100</LastDownloaded>
+        <DateOffset Name="1">
+            <DefaultOffset>
+                <Day>120</Day>
+            </DefaultOffset>
+            <CurrentOffset>
+                <Day>120</Day>
+            </CurrentOffset>
+        </DateOffset>
+    </Header>
+
+    <SubImage ImageReference="1">
+        <SubHeader FormatName="Default" PrinterType="DataFlex 6320(32mm) - Continuous">
+            <ImageWidth>1592</ImageWidth>
+            <ImageHeight>992</ImageHeight>
+            <ImageRotation>0</ImageRotation>
+            <MaxImageWidth>3000</MaxImageWidth>
+            <MaxImageHeight>1000</MaxImageHeight>
+            <XRes>0.120000</XRes>
+            <CurrentOrientation>0</CurrentOrientation>
+        </SubHeader>
+
+
+        <Field Name="Field00">
+            <FldType>DateText</FldType>
+            <X>175</X>
+            <Y>0</Y>
+            <W>1417</W>
+            <H>375</H>
+            <Ln>1</Ln>
+            <CalcData><![CDATA[10.07.2025]]></CalcData>
+            <LoggedField></LoggedField>
+            <Data>
+                <Object Static="0" Parse="1">
+                    <DataType>2</DataType>
+                    <Default><![CDATA[dd'.'MM'.'yyyy]]></Default>
+                </Object>
+            </Data>
+            <Text>
+                <Font>
+                    <Pitch>9</Pitch>
+                    <XMag>89</XMag>
+                </Font>
+                <Bold Weight="2">1</Bold>
+            </Text>
+        </Field>
+
+
+        <Field Name="Field01">
+            <FldType>ComplexText</FldType>
+            <CLSID>{9A1D9CED-4EA5-11D5-8DAE-0050DAFE8A9F}</CLSID>
+            <X>600</X>
+            <Y>625</Y>
+            <W>350</W>
+            <H>367</H>
+            <Ln>1</Ln>
+            <CalcData><![CDATA[A1]]></CalcData>
+            <LoggedField></LoggedField>
+            <Data>
+                <Object>
+                    <DataType>0</DataType>
+                    <Default><![CDATA[A1]]></Default>
+                </Object>
+            </Data>
+            <Text>
+                <Font>
+                    <Pitch>8</Pitch>
+                </Font>
+                <Bold Weight="2">1</Bold>
+                <Block Compatibility="0">
+                    <BlkW>350</BlkW>
+                    <BlkH>367</BlkH>
+                    <MinFontSize>4</MinFontSize>
+                </Block>
+            </Text>
+        </Field>
+
+
+        <Field Name="Field02" TXField="1">
+            <FldType>ComplexText</FldType>
+            <CLSID>{9A1D9CED-4EA5-11D5-8DAE-0050DAFE8A9F}</CLSID>
+            <X>242</X>
+            <Y>617</Y>
+            <W>241</W>
+            <H>366</H>
+            <Ln>1</Ln>
+            <CalcData><![CDATA[1]]></CalcData>
+            <LoggedField></LoggedField>
+            <Data>
+                <Object Static="0">
+                    <DataType>0</DataType>
+                    <Default><![CDATA[1]]></Default>
+                    <VarText>
+                        <Prompt><![CDATA[Укажите номер смены]]></Prompt>
+                        <Mask><![CDATA[0-9]]></Mask>
+                        <UserEnterData><![CDATA[2]]></UserEnterData>
+                    </VarText>
+                </Object>
+            </Data>
+            <Text>
+                <Font>
+                    <Pitch>9</Pitch>
+                </Font>
+                <Bold Weight="2">1</Bold>
+                <Block Compatibility="0">
+                    <BlkW>241</BlkW>
+                    <BlkH>367</BlkH>
+                    <MinFontSize>4</MinFontSize>
+                </Block>
+            </Text>
+        </Field>
+
+
+        <Field Name="Copy of Field00">
+            <FldType>OffsetDateText</FldType>
+            <X>175</X>
+            <Y>308</Y>
+            <W>1417</W>
+            <H>375</H>
+            <Ln>1</Ln>
+            <CalcData><![CDATA[07.11.2025]]></CalcData>
+            <LoggedField></LoggedField>
+            <Data>
+                <Object Static="0" Parse="1">
+                    <DataType>3</DataType>
+                    <Locale>RU</Locale>
+                    <Default><![CDATA[dd'.'MM'.'yyyy]]></Default>
+                    <OffsetDate SrcOffset="1"/>
+                </Object>
+            </Data>
+            <Text>
+                <Font>
+                    <Pitch>9</Pitch>
+                    <XMag>89</XMag>
+                </Font>
+                <Bold Weight="2">1</Bold>
+            </Text>
+        </Field>
+
+
+        <Field Name="Copy of Field01">
+            <FldType>ComplexText</FldType>
+            <CLSID>{9A1D9CED-4EA5-11D5-8DAE-0050DAFE8A9F}</CLSID>
+            <X>1075</X>
+            <Y>617</Y>
+            <W>492</W>
+            <H>350</H>
+            <Ln>1</Ln>
+            <CalcData><![CDATA[№1]]></CalcData>
+            <Data>
+                <Object>
+                    <DataType>0</DataType>
+                    <Default><![CDATA[№1]]></Default>
+                </Object>
+            </Data>
+            <Text>
+                <Font>
+                    <Pitch>14</Pitch>
+                </Font>
+                <Bold Weight="2">1</Bold>
+                <Block Compatibility="0">
+                    <BlkW>491</BlkW>
+                    <BlkH>350</BlkH>
+                    <MinFontSize>4</MinFontSize>
+                </Block>
+            </Text>
+        </Field>
+    </SubImage>
+
+    <GenericSettings>
+        <ImageMapping>
+            <Map SubIMageRef="1">1</Map>
+        </ImageMapping>
+        <Parameters>
+            <ParamSet Name="Local">
+                <Param Name="Devices/PHds/1/PrintInformation/IntermittentPrintRegistration">7</Param>
+                <Param Name="Devices/PHds/1/PrintInformation/ContinuousRegistrationDelay">0</Param>
+                <Param Name="Devices/PHds/1/PrintInformation/ContinuousRepeatDistance">100</Param>
+                <Param Name="Devices/PHds/1/PrintInformation/ContinuousPrintsPerSignal">1</Param>
+            </ParamSet>
+            <ParamSet Name="Claricom"/>
+        </Parameters>
+    </GenericSettings>
+</ImageDesign>

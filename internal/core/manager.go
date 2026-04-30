@@ -12,6 +12,7 @@ import (
 type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
+	PrintBatch(fieldName string, codes []string) (int, error)
 	GetRemainingRibbon() (string, error)
 	GetQueueCapacity(queueName string) (string, error)
 	GetPrintSpeed() (string, error)

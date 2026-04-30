@@ -7,12 +7,12 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"rovnoMark/internal/drivers/videojet"
-	"rovnoMark/internal/storage"
 	"strconv"
 
 	"rovnoMark/internal/core"
 	"rovnoMark/internal/drivers/savema"
+	"rovnoMark/internal/drivers/videojet"
+	"rovnoMark/internal/storage"
 )
 
 //go:embed ui/*
@@ -22,7 +22,7 @@ func main() {
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
 
-	// Загружаем все принтеры из базы в работу
+	// 1. Загружаем все принтеры из базы в работу
 	savedPrinters, _ := store.GetAllPrinters()
 	for _, cfg := range savedPrinters {
 		if cfg.DriverType == "savema" {
@@ -38,22 +38,17 @@ func main() {
 			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
 			return
 		}
-
 		var cfg core.PrinterConfig
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		// Сохраняем в базу
 		newID, err := store.SavePrinter(cfg)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		cfg.ID = int(newID)
-
-		// Сразу добавляем в активный пул
 		switch cfg.DriverType {
 		case "savema":
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
@@ -63,15 +58,11 @@ func main() {
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"id": newID})
 	})
 
-	// 2. Настраиваем API Маршруты
-
-	// API для дашборда (Мониторинг)
-	// API для дашборда (Мониторинг)
+	// 3. API для дашборда (Мониторинг)
 	http.HandleFunc("/api/printers", func(w http.ResponseWriter, r *http.Request) {
 		states, logs := manager.GetDashboardData()
 		configs, _ := store.GetAllPrinters()
@@ -82,24 +73,18 @@ func main() {
 			core.PrinterConfig
 			core.PrinterState
 		}
-
 		type LineGroup struct {
 			core.LineConfig
 			Printers []PrinterInfo `json:"printers"`
 		}
 
 		grouped := make(map[int][]PrinterInfo)
-		var unassigned []PrinterInfo
-		var allForUI []PrinterInfo // Список для Настроек
-
+		var allForUI []PrinterInfo
 		for _, cfg := range configs {
 			info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
-			allForUI = append(allForUI, info) // Собираем всех в один список
-
+			allForUI = append(allForUI, info)
 			if lineID, ok := lineMap[cfg.ID]; ok {
 				grouped[lineID] = append(grouped[lineID], info)
-			} else {
-				unassigned = append(unassigned, info)
 			}
 		}
 
@@ -112,106 +97,50 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK) // Исправлено на 200 OK
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"lines":        responseLines,
-			"unassigned":   unassigned,
-			"all_printers": allForUI, // <--- Отдаем плоский список для таблиц и выпадаек
+			"all_printers": allForUI,
 			"logs":         logs,
 		})
 	})
 
-	// 3. API для отправки задания на печать
-	http.HandleFunc("/api/print", func(w http.ResponseWriter, r *http.Request) {
+	// 4. API для отправки ПАЧКИ (Честный Знак)
+	http.HandleFunc("/api/batch", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var job struct {
-			PrinterID string            `json:"printer_id"`
-			Template  string            `json:"template"`
-			Fields    map[string]string `json:"fields"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
-			http.Error(w, "Ошибка формата JSON", http.StatusBadRequest)
-			return
-		}
-
-		// КОНВЕРТАЦИЯ: превращаем строку "1" в число 1
-		idInt, err := strconv.Atoi(job.PrinterID)
-		if err != nil {
-			http.Error(w, "Некорректный ID принтера (должен быть числом)", http.StatusBadRequest)
-			return
-		}
-
-		// Находим нужный принтер в диспетчере
-		p := manager.GetPrinter(idInt)
-		if p == nil {
-			http.Error(w, "Принтер не найден", http.StatusNotFound)
-			return
-		}
-
-		// Отправляем задание через драйвер
-		if err := p.PrintTemplate(job.Template, job.Fields); err != nil {
-			http.Error(w, fmt.Sprintf("Ошибка печати: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "Задание успешно загружено в принтер")
-	})
-
-	// API для Линий
-	http.HandleFunc("/api/lines", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			lines, _ := store.GetAllLines()
-			json.NewEncoder(w).Encode(lines)
-		} else if r.Method == http.MethodPost {
-			var l core.LineConfig
-			json.NewDecoder(r.Body).Decode(&l)
-			store.SaveLine(l)
-			w.WriteHeader(http.StatusCreated)
-		}
-	})
-
-	// API для привязки принтера к линии
-	http.HandleFunc("/api/lines/assign", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
 			return
 		}
 		var req struct {
-			LineID    int    `json:"line_id"`
-			PrinterID int    `json:"printer_id"`
-			Role      string `json:"role"`
+			PrinterID string   `json:"printer_id"`
+			FieldName string   `json:"field_name"`
+			Codes     []string `json:"codes"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "JSON Error", http.StatusBadRequest)
+			return
+		}
+		idInt, _ := strconv.Atoi(req.PrinterID)
+		p := manager.GetPrinter(idInt)
+		if p == nil {
+			http.Error(w, "Printer not found", http.StatusNotFound)
+			return
+		}
 
-		// Ловим ошибку от БД
-		err := store.AssignPrinterToLine(req.LineID, req.PrinterID, req.Role)
+		// Вызываем метод Batch через унифицированный интерфейс[cite: 4]
+		loaded, err := p.PrintBatch(req.FieldName, req.Codes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-	})
 
-	// API для получения списка привязок
-	http.HandleFunc("/api/assignments", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			return
-		}
-		data, err := store.GetAssignments()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "success",
+			"loaded": loaded,
+		})
 	})
 
-	// 3. Раздача UI (Frontend)
+	// 5. Раздача UI (Frontend)
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))
 
