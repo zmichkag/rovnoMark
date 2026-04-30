@@ -65,12 +65,16 @@ type PrinterManager struct {
 }
 
 func NewPrinterManager() *PrinterManager {
-	return &PrinterManager{
+	pm := &PrinterManager{
 		printers: make(map[int]Printer),
 		configs:  make(map[int]PrinterConfig),
 		states:   make(map[int]PrinterState),
 		logs:     make([]LogEntry, 0),
 	}
+
+	go pm.backgroundPoller()
+
+	return pm
 }
 
 func (pm *PrinterManager) AddPrinter(config PrinterConfig, p Printer) {
