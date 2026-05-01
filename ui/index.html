@@ -224,11 +224,11 @@
                 }
             });
         }
-        if (data.unassigned && data.unassigned.length > 0) {
+        if (data.all_printers && data.all_printers.length > 0) {
             grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;"><h3>Вне линий (Тест/Резерв)</h3></div>`;
-            data.unassigned.forEach(p => grid.innerHTML += createPrinterCard(p));
+            data.all_printers.forEach(p => grid.innerHTML += createPrinterCard(p));
         }
-        if ((!data.lines || data.lines.length === 0) && (!data.unassigned || data.unassigned.length === 0)) {
+        if ((!data.lines || data.lines.length === 0) && (!data.all_printers || data.all_printers.length === 0)) {
             grid.innerHTML = '<div style="color: var(--text-muted);">Нет настроенных принтеров.</div>';
         }
     }
@@ -297,7 +297,7 @@
         } catch (e) { alert("Сбой связи"); }
     }
 
-    // --- НОВАЯ ФУНКЦИЯ: Отправка пачки (Batch) ---
+    // --- Отправка пачки (Batch) ---
     async function sendBatchJob() {
         const printerId = document.getElementById('batch_target').value;
         const fieldName = document.getElementById('batch_fieldname').value.trim();
@@ -352,7 +352,6 @@
     }
 
     // --- НАСТРОЙКИ ---
-    // (Код настроек оставлен без изменений, чтобы всё работало как раньше)
     function clearPrinterForm() {
         document.getElementById('p_id').value = '';
         document.getElementById('p_name').value = '';
@@ -396,25 +395,32 @@
     }
 
     async function loadSettingsData() {
-        const linesRes = await fetch('/api/lines');
-        const lines = await linesRes.json();
-        const lineOptions = lines ? lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('') : '';
-        document.getElementById('assign_line').innerHTML = lineOptions;
-        document.getElementById('p_line_id').innerHTML = `<option value="0">-- Без линии --</option>` + lineOptions;
+        // const linesRes = await fetch('/api/lines');
+        // const lines = await linesRes.json();
+        // const lineOptions = lines ? lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('') : '';
+        // document.getElementById('assign_line').innerHTML = lineOptions;
+        // document.getElementById('p_line_id').innerHTML = `<option value="0">-- Без линии --</option>` + lineOptions;
 
         const printersRes = await fetch('/api/printers');
         const data = await printersRes.json();
         let allPrinters = data.all_printers || [];
-        document.getElementById('assign_printer').innerHTML = allPrinters.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+        console.log("Содержимое allPrinters:", allPrinters);
 
-        const assignRes = await fetch('/api/assignments');
-        const assignments = await assignRes.json();
-        document.getElementById('assignments-table').innerHTML = (assignments || []).map(a => `
-            <tr style="border-bottom: 1px solid #333;">
-                <td style="padding: 8px;">${a.line_name}</td><td>${a.printer_name}</td>
-                <td><span style="font-size: 0.7rem; background: #444; padding: 2px 5px; border-radius: 3px;">${a.role}</span></td>
-            </tr>
-        `).join('');
+        const assignSelect = document.getElementById('assign_printer');
+        if (assignSelect) {
+            assignSelect.innerHTML = allPrinters.map(p =>
+                `<option value="${p.id}">${p.name} (ID: ${p.id})</option>`
+            ).join('');
+        }
+
+        // const assignRes = await fetch('/api/assignments');
+        // const assignments = await assignRes.json();
+        // document.getElementById('assignments-table').innerHTML = (assignments || []).map(a => `
+        //     <tr style="border-bottom: 1px solid #333;">
+        //         <td style="padding: 8px;">${a.line_name}</td><td>${a.printer_name}</td>
+        //         <td><span style="font-size: 0.7rem; background: #444; padding: 2px 5px; border-radius: 3px;">${a.role}</span></td>
+        //     </tr>
+        // `).join('');
 
         document.getElementById('printers-list-table').innerHTML = allPrinters.map(p => `
             <tr style="border-bottom: 1px solid #333;">

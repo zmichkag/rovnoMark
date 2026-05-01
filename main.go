@@ -140,6 +140,10 @@ func main() {
 		})
 	})
 
+	//http.HandleFunc("/api/lines", func(w http.ResponseWriter, r *http.Request) {
+	//	return
+	//}
+
 	// 5. Раздача UI (Frontend)
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))
