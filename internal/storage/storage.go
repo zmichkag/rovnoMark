@@ -145,7 +145,7 @@ func runMigration(db *sql.DB) {
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
 func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
+	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0 and is_active = 1")
 	if err != nil {
 		return nil, err
 	}

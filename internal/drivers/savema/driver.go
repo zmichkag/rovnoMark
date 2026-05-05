@@ -2,6 +2,7 @@ package savema
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ func New(ip string, port int) *Driver {
 }
 
 // sendRaw — базовый метод обмена данными[cite: 1]
-func (d *Driver) sendRaw(cmdBody string) (string, error) {
+func (d *Driver) sendRaw(cmd string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -37,15 +38,18 @@ func (d *Driver) sendRaw(cmdBody string) (string, error) {
 	defer conn.Close()
 
 	// Оборачиваем команду в спецсимволы Savema[cite: 1]
-	fmt.Fprintf(conn, "~%s^", cmdBody)
+	fmt.Fprintf(conn, "~%s^", cmd)
+
+	//	log.Printf("[SAVEMA %s] ", d.Address)
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
+	reader := make([]byte, 1024)
+	reply, err := conn.Read(reader)
 	if err != nil {
 		return "", err
 	}
-	return string(buffer[:n]), nil
+	log.Printf("[SAVEMA %s] SEND: %s, REPLY: %s", d.Address, cmd, string(reader[:reply]))
+	return string(reader[:reply]), nil
 }
 
 // PrintBatch — загрузка очереди Честного Знака[cite: 1]
