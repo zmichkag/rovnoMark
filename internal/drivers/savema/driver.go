@@ -2,9 +2,10 @@ package savema
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"strconv"
-	"strings" // Обязательно добавляем пакет для работы со строками
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,110 +25,108 @@ func New(ip string, port int) *Driver {
 	}
 }
 
-func (d *Driver) SendCommand(cmdBody string) (string, error) {
+// sendRaw — базовый метод обмена данными[cite: 1]
+func (d *Driver) sendRaw(cmd string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-
 	conn, err := net.DialTimeout("tcp", address, d.Timeout)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
 
-	conn.Write([]byte(fmt.Sprintf("~%s^", cmdBody)))
+	// Оборачиваем команду в спецсимволы Savema[cite: 1]
+	fmt.Fprintf(conn, "~%s^", cmd)
+
+	//	log.Printf("[SAVEMA %s] ", d.Address)
+
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
+	reader := make([]byte, 1024)
+	reply, err := conn.Read(reader)
 	if err != nil {
 		return "", err
 	}
-	return string(buffer[:n]), nil
+	log.Printf("[SAVEMA %s] SEND: %s, REPLY: %s", d.Address, cmd, string(reader[:reply]))
+	return string(reader[:reply]), nil
 }
 
-// CleanResponse — наш "очиститель" протокола
-func CleanResponse(raw string) string {
-	// 1. Убираем пробелы и переносы каретки (\r, \n)
-	clean := strings.TrimSpace(raw)
-
-	start := strings.Index(clean, ":")
-	end := strings.Index(clean, "}")
-	if start != -1 && end != -1 {
-		clean = clean[start+1 : end]
-		return clean
+// PrintBatch — загрузка очереди Честного Знака[cite: 1]
+func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
+	allCodes := strings.Join(codes, "\n")
+	// Команда SPLAQD добавляет данные в очередь[cite: 1]
+	cmd := fmt.Sprintf("SPLAQD{%s~gt~%s}", fieldName, allCodes)
+	resp, err := d.sendRaw(cmd)
+	if err != nil {
+		return 0, err
 	}
-
-	return clean
+	if strings.Contains(resp, "OK") {
+		return len(codes), nil
+	}
+	return 0, fmt.Errorf("принтер не принял пачку: %s", resp)
 }
 
-// GetStatus запрашивает статус и переводит его на русский
+func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("SPLLTF{%s}", template))
+	// Используем разделитель | для отправки нескольких команд за раз[cite: 1]
+	for k, v := range fields {
+		sb.WriteString(fmt.Sprintf("|SPMCTV{%s~gt~%s}", k, v))
+	}
+	_, err := d.sendRaw(sb.String())
+	return err
+}
+
 func (d *Driver) GetStatus() (string, error) {
-	raw, err := d.SendCommand("SPPSTA")
+	raw, err := d.sendRaw("SPPSTA")
 	if err != nil {
 		return "", err
 	}
-
 	clean := CleanResponse(raw)
-	upperStatus := strings.ToUpper(clean)
-
-	// Маппинг (Словарь) статусов принтера INIT, WAITING, RUNNING and ERROR
-	switch {
-	case strings.Contains(upperStatus, "INIT") || clean == "00":
+	// Маппинг статусов согласно документации Rev.12[cite: 1]
+	switch strings.ToUpper(clean) {
+	case "WAITING":
+		return "ГОТОВ", nil
+	case "RUNNING":
+		return "ПЕЧАТЬ", nil
+	case "INIT":
 		return "ЗАПУСК", nil
-	case strings.Contains(upperStatus, "RUNNING") || clean == "01":
-		return "ПЕЧАТАЕТ", nil
-	case strings.Contains(upperStatus, "WAITING"):
-		return "ВНИМАНИЕ (ПРЕДУПРЕЖДЕНИЕ)", nil
-	case strings.Contains(upperStatus, "ERROR") || strings.Contains(upperStatus, "ERROR"):
-		return "ОШИБКА ОБОРУДОВАНИЯ", nil
+	case "ERROR":
+		return "ОШИБКА", nil
 	default:
-		// Если статус неизвестен, возвращаем его очищенным
 		return clean, nil
 	}
 }
 
-// GetRemainingRibbon возвращает только чистое число (метры)
+func CleanResponse(raw string) string {
+	clean := strings.TrimSpace(raw)
+	start := strings.Index(clean, ":")
+	end := strings.LastIndex(clean, "}")
+	if start != -1 && end != -1 && end > start {
+		return strings.TrimSpace(clean[start+1 : end])
+	}
+	return clean
+}
+
+// Заглушки для интерфейса Printer[cite: 4]
 func (d *Driver) GetRemainingRibbon() (string, error) {
-	raw, err := d.SendCommand("SPGGRR")
-	if err != nil {
-		return "", err
-	}
-	return CleanResponse(raw), nil
+	r, e := d.sendRaw("SPGGRR")
+	return CleanResponse(r), e
 }
-
-// GetQueueCapacity возвращает только чистое число кодов
-func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
-	raw, err := d.SendCommand(fmt.Sprintf("SPLGMQ{%s}", queueName))
-	if err != nil {
-		return "", err
-	}
-	return CleanResponse(raw), nil
+func (d *Driver) GetQueueCapacity(q string) (string, error) {
+	r, e := d.sendRaw(fmt.Sprintf("SPLGQC{%s}", q))
+	return CleanResponse(r), e
 }
-
-func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
-	_, err := d.SendCommand(fmt.Sprintf("SPLLTF{%s}", template))
-	if err != nil {
-		return err
-	}
-	for k, v := range fields {
-		d.SendCommand(fmt.Sprintf("SPMCTV{%s~gt~%s}", k, v))
-	}
-	return nil
+func (d *Driver) GetPrintSpeed() (string, error) {
+	r, e := d.sendRaw("SPCGPS")
+	return CleanResponse(r), e
 }
-
-func (d *Driver) GetPrintSpeed() (string, error) { // Скобки для параметров, потом типы возврата
-	raw, err := d.SendCommand("SPCGPS")
-	if err != nil {
-		return "", err
-	}
-	return CleanResponse(raw), nil
-}
-
 func (d *Driver) GetCurrentPrintCount() (string, error) {
-	raw, err := d.SendCommand("SPGGCP")
-	if err != nil {
-		return "", err
-	}
-	return CleanResponse(raw), nil
+	r, e := d.sendRaw("SPGGCP")
+	return CleanResponse(r), e
+}
+func (d *Driver) GetCurrentTemplate() (string, error) {
+	r, e := d.sendRaw("SPLGAT")
+	return CleanResponse(r), e
 }
