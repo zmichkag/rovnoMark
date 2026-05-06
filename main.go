@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	valentin "rovnoMark/internal/drivers/valentine"
 	"strconv"
 
 	"rovnoMark/internal/core"
@@ -22,14 +23,27 @@ func main() {
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
 
-	// 1. Загружаем все принтеры из базы в работу
 	savedPrinters, _ := store.GetAllPrinters()
+
 	for _, cfg := range savedPrinters {
-		if cfg.DriverType == "savema" {
-			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
-		} else if cfg.DriverType == "videojet" {
-			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		var printer core.Printer // Наш общий интерфейс
+
+		// Выбираем драйвер в зависимости от типа
+		switch cfg.DriverType {
+		case "savema":
+			printer = savema.New(cfg.IP, cfg.Port)
+		case "valentin":
+			printer = valentin.New(cfg.IP, cfg.Port)
+		case "videojet":
+			// Используем логику из VideoJet_Zipher протокола
+			printer = videojet.New(cfg.IP, cfg.Port)
+		default:
+			log.Printf("Предупреждение: неизвестный тип драйвера %s для принтера %s", cfg.DriverType, cfg.Name)
+			continue // Пропускаем этот принтер и идем к следующему
 		}
+
+		// Добавляем инициализированный драйвер в менеджер
+		manager.AddPrinter(cfg, printer)
 	}
 
 	// 2. API для добавления нового принтера

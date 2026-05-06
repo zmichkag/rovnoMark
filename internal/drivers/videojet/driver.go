@@ -182,55 +182,93 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	return strings.TrimSpace(parts[3]), nil
 }
 
+// PrintBatch загружает пачку кодов напрямую в буфер принтера (потоковая печать)
 func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+
+	// Устанавливаем единое TCP-соединение для отправки всей пачки
 	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("ошибка связи: %v", err)
 	}
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-	conn.Write([]byte("\r")) // Сброс парсера
 
-	// 1. Очищаем старый буфер сериализации (команда SCB)
-	fmt.Fprint(conn, "SCB\r")
-	reader.ReadString('\r')
+	// Сброс парсера принтера перед началом сессии
+	conn.Write([]byte("\r"))
 
-	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
-	fmt.Fprintf(conn, "SMR|%d|\r", 2000)
-	reader.ReadString('\r')
-
-	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
-	// Синтаксис: SHO | <имя_поля> |
-	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
-	resp, _ := reader.ReadString('\r')
-	if strings.Contains(resp, "ERR") {
-		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+	// 1. Инициализация: Задаем имя переменной для DataMatrix (SHO)[cite: 3]
+	cmdSHO := fmt.Sprintf("SHO|%s|\r", fieldName)
+	conn.Write([]byte(cmdSHO))
+	respSHO, err := reader.ReadString('\r')
+	if err != nil || strings.Contains(respSHO, "ERR") {
+		return 0, fmt.Errorf("принтер отклонил SHO для поля %s: %v", fieldName, strings.TrimSpace(respSHO))
 	}
 
+	// 2. Расширяем лимит буфера под размер текущей пачки (SMR)[cite: 3]
+	// Берем с небольшим запасом
+	cmdSMR := fmt.Sprintf("SMR|%d|\r", len(codes)+50)
+	conn.Write([]byte(cmdSMR))
+	reader.ReadString('\r')
+
 	successCount := 0
+
+	// 3. Потоковая отправка кодов (SDO)[cite: 3]
 	for _, code := range codes {
-		// Подготовка кода для GS1 (замена \x1d на ~1)
+		// Очистка спецсимвола GS (FNC1) в формат, понятный Zipher[cite: 3]
 		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
 
-		// 4. Заливаем данные в буфер (команда SDO)
-		// Синтаксис: SDO | <данные> |
-		fmt.Fprintf(conn, "SDO|%s|\r", cleanCode)
+		cmdSDO := fmt.Sprintf("SDO|%s|\r", cleanCode)
 
-		// При успехе SDO возвращает количество свободного места (SFS)
-		resp, err := reader.ReadString('\r')
-		if err != nil || strings.Contains(resp, "ERR") {
-			log.Printf("[SERIAL %s] Ошибка загрузки кода %d", d.Address, successCount)
+		// Дедлайн на каждую операцию записи/чтения
+		conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		_, err := conn.Write([]byte(cmdSDO))
+		if err != nil {
+			log.Printf("[VIDEOJET %s] Обрыв на коде %d: %v", d.Address, successCount, err)
 			break
 		}
+
+		// Принтер возвращает SFS|остаток_байтов| после каждого успешного SDO[cite: 3]
+		respSDO, err := reader.ReadString('\r')
+		if err != nil || strings.Contains(respSDO, "ERR") {
+			log.Printf("[VIDEOJET %s] Ошибка или NACK на коде %d", d.Address, successCount)
+			break
+		}
+
 		successCount++
+
+		// Небольшая пауза для стабилизации буфера контроллера принтера[cite: 3]
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return successCount, nil
+}
+
+// GetBufferStatus возвращает количество записей, ожидающих печати в буфере
+func (d *Driver) GetBufferStatus() (int, error) {
+	// Для быстрых запросов статуса используем sendRaw, чтобы не плодить подключения вручную
+	resp, err := d.sendRaw("SRC")
+	if err != nil {
+		return 0, err
+	}
+
+	// Ожидаемый ответ: "SRC|150|"
+	parts := strings.Split(resp, "|")
+	if len(parts) < 2 {
+		return 0, nil
+	}
+
+	count, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, nil
+	}
+
+	return count, nil
 }
 
 //func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {

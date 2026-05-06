@@ -2,7 +2,7 @@ package core
 
 import (
 	"fmt"
-	"strconv" // Добавляем для конвертации ID в строку для логов
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,18 +43,25 @@ type PrinterConfig struct {
 
 // PrinterState хранит полную телеметрию
 type PrinterState struct {
-	Status      string `json:"status"`
-	Ribbon      string `json:"ribbon"`
-	Queue       string `json:"queue"`
-	Speed       string `json:"speed"`
-	CurCount    string `json:"cur_count"`
-	CurTemplate string `json:"cur_template"`
+	Status       string `json:"status"`
+	Ribbon       string `json:"ribbon"`
+	Queue        string `json:"queue"`         // Стандартная очередь (JDI)
+	SerialBuffer int    `json:"serial_buffer"` // Буфер (SDO)
+	Speed        string `json:"speed"`
+	CurCount     string `json:"cur_count"`
+	CurTemplate  string `json:"cur_template"`
 }
-
 type LogEntry struct {
 	Time    string `json:"time"`
 	Printer string `json:"printer"`
 	Event   string `json:"event"`
+}
+
+type BatchJobRequest struct {
+	LineID   int               `json:"line_id"`
+	Template string            `json:"template"`
+	Codes    []string          `json:"codes"`
+	Fields   map[string]string `json:"fields"`
 }
 
 type PrinterManager struct {
