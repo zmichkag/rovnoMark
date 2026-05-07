@@ -233,57 +233,80 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	return successCount, nil
 }
 
-//func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
-//	d.mu.Lock()
-//	defer d.mu.Unlock()
-//
-//	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-//
-//	// 1. Увеличиваем общий таймаут на подключение до 10 секунд
-//	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-//	if err != nil {
-//		return 0, fmt.Errorf("ошибка подключения: %v", err)
-//	}
-//	defer conn.Close()
-//
-//	successCount := 0
-//	reader := bufio.NewReader(conn)
-//
-//	// Сброс буфера принтера (рекомендация Videojet)
-//	conn.Write([]byte("\r"))
-//
-//	for _, code := range codes {
-//		// Заменяем спецсимвол GS на ~1, как в вашем рабочем шаблоне
-//		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
-//
-//		// Формируем команду JDI
-//		cmd := fmt.Sprintf("JDI|1|%s=%s|\r", fieldName, cleanCode)
-//
-//		// Устанавливаем дедлайн на КАЖДУЮ команду (1 секунда)
-//		conn.SetDeadline(time.Now().Add(1 * time.Second))
-//
-//		_, err := conn.Write([]byte(cmd))
-//		if err != nil {
-//			log.Printf("[VIDEOJET %s] Оборвалась связь на коде %d: %v", d.Address, successCount, err)
-//			break
-//		}
-//
-//		// Ждем подтверждение (ID задания)
-//		resp, err := reader.ReadString('\r')
-//		if err != nil {
-//			log.Printf("[VIDEOJET %s] Принтер не ответил на код %d: %v", d.Address, successCount, err)
-//			break
-//		}
-//
-//		// Если в ответе есть число — код принят[cite: 2]
-//		if resp != "ERR\r" && resp != "NACK\r" && resp != "" {
-//			successCount++
-//		}
-//
-//		// ВАЖНО: Пауза 20мс. Даем принтеру время записать код в очередь.
-//		// Без этой паузы на больших пачках Videojet может "зависнуть".
-//		time.Sleep(20 * time.Millisecond)
-//	}
-//
-//	return successCount, nil
-//}
+// GetLastPrintedIndex запрашивает последний напечатанный индекс (команда SLR)
+func (d *Driver) GetLastPrintedIndex() (int, error) {
+	// Отправляем команду SLR
+	raw, err := d.sendRaw("SLR")
+	if err != nil {
+		return 0, err
+	}
+
+	// Ожидаемый ответ: SLR|<index>|
+	parts := strings.Split(raw, "|")
+	if len(parts) >= 2 {
+		indexStr := strings.TrimSpace(parts[1])
+		if indexStr == "" {
+			return 0, nil // Буфер пуст или еще ничего не напечатано
+		}
+
+		idx, err := strconv.Atoi(indexStr)
+		if err != nil {
+			return 0, fmt.Errorf("ошибка парсинга индекса %q: %v", indexStr, err)
+		}
+		return idx, nil
+	}
+
+	// Если принтер вернул ошибку выполнения (default failure response)
+	return 0, fmt.Errorf("неизвестный ответ на команду SLR: %s", raw)
+}
+
+// PrintBatchIndexed загружает пачку кодов с явным указанием индексов через команду SID
+func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	conn.Write([]byte("\r")) // Сброс парсера
+
+	// 1. Очищаем старый буфер сериализации (команда SCB)
+	fmt.Fprint(conn, "SCB\r")
+	reader.ReadString('\r')
+
+	// 2. Устанавливаем лимит записей (с небольшим запасом от размера пачки)
+	fmt.Fprintf(conn, "SMR|%d|\r", len(codes)+10)
+	reader.ReadString('\r')
+
+	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
+	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
+	resp, _ := reader.ReadString('\r')
+	if strings.Contains(resp, "ERR") {
+		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+	}
+
+	successCount := 0
+	for i, code := range codes {
+		// Подготовка кода для GS1 (замена \x1d на ~1)
+		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
+		currentIndex := startIndex + i
+
+		// 4. Заливаем данные с индексом (команда SID)
+		// Формат: SID|<index>|<data>|
+		fmt.Fprintf(conn, "SID|%d|%s|\r", currentIndex, cleanCode)
+
+		resp, err := reader.ReadString('\r')
+		if err != nil || strings.Contains(resp, "ERR") {
+			log.Printf("[VIDEOJET %s] Ошибка загрузки кода с индексом %d", d.Address, currentIndex)
+			break
+		}
+		successCount++
+	}
+
+	return successCount, nil
+}

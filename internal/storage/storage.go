@@ -232,6 +232,28 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	return err
 }
 
+func (s *Store) GetPrintersByLine(lineID int) ([]core.PrinterConfig, error) {
+	query := `
+        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
+        FROM printers p
+        JOIN line_printers lp ON p.id = lp.printer_id
+        WHERE lp.line_id = ? AND p.is_active = 1`
+
+	rows, err := s.db.Query(query, lineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []core.PrinterConfig
+	for rows.Next() {
+		var p core.PrinterConfig
+		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
+		list = append(list, p)
+	}
+	return list, nil
+}
+
 func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
 	query := `
 		SELECT l.name as line_name, p.name as printer_name, lp.role 

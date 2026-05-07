@@ -13,6 +13,8 @@ type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
 	PrintBatch(fieldName string, codes []string) (int, error)
+	PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error)
+	GetLastPrintedIndex() (int, error)
 	GetRemainingRibbon() (string, error)
 	GetQueueCapacity(queueName string) (string, error)
 	GetPrintSpeed() (string, error)
@@ -43,12 +45,14 @@ type PrinterConfig struct {
 
 // PrinterState хранит полную телеметрию
 type PrinterState struct {
-	Status      string `json:"status"`
-	Ribbon      string `json:"ribbon"`
-	Queue       string `json:"queue"`
-	Speed       string `json:"speed"`
-	CurCount    string `json:"cur_count"`
-	CurTemplate string `json:"cur_template"`
+	LastTemplate   string // Для Delta-проверки шаблона
+	LastStaticHash string // Для Delta-проверки полей
+	Status         string `json:"status"`
+	Ribbon         string `json:"ribbon"`
+	Queue          string `json:"queue"`
+	Speed          string `json:"speed"`
+	CurCount       string `json:"cur_count"`
+	CurTemplate    string `json:"cur_template"`
 }
 
 type LogEntry struct {
@@ -139,7 +143,10 @@ func (pm *PrinterManager) backgroundPoller() {
 
 			pm.mu.Lock()
 			oldState := pm.states[id]
-			newState := PrinterState{}
+			newState := PrinterState{
+				LastTemplate:   oldState.LastTemplate,
+				LastStaticHash: oldState.LastStaticHash,
+			}
 
 			isOfflineNow := err != nil
 			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
@@ -196,4 +203,23 @@ func (pm *PrinterManager) addLog(printer, event string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.addLogNoLock(printer, event)
+}
+
+// GetPrinterState возвращает копию текущего состояния принтера
+func (pm *PrinterManager) GetPrinterState(id int) PrinterState {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.states[id]
+}
+
+// UpdatePrinterDeltaState сохраняет последние успешно отправленные параметры
+// Это нужно, чтобы алгоритм Delta понимал, что данные в принтере уже обновлены
+func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	state := pm.states[id]
+	state.LastTemplate = template
+	state.LastStaticHash = staticHash
+	pm.states[id] = state
 }
