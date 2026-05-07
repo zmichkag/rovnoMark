@@ -240,21 +240,41 @@
     function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
+
+        // 1. Отображаем принтеры в линиях (только активные)
         if (data.lines) {
             data.lines.forEach(line => {
-                if (line.printers && line.printers.length > 0) {
-                    grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; border-left: 4px solid var(--primary); padding-left: 15px;"><h2 style="margin:0;">${line.name} <small style="color:var(--text-muted); font-size:0.9rem;">— ${line.description}</small></h2></div>`;
-                    line.printers.forEach(p => grid.innerHTML += createPrinterCard(p));
+                // Фильтруем принтеры внутри линии
+                const activeInLine = (line.printers || []).filter(p => p.is_active);
+
+                if (activeInLine.length > 0) {
+                    grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; border-left: 4px solid var(--primary); padding-left: 15px;">
+                    <h2 style="margin:0;">${line.name} <small style="color:var(--text-muted); font-size:0.9rem;">— ${line.description}</small></h2>
+                </div>`;
+                    activeInLine.forEach(p => grid.innerHTML += createPrinterCard(p));
                 }
             });
         }
-        if (data.all_printers && data.all_printers.length > 0) {
-            grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;"><h3>Вне линий (Тест/Резерв)</h3></div>`;
-            data.all_printers.forEach(p => grid.innerHTML += createPrinterCard(p));
+
+        // 2. Отображаем принтеры вне линий (только активные)
+        if (data.all_printers) {
+            const activeStandalone = data.all_printers.filter(p => p.is_active && !isPrinterInAnyLine(p.id, data.lines));
+
+            if (activeStandalone.length > 0) {
+                grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;"><h3>Вне линий (Тест/Резерв)</h3></div>`;
+                activeStandalone.forEach(p => grid.innerHTML += createPrinterCard(p));
+            }
         }
-        if ((!data.lines || data.lines.length === 0) && (!data.all_printers || data.all_printers.length === 0)) {
-            grid.innerHTML = '<div style="color: var(--text-muted);">Нет настроенных принтеров.</div>';
+
+        if (grid.innerHTML === '') {
+            grid.innerHTML = '<div style="color: var(--text-muted); padding: 20px;">Нет активных принтеров для мониторинга.</div>';
         }
+    }
+
+    // Вспомогательная функция, чтобы не дублировать принтеры, которые уже в линиях
+    function isPrinterInAnyLine(printerId, lines) {
+        if (!lines) return false;
+        return lines.some(line => (line.printers || []).some(p => p.id === printerId));
     }
 
     function createPrinterCard(p) {

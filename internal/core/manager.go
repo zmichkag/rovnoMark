@@ -117,7 +117,6 @@ func (pm *PrinterManager) GetDashboardData() (map[int]PrinterState, []LogEntry) 
 func (pm *PrinterManager) backgroundPoller() {
 	for {
 		pm.mu.RLock()
-		// Срез ids теперь должен быть []int, так как ключи в мапе - числа
 		var ids []int
 		for id := range pm.printers {
 			ids = append(ids, id)
@@ -127,7 +126,13 @@ func (pm *PrinterManager) backgroundPoller() {
 		for _, id := range ids {
 			pm.mu.RLock()
 			p := pm.printers[id]
+			cfg := pm.configs[id] // Получаем конфиг для проверки статуса
 			pm.mu.RUnlock()
+
+			// Если принтер деактивирован в настройках — пропускаем опрос
+			if !cfg.IsActive {
+				continue
+			}
 
 			status, err := p.GetStatus()
 
