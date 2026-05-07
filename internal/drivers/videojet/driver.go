@@ -182,6 +182,33 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	return strings.TrimSpace(parts[3]), nil
 }
 
+// GetTemplates запрашивает список шаблонов из памяти принтера
+func (d *Driver) GetTemplates() ([]string, error) {
+	// Команда JBL (Job List) запрашивает список доступных макетов
+	raw, err := d.sendRaw("JBL")
+	if err != nil {
+		return nil, err
+	}
+
+	parts := strings.Split(raw, "|")
+	var templates []string
+	log.Printf("[VIDEOJET %s] >: %v", d.Address, raw)
+
+	// Начинаем с индекса 1, так как parts[0] — это эхо команды "JLI"
+	for i := 1; i < len(parts); i++ {
+		name := strings.TrimSpace(parts[i])
+		if name != "" && name != "ERR" {
+			templates = append(templates, name)
+		}
+	}
+
+	if len(templates) == 0 {
+		return nil, fmt.Errorf("шаблоны не найдены или принтер вернул ошибку: %s", raw)
+	}
+
+	return templates, nil
+}
+
 func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

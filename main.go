@@ -282,6 +282,36 @@ func main() {
 		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
 	})
 
+	// Получение списка шаблонов из памяти принтера (GET /api/templates?printer_id=X)
+	http.HandleFunc("/api/templates", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Только GET", http.StatusMethodNotAllowed)
+			return
+		}
+
+		printerIDStr := r.URL.Query().Get("printer_id")
+		idInt, err := strconv.Atoi(printerIDStr)
+		if err != nil {
+			http.Error(w, "Неверный ID принтера", http.StatusBadRequest)
+			return
+		}
+
+		p := manager.GetPrinter(idInt)
+		if p == nil {
+			http.Error(w, "Принтер не найден (возможно, отключен или не в сети)", http.StatusNotFound)
+			return
+		}
+
+		templates, err := p.GetTemplates()
+		if err != nil {
+			http.Error(w, "Ошибка чтения шаблонов: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(templates)
+	})
+
 	// 5. Раздача UI (Frontend)
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))

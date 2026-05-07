@@ -54,6 +54,7 @@
     <button class="tab-btn active" onclick="switchTab('monitoring')">Мониторинг парка</button>
     <button class="tab-btn" onclick="switchTab('control')">Управление печатью</button>
     <button class="tab-btn" onclick="switchTab('settings')">Настройки</button>
+    <button class="tab-btn" onclick="switchTab('templatesTab')">Шаблоны</button>
 </div>
 
 <div id="monitoring" class="tab-content active">
@@ -213,6 +214,23 @@
         <thead><tr style="text-align: left; border-bottom: 1px solid #444;"><th style="padding: 10px;">ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Действие</th></tr></thead>
         <tbody id="printers-list-table"></tbody>
     </table>
+</div>
+
+<div id="templatesTab" class="tab-content">
+    <div style="background: var(--surface); padding: 20px; border-radius: 8px; max-width: 600px;">
+        <h3>Управление шаблонами</h3>
+        <div class="field">
+            <label>Выберите принтер для опроса памяти:</label>
+            <select id="template_printer_select" style="width:100%; padding:8px; margin-bottom:15px;"></select>
+        </div>
+        <button class="btn" style="background: var(--primary); width: 100%; margin-bottom: 20px;" onclick="fetchPrinterTemplates()">ЗАПРОСИТЬ СПИСОК ШАБЛОНОВ</button>
+
+        <hr style="border: 1px solid #333; margin: 15px 0;">
+        <h4>Доступные макеты:</h4>
+        <ul id="templates_list" style="list-style-type: none; padding: 0; margin: 0;">
+            <li style="color: var(--text-muted);">Нажмите кнопку для опроса...</li>
+        </ul>
+    </div>
 </div>
 
 <script>

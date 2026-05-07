@@ -15,6 +15,7 @@ type Printer interface {
 	PrintBatch(fieldName string, codes []string) (int, error)
 	PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error)
 	GetLastPrintedIndex() (int, error)
+	GetTemplates() ([]string, error)
 	GetRemainingRibbon() (string, error)
 	GetQueueCapacity(queueName string) (string, error)
 	GetPrintSpeed() (string, error)

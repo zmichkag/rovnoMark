@@ -17,6 +17,11 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
+func (d *Driver) GetTemplates() ([]string, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	//TODO implement me
 	panic("implement me")
