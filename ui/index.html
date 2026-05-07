@@ -148,6 +148,12 @@
                     <option value="0">-- Без линии --</option>
                 </select>
             </div>
+            <div class="field" style="margin-top: 15px;">
+                <label style="display: flex; align-items: center; cursor: pointer; color: var(--text);">
+                    <input type="checkbox" id="p_active" checked style="width: 20px; height: 20px; margin-right: 10px;">
+                    Активен (участвует в опросе и печати)
+                </label>
+            </div>
             <div style="display: flex; gap: 10px; margin-top: 20px;">
                 <button class="btn" style="background: var(--success); flex: 2;" onclick="addPrinter()">СОХРАНИТЬ</button>
                 <button class="btn" style="background: #555; flex: 1;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
@@ -185,6 +191,21 @@
     <table style="width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.9rem; margin-bottom: 30px;">
         <thead><tr style="text-align: left; border-bottom: 1px solid #444;"><th>Линия</th><th>Принтер</th><th>Роль</th></tr></thead>
         <tbody id="assignments-table"></tbody>
+    </table>
+
+    <hr style="border: 1px solid #333; margin: 30px 0;">
+    <h4>Список существующих линий</h4>
+    <table style="width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.9rem; margin-bottom: 30px;">
+        <thead>
+        <tr style="text-align: left; border-bottom: 1px solid #444;">
+            <th style="padding: 8px;">ID</th>
+            <th>Название</th>
+            <th>Описание</th>
+            <th>Статус</th>
+        </tr>
+        </thead>
+        <tbody id="lines-list-table">
+        </tbody>
     </table>
 
     <h3>Список устройств в базе</h3>
@@ -403,31 +424,33 @@
     }
 
     // --- НАСТРОЙКИ ---
-    function clearPrinterForm() {
-        document.getElementById('p_id').value = '';
-        document.getElementById('p_name').value = '';
-        document.getElementById('p_ip').value = '';
-        document.getElementById('p_port').value = '9100';
-        document.getElementById('p_line_id').value = '0';
-    }
-
     async function addPrinter() {
         const printerData = {
-            id: parseInt(document.getElementById('p_id').value)  || 0,
+            id: parseInt(document.getElementById('p_id').value) || 0,
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value) || 9100,
             driver_type: document.getElementById('p_driver').value,
-            is_active: true
+            is_active: document.getElementById('p_active').checked // Получаем значение из галочки
         };
-        const res = await fetch('/api/printers/add', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(printerData) });
+
+        const res = await fetch('/api/printers/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(printerData)
+        });
+
         if (res.ok) {
             const result = await res.json();
             const lineId = parseInt(document.getElementById('p_line_id').value);
             if (lineId > 0) {
-                await fetch('/api/lines/assign', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ line_id: lineId, printer_id: result.id, role: "PRIMARY" }) });
+                await fetch('/api/lines/assign', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ line_id: lineId, printer_id: result.id, role: "PRIMARY" })
+                });
             }
-            alert("Сохранено!");
+            alert("Данные сохранены!");
             loadSettingsData();
             clearPrinterForm();
         }
@@ -446,17 +469,31 @@
     }
 
     async function loadSettingsData() {
-        // 1. Загружаем линии для всех селекторов в настройках
         try {
+            // 1. Загружаем линии
             const linesRes = await fetch('/api/lines');
             const lines = await linesRes.json();
-            const lineOptions = (lines || []).map(l => `<option value="${l.id}">${l.name}</option>`).join('');
 
+            // Заполнение выпадающих списков
+            const lineOptions = (lines || []).map(l => `<option value="${l.id}">${l.name}</option>`).join('');
             document.getElementById('assign_line').innerHTML = lineOptions;
             document.getElementById('p_line_id').innerHTML = `<option value="0">-- Без линии --</option>` + lineOptions;
-        } catch (e) { console.error("Ошибка загрузки линий"); }
 
-        // 2. Загружаем принтеры для выпадающего списка привязки
+            // Отрисовка таблицы линий
+            document.getElementById('lines-list-table').innerHTML = (lines || []).map(l => `
+                <tr style="border-bottom: 1px solid #333;">
+                    <td style="padding: 8px;">${l.id}</td>
+                    <td style="font-weight: bold;">${l.name}</td>
+                    <td style="color: var(--text-muted);">${l.description || '—'}</td>
+                    <td>${l.is_active ?
+                '<span style="color: var(--success)">● Активна</span>' :
+                '<span style="color: var(--danger)">○ Отключена</span>'}</td>
+                </tr>
+            `).join('');
+
+        } catch (e) { console.error("Ошибка загрузки линий:", e); }
+
+        // 2. Загружаем принтеры
         const printersRes = await fetch('/api/printers');
         const data = await printersRes.json();
         let allPrinters = data.all_printers || [];
@@ -468,37 +505,55 @@
             ).join('');
         }
 
-        // 3. Загружаем таблицу текущих привязок
+        // 3. Загружаем таблицу привязок
         try {
             const assignRes = await fetch('/api/assignments');
             const assignments = await assignRes.json();
             document.getElementById('assignments-table').innerHTML = (assignments || []).map(a => `
-            <tr style="border-bottom: 1px solid #333;">
-                <td style="padding: 8px;">${a.line_name}</td>
-                <td>${a.printer_name}</td>
-                <td><span style="font-size: 0.7rem; background: #444; padding: 2px 5px; border-radius: 3px;">${a.role}</span></td>
-            </tr>
-        `).join('');
-        } catch (e) { console.error("Ошибка загрузки привязок"); }
+                <tr style="border-bottom: 1px solid #333;">
+                    <td style="padding: 8px;">${a.line_name}</td>
+                    <td>${a.printer_name}</td>
+                    <td><span style="font-size: 0.7rem; background: #444; padding: 2px 5px; border-radius: 3px;">${a.role}</span></td>
+                </tr>
+            `).join('');
+        } catch (e) { console.error("Ошибка привязок"); }
 
+        // 4. Обновляем список устройств
         // 4. Обновляем общий список устройств
         document.getElementById('printers-list-table').innerHTML = allPrinters.map(p => `
-        <tr style="border-bottom: 1px solid #333;">
-            <td style="padding: 10px;">${p.id}</td>
-            <td>${p.name}</td>
-            <td>${p.ip}:${p.port}</td>
-            <td>${p.driver_type}</td>
-            <td><button class="btn" onclick="editPrinter(${p.id}, '${p.name}', '${p.ip}', ${p.port}, '${p.driver_type}')">⚙️ Изменить</button></td>
-        </tr>`).join('');
+            <tr style="border-bottom: 1px solid #333; opacity: ${p.is_active ? '1' : '0.5'};">
+                <td style="padding: 10px;">${p.id}</td>
+                <td>${p.name} ${p.is_active ? '' : '<small>(Выключен)</small>'}</td>
+                <td>${p.ip}:${p.port}</td>
+                <td>${p.driver_type}</td>
+                <td style="color: ${p.is_active ? 'var(--success)' : 'var(--danger)'}">
+                    ${p.is_active ? '● Активен' : '○ Неактивен'}
+                </td>
+                <td>
+                    <button class="btn" onclick="editPrinter(${p.id}, '${p.name}', '${p.ip}', ${p.port}, '${p.driver_type}', ${p.is_active})">
+                        ⚙️ Изменить
+                    </button>
+                </td>
+            </tr>`).join('');
     }
 
-    function editPrinter(id, name, ip, port, driver) {
+    function editPrinter(id, name, ip, port, driver, isActive) {
         document.getElementById('p_id').value = id;
         document.getElementById('p_name').value = name;
         document.getElementById('p_ip').value = ip;
         document.getElementById('p_port').value = port;
         document.getElementById('p_driver').value = driver;
+        document.getElementById('p_active').checked = isActive; // Устанавливаем статус
         window.scrollTo(0,0);
+    }
+
+    function clearPrinterForm() {
+        document.getElementById('p_id').value = '';
+        document.getElementById('p_name').value = '';
+        document.getElementById('p_ip').value = '';
+        document.getElementById('p_port').value = '9100';
+        document.getElementById('p_line_id').value = '0';
+        document.getElementById('p_active').checked = true; // По умолчанию активен
     }
 
     setInterval(fetchPrintersStatus, 2000);
