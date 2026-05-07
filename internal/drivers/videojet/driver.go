@@ -182,6 +182,35 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	return strings.TrimSpace(parts[3]), nil
 }
 
+// GetTemplateFields запрашивает список переменных в указанном макете
+func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
+	// Формируем команду GJF (Get Job Fields)
+	cmd := fmt.Sprintf("GJF|%s|", templateName)
+	raw, err := d.sendRaw(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ожидаемый ответ принтера: GJF|<JobName>|<Field1>|<Field2>|...|
+	if strings.HasPrefix(raw, "ERR") {
+		return nil, fmt.Errorf("принтер вернул ошибку на запрос полей макета %s: %s", templateName, raw)
+	}
+
+	parts := strings.Split(raw, "|")
+	var fields []string
+
+	// parts[0] == "GJF", parts[1] == templateName
+	// Сами переменные начинаются с индекса 2. Последний элемент может быть пустым из-за финального "|"
+	for i := 2; i < len(parts); i++ {
+		field := strings.TrimSpace(parts[i])
+		if field != "" {
+			fields = append(fields, field)
+		}
+	}
+
+	return fields, nil
+}
+
 // GetTemplates запрашивает список шаблонов из памяти принтера
 func (d *Driver) GetTemplates() ([]string, error) {
 	// Команда JBL (Job List) запрашивает список доступных макетов

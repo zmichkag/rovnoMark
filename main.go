@@ -312,6 +312,38 @@ func main() {
 		json.NewEncoder(w).Encode(templates)
 	})
 
+	// Получение списка полей конкретного шаблона (GET /api/template/fields?printer_id=X&template=Y)
+	http.HandleFunc("/api/template/fields", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Только GET", http.StatusMethodNotAllowed)
+			return
+		}
+
+		printerIDStr := r.URL.Query().Get("printer_id")
+		templateName := r.URL.Query().Get("template")
+
+		idInt, err := strconv.Atoi(printerIDStr)
+		if err != nil || templateName == "" {
+			http.Error(w, "Неверный ID принтера или пустое имя шаблона", http.StatusBadRequest)
+			return
+		}
+
+		p := manager.GetPrinter(idInt)
+		if p == nil {
+			http.Error(w, "Принтер не найден", http.StatusNotFound)
+			return
+		}
+
+		fields, err := p.GetTemplateFields(templateName)
+		if err != nil {
+			http.Error(w, "Ошибка чтения полей: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(fields)
+	})
+
 	// 5. Раздача UI (Frontend)
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))

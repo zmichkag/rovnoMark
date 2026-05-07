@@ -17,6 +17,11 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
+func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (d *Driver) GetTemplates() ([]string, error) {
 	//TODO implement me
 	panic("implement me")
