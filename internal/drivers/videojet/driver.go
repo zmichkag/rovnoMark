@@ -213,8 +213,8 @@ func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
 
 // GetTemplates запрашивает список шаблонов из памяти принтера
 func (d *Driver) GetTemplates() ([]string, error) {
-	// Команда JBL (Job List) запрашивает список доступных макетов
-	raw, err := d.sendRaw("JBL")
+	// Команда GJL (Job List) запрашивает список доступных макетов
+	raw, err := d.sendRaw("GJL")
 	if err != nil {
 		return nil, err
 	}
