@@ -316,6 +316,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	if strings.Contains(resp, "ERR") {
 		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
 	}
+	log.Printf("[VIDEOJET %s] >: %s]", d.Address, resp)
 
 	successCount := 0
 	for i, code := range codes {
@@ -332,6 +333,8 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 			log.Printf("[VIDEOJET %s] Ошибка загрузки кода с индексом %d", d.Address, currentIndex)
 			break
 		}
+
+		log.Printf("[VIDEOJET %s] >: %s, %s", d.Address, resp, code)
 		successCount++
 	}
 

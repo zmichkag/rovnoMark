@@ -243,6 +243,7 @@
 
         if (tabId === 'settings') loadSettingsData();
         if (tabId === 'control') updatePrintTargets();
+        if (tabId === 'templatesTab') updateTemplateTargets();
     }
 
     // --- МОНИТОРИНГ ---
@@ -607,6 +608,73 @@
         document.getElementById('p_port').value = '9100';
         document.getElementById('p_line_id').value = '0';
         document.getElementById('p_active').checked = true; // По умолчанию активен
+    }
+
+    // Функция для загрузки принтеров в селектор вкладки "Шаблоны"
+    async function updateTemplateTargets() {
+        try {
+            const res = await fetch('/api/printers');
+            const data = await res.json();
+            const select = document.getElementById('template_printer_select');
+
+            // Фильтруем только активные принтеры
+            const activePrinters = (data.all_printers || []).filter(p => p.is_active);
+
+            if (select && activePrinters.length > 0) {
+                select.innerHTML = activePrinters.map(p =>
+                    `<option value="${p.id}">[ID: ${p.id}] ${p.name} (${p.ip})</option>`
+                ).join('');
+            } else if (select) {
+                select.innerHTML = '<option value="">Нет активных принтеров</option>';
+            }
+        } catch (e) {
+            console.error("Ошибка загрузки принтеров для шаблонов", e);
+        }
+    }
+
+    // Запрос списка шаблонов у конкретного принтера
+    async function fetchPrinterTemplates() {
+        const printerId = document.getElementById('template_printer_select').value;
+        if (!printerId) {
+            alert("Сначала выберите принтер!");
+            return;
+        }
+
+        const listContainer = document.getElementById('templates_list');
+        listContainer.innerHTML = '<li style="color: var(--warning);">⏳ Опрашиваю память принтера...</li>';
+
+        try {
+            const res = await fetch(`/api/templates?printer_id=${printerId}`);
+            if (res.ok) {
+                const templates = await res.json();
+                if (templates.length === 0) {
+                    listContainer.innerHTML = '<li style="color: var(--text-muted);">Память пуста или шаблоны не найдены.</li>';
+                    return;
+                }
+
+                // Отрисовываем список в виде красивых блоков
+                listContainer.innerHTML = templates.map(t => `
+                <li style="background: #2a2a2a; margin-bottom: 5px; padding: 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid var(--primary);">
+                    <span style="font-family: monospace; font-size: 1.1rem;">📄 ${t}</span>
+                    <button class="btn" style="background: #444; padding: 4px 10px; font-size: 0.8rem;" onclick="copyTemplateName('${t}')">Копировать имя</button>
+                </li>
+            `).join('');
+            } else {
+                const err = await res.text();
+                listContainer.innerHTML = `<li style="color: var(--danger);">❌ Ошибка: ${err}</li>`;
+            }
+        } catch (e) {
+            listContainer.innerHTML = `<li style="color: var(--danger);">❌ Ошибка связи с сервером.</li>`;
+        }
+    }
+
+    // Вспомогательная функция для копирования имени шаблона в буфер обмена
+    function copyTemplateName(name) {
+        navigator.clipboard.writeText(name).then(() => {
+            alert(`Имя шаблона "${name}" скопировано в буфер обмена!`);
+        }).catch(err => {
+            console.error('Ошибка копирования: ', err);
+        });
     }
 
     setInterval(fetchPrintersStatus, 2000);
