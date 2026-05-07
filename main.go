@@ -208,18 +208,78 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 	})
 
-	// Получение всех линий для выпадающих списков
+	// Получение и создание линий
 	http.HandleFunc("/api/lines", func(w http.ResponseWriter, r *http.Request) {
-		lines, _ := store.GetAllLines()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(lines)
+		// Если это запрос на получение списка линий (GET)
+		if r.Method == http.MethodGet {
+			lines, _ := store.GetAllLines()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(lines)
+			return
+		}
+
+		// Если это запрос на создание новой линии (POST)
+		if r.Method == http.MethodPost {
+			var l core.LineConfig
+			if err := json.NewDecoder(r.Body).Decode(&l); err != nil {
+				http.Error(w, "Ошибка парсинга JSON", http.StatusBadRequest)
+				return
+			}
+
+			// Сохраняем в базу (метод SaveLine уже есть в вашем storage.go)
+			if err := store.SaveLine(l); err != nil {
+				http.Error(w, "Ошибка сохранения в БД", http.StatusInternalServerError)
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+
+		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
 	})
 
-	// Получение таблицы связок (Линия - Принтер - Роль)
+	// Универсальный эндпоинт для работы с привязками (Линия <-> Принтер)
 	http.HandleFunc("/api/assignments", func(w http.ResponseWriter, r *http.Request) {
-		data, _ := store.GetAssignments()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
+		// 1. Получение списка привязок (GET)
+		if r.Method == http.MethodGet {
+			data, err := store.GetAssignments()
+			if err != nil {
+				http.Error(w, "Ошибка получения данных", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(data)
+			return
+		}
+
+		// 2. Создание или обновление привязки (POST)
+		if r.Method == http.MethodPost {
+			var req struct {
+				LineID    int    `json:"line_id"`
+				PrinterID int    `json:"printer_id"`
+				Role      string `json:"role"`
+			}
+
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Ошибка парсинга JSON", http.StatusBadRequest)
+				return
+			}
+
+			// Вызываем метод из storage.go (он использует INSERT OR REPLACE)
+			err := store.AssignPrinterToLine(req.LineID, req.PrinterID, req.Role)
+			if err != nil {
+				http.Error(w, "Ошибка БД", http.StatusInternalServerError)
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"assigned"}`))
+			return
+		}
+
+		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
 	})
 
 	// 5. Раздача UI (Frontend)

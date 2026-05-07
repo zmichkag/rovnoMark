@@ -483,9 +483,24 @@
     }
 
     async function assignPrinter() {
-        const data = { line_id: parseInt(document.getElementById('assign_line').value), printer_id: parseInt(document.getElementById('assign_printer').value), role: document.getElementById('assign_role').value };
-        const res = await fetch('/api/lines/assign', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) });
-        if (res.ok) { alert("Принтер привязан!"); loadSettingsData(); } else { alert("Ошибка привязки: " + await res.text()); }
+        const data = {
+            line_id: parseInt(document.getElementById('assign_line').value),
+            printer_id: parseInt(document.getElementById('assign_printer').value),
+            role: document.getElementById('assign_role').value
+        };
+
+        const res = await fetch('/api/assignments', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+
+        if (res.ok) {
+            alert("Принтер привязан!");
+            loadSettingsData();
+        } else {
+            alert("Ошибка привязки: " + await res.text());
+        }
     }
 
     async function loadSettingsData() {
