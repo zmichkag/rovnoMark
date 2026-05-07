@@ -638,6 +638,7 @@
         }
     }
 
+    // Запрос списка шаблонов у конкретного принтера
     async function fetchPrinterTemplates() {
         const printerId = document.getElementById('template_printer_select').value;
         if (!printerId) {
@@ -657,26 +658,64 @@
                     return;
                 }
 
-                // Добавлена кнопка "Поля" и скрытый div для их отображения
-                listContainer.innerHTML = templates.map(t => `
+                // НОВЫЙ ВАРИАНТ: Добавлена кнопка "Поля" и скрытый блок для их вывода
+                listContainer.innerHTML = templates.map(t => {
+                    // Очищаем имя от спецсимволов для использования в качестве ID HTML-элемента
+                    const safeId = t.replace(/\W/g, '');
+                    return `
                 <li style="background: #2a2a2a; margin-bottom: 10px; padding: 10px; border-radius: 4px; border-left: 3px solid var(--primary);">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <span style="font-family: monospace; font-size: 1.1rem;">📄 ${t}</span>
                         <div>
-                            <button class="btn" style="background: var(--warning); color: black; padding: 4px 10px; font-size: 0.8rem; margin-right: 5px;" onclick="loadTemplateFields(${printerId}, '${t}', 'fields_${t.replace(/\W/g, '')}')">👁 Поля</button>
+                            <button class="btn" style="background: var(--warning); color: black; padding: 4px 10px; font-size: 0.8rem; margin-right: 5px;" onclick="loadTemplateFields(${printerId}, '${t}', 'fields_${safeId}')">👁 Поля</button>
                             <button class="btn" style="background: #444; padding: 4px 10px; font-size: 0.8rem;" onclick="copyTemplateName('${t}')">Копировать имя</button>
                         </div>
                     </div>
-                    <div id="fields_${t.replace(/\W/g, '')}" style="display: none; margin-top: 10px; padding: 10px; background: #1e1e1e; border-radius: 4px; font-size: 0.9rem; color: var(--success);">
+                    <div id="fields_${safeId}" style="display: none; margin-top: 10px; padding: 10px; background: #1e1e1e; border-radius: 4px; font-size: 0.9rem; color: var(--success);">
                     </div>
                 </li>
-            `).join('');
+                `;
+                }).join('');
             } else {
                 const err = await res.text();
                 listContainer.innerHTML = `<li style="color: var(--danger);">❌ Ошибка: ${err}</li>`;
             }
         } catch (e) {
             listContainer.innerHTML = `<li style="color: var(--danger);">❌ Ошибка связи с сервером.</li>`;
+        }
+    }
+
+    // НОВАЯ ФУНКЦИЯ: Запрос полей конкретного шаблона
+    async function loadTemplateFields(printerId, templateName, containerId) {
+        const container = document.getElementById(containerId);
+
+        // Переключатель видимости (если уже открыто - закрываем)
+        if (container.style.display === 'block') {
+            container.style.display = 'none';
+            return;
+        }
+
+        container.style.display = 'block';
+        container.innerHTML = '<i>Загрузка полей...</i>';
+
+        try {
+            // Кодируем имя шаблона, чтобы избежать проблем со спецсимволами в URL
+            const res = await fetch(`/api/template/fields?printer_id=${printerId}&template=${encodeURIComponent(templateName)}`);
+            if (res.ok) {
+                const fields = await res.json();
+                if (!fields || fields.length === 0) {
+                    container.innerHTML = '<span style="color: var(--text-muted);">В этом макете нет динамических переменных.</span>';
+                } else {
+                    // Выводим переменные в виде бейджиков
+                    container.innerHTML = '<b>Переменные:</b> ' + fields.map(f =>
+                        `<span style="display: inline-block; background: #333; padding: 2px 8px; border-radius: 10px; margin: 2px 5px 2px 0;">${f}</span>`
+                    ).join('');
+                }
+            } else {
+                container.innerHTML = `<span style="color: var(--danger);">❌ Ошибка чтения полей</span>`;
+            }
+        } catch (e) {
+            container.innerHTML = `<span style="color: var(--danger);">❌ Сбой связи</span>`;
         }
     }
 
