@@ -41,7 +41,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
+	//log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
 
 	// Videojet требует терминатор \r
 	_, err = conn.Write([]byte(cmd + "\r"))
@@ -51,14 +51,14 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
+	//log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
 	// Читаем до символа \r (терминатор ответа)
 	reader := bufio.NewReader(conn)
 	reply, err := reader.ReadString('\r')
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
+	//log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	//log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	return strings.TrimSpace(reply), nil
 }
@@ -112,7 +112,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		return "", err
 	}
 	// Формат ответа: GCL <уровень> [cite: 1102]
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	return strings.TrimPrefix(raw, "GST "), nil
 }
 
@@ -122,7 +122,7 @@ func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	// Ответ: QSZ | <nn> | <s> | [cite: 678]
 	parts := strings.Split(raw, "|")
 	if len(parts) >= 2 {
@@ -182,146 +182,88 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	return strings.TrimSpace(parts[3]), nil
 }
 
-// PrintBatch загружает пачку кодов напрямую в буфер принтера (потоковая печать)
 func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	log.Printf("[VIDEOJET %s] Старт полной прогрузки пачки (%d шт.)", d.Address, len(codes))
 
-	// Устанавливаем единое TCP-соединение для отправки всей пачки
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("ошибка связи: %v", err)
 	}
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
+	buf := make([]byte, 1024)
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
-	// Сброс парсера принтера перед началом сессии
-	conn.Write([]byte("\r"))
+	// 1. Очистка буфера (SCB)
+	conn.Write([]byte("\rSCB\r"))
+	n, _ := conn.Read(buf)
+	log.Printf("[VIDEOJET %s] 1. SCB: %q", d.Address, string(buf[:n]))
 
-	// 1. Инициализация: Задаем имя переменной для DataMatrix (SHO)[cite: 3]
-	cmdSHO := fmt.Sprintf("SHO|%s|\r", fieldName)
-	conn.Write([]byte(cmdSHO))
-	respSHO, err := reader.ReadString('\r')
-	if err != nil || strings.Contains(respSHO, "ERR") {
-		return 0, fmt.Errorf("принтер отклонил SHO для поля %s: %v", fieldName, strings.TrimSpace(respSHO))
-	}
+	time.Sleep(100 * time.Millisecond)
 
-	// 2. Расширяем лимит буфера под размер текущей пачки (SMR)[cite: 3]
-	// Берем с небольшим запасом
-	cmdSMR := fmt.Sprintf("SMR|%d|\r", len(codes)+50)
-	conn.Write([]byte(cmdSMR))
-	reader.ReadString('\r')
+	// 2. Выбор шаблона (SLA)[cite: 5]
+	templateName := "CHZ"
+	conn.Write([]byte(fmt.Sprintf("SLA|%s|\r", templateName)))
+	n, _ = conn.Read(buf)
+	log.Printf("[VIDEOJET %s] 2. SLA (%s): %q", d.Address, templateName, string(buf[:n]))
 
+	// 3. Настройка поля (SHO)[cite: 5]
+	conn.Write([]byte(fmt.Sprintf("SHO|%s|\r", fieldName)))
+	n, _ = conn.Read(buf)
+	log.Printf("[VIDEOJET %s] 3. SHO (%s): %q", d.Address, fieldName, string(buf[:n]))
+
+	// 4. Лимит записей (SMR)[cite: 5]
+	limit := len(codes) + 50
+	conn.Write([]byte(fmt.Sprintf("SMR|%d|\r", limit)))
+	n, _ = conn.Read(buf)
+	log.Printf("[VIDEOJET %s] 4. SMR (%d): %q", d.Address, limit, string(buf[:n]))
+
+	// 5. Финальный цикл загрузки (SDO)
 	successCount := 0
+	log.Printf("[VIDEOJET %s] 5. Начало потоковой отправки...", d.Address)
 
-	// 3. Потоковая отправка кодов (SDO)[cite: 3]
-	for _, code := range codes {
-		// Очистка спецсимвола GS (FNC1) в формат, понятный Zipher[cite: 3]
-		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
+	for i, code := range codes {
+		// --- ПАРСИНГ И ЭКРАНИРОВАНИЕ ---
+		// 1. Дублируем тильды, чтобы они напечатались как текст
+		cleanCode := strings.ReplaceAll(code, "~", "~~")
+		// 2. Экранируем вертикальную черту (разделитель полей Zipher)
+		cleanCode = strings.ReplaceAll(cleanCode, "|", "~|")
+		// 3. Заменяем спецсимвол GS (0x1d) на управляющий символ FNC1 (~1)[cite: 3]
+		cleanCode = strings.ReplaceAll(cleanCode, "\x1d", "~1")
 
-		cmdSDO := fmt.Sprintf("SDO|%s|\r", cleanCode)
+		// Команда SDO отправляет данные в поля, заданные через SHO[cite: 5]
+		cmd := fmt.Sprintf("SDO|%s|\r", cleanCode)
 
-		// Дедлайн на каждую операцию записи/чтения
 		conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-		_, err := conn.Write([]byte(cmdSDO))
+		_, err := conn.Write([]byte(cmd))
 		if err != nil {
-			log.Printf("[VIDEOJET %s] Обрыв на коде %d: %v", d.Address, successCount, err)
+			log.Printf("[VIDEOJET %s] КРИТИЧНО: Обрыв связи на коде #%d: %v", d.Address, i+1, err)
 			break
 		}
 
-		// Принтер возвращает SFS|остаток_байтов| после каждого успешного SDO[cite: 3]
-		respSDO, err := reader.ReadString('\r')
-		if err != nil || strings.Contains(respSDO, "ERR") {
-			log.Printf("[VIDEOJET %s] Ошибка или NACK на коде %d", d.Address, successCount)
+		// Читаем ответ принтера[cite: 3, 5]
+		n, err = conn.Read(buf)
+		response := string(buf[:n])
+
+		log.Printf("[VIDEOJET %s] > %q", d.Address, strings.TrimSpace(response))
+
+		if err != nil || strings.Contains(response, "ERR") {
+			log.Printf("[VIDEOJET %s] ОШИБКА: Принтер отклонил код #%d [%s]. Ответ: %q", d.Address, i+1, cleanCode, strings.TrimSpace(response))
 			break
 		}
+
+		log.Printf("[VIDEOJET %s] Код #%d (%q) OK. Ответ: %q", d.Address, i+1, cleanCode, strings.TrimSpace(response))
 
 		successCount++
 
-		// Небольшая пауза для стабилизации буфера контроллера принтера[cite: 3]
+		// Небольшая пауза 10мс, чтобы контроллер Videojet успевал записывать данные в Flash[cite: 3]
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	log.Printf("[VIDEOJET %s] Цикл завершен. Успешно: %d/%d", d.Address, successCount, len(codes))
 	return successCount, nil
 }
-
-// GetBufferStatus возвращает количество записей, ожидающих печати в буфере
-func (d *Driver) GetBufferStatus() (int, error) {
-	// Для быстрых запросов статуса используем sendRaw, чтобы не плодить подключения вручную
-	resp, err := d.sendRaw("SRC")
-	if err != nil {
-		return 0, err
-	}
-
-	// Ожидаемый ответ: "SRC|150|"
-	parts := strings.Split(resp, "|")
-	if len(parts) < 2 {
-		return 0, nil
-	}
-
-	count, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err != nil {
-		return 0, nil
-	}
-
-	return count, nil
-}
-
-//func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
-//	d.mu.Lock()
-//	defer d.mu.Unlock()
-//
-//	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-//
-//	// 1. Увеличиваем общий таймаут на подключение до 10 секунд
-//	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-//	if err != nil {
-//		return 0, fmt.Errorf("ошибка подключения: %v", err)
-//	}
-//	defer conn.Close()
-//
-//	successCount := 0
-//	reader := bufio.NewReader(conn)
-//
-//	// Сброс буфера принтера (рекомендация Videojet)
-//	conn.Write([]byte("\r"))
-//
-//	for _, code := range codes {
-//		// Заменяем спецсимвол GS на ~1, как в вашем рабочем шаблоне
-//		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
-//
-//		// Формируем команду JDI
-//		cmd := fmt.Sprintf("JDI|1|%s=%s|\r", fieldName, cleanCode)
-//
-//		// Устанавливаем дедлайн на КАЖДУЮ команду (1 секунда)
-//		conn.SetDeadline(time.Now().Add(1 * time.Second))
-//
-//		_, err := conn.Write([]byte(cmd))
-//		if err != nil {
-//			log.Printf("[VIDEOJET %s] Оборвалась связь на коде %d: %v", d.Address, successCount, err)
-//			break
-//		}
-//
-//		// Ждем подтверждение (ID задания)
-//		resp, err := reader.ReadString('\r')
-//		if err != nil {
-//			log.Printf("[VIDEOJET %s] Принтер не ответил на код %d: %v", d.Address, successCount, err)
-//			break
-//		}
-//
-//		// Если в ответе есть число — код принят[cite: 2]
-//		if resp != "ERR\r" && resp != "NACK\r" && resp != "" {
-//			successCount++
-//		}
-//
-//		// ВАЖНО: Пауза 20мс. Даем принтеру время записать код в очередь.
-//		// Без этой паузы на больших пачках Videojet может "зависнуть".
-//		time.Sleep(20 * time.Millisecond)
-//	}
-//
-//	return successCount, nil
-//}

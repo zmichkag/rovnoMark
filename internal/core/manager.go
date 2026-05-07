@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -183,11 +184,14 @@ func (pm *PrinterManager) backgroundPoller() {
 			pm.states[id] = newState
 			pm.mu.Unlock()
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 }
 
 func (pm *PrinterManager) addLogNoLock(printer, event string) {
+	// Добавляем вывод в консоль:
+	log.Printf("[SYSTEM] Принтер ID:%s - %s", printer, event)
+
 	entry := LogEntry{
 		Time:    time.Now().Format("15:04:05"),
 		Printer: printer,

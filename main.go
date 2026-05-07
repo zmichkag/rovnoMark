@@ -120,10 +120,22 @@ func main() {
 
 	// 4. API для отправки ПАЧКИ (Честный Знак)
 	http.HandleFunc("/api/batch", func(w http.ResponseWriter, r *http.Request) {
+		// Спасаем процесс от падения, если внутри возникнет nil pointer или index out of range
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[КРИТИЧЕСКАЯ ОШИБКА] Паника в /api/batch: %v", rec)
+				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+			}
+		}()
+
+		// Четко видим, что запрос дошел до Go
+		log.Printf("[HTTP] Запрос %s %s", r.Method, r.URL.Path)
+
 		if r.Method != http.MethodPost {
 			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
 			return
 		}
+
 		var req struct {
 			PrinterID string   `json:"printer_id"`
 			FieldName string   `json:"field_name"`
