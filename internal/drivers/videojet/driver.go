@@ -41,7 +41,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
+	//log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
 
 	// Videojet требует терминатор \r
 	_, err = conn.Write([]byte(cmd + "\r"))
@@ -51,14 +51,13 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
+	//log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
 	// Читаем до символа \r (терминатор ответа)
 	reader := bufio.NewReader(conn)
 	reply, err := reader.ReadString('\r')
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	//log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	return strings.TrimSpace(reply), nil
 }
@@ -112,7 +111,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		return "", err
 	}
 	// Формат ответа: GCL <уровень> [cite: 1102]
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	return strings.TrimPrefix(raw, "GST "), nil
 }
 
@@ -122,7 +121,7 @@ func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	// Ответ: QSZ | <nn> | <s> | [cite: 678]
 	parts := strings.Split(raw, "|")
 	if len(parts) >= 2 {
@@ -378,6 +377,7 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	// 1. Очищаем старый буфер сериализации (команда SCB)
 	fmt.Fprint(conn, "SCB\r")
 	reader.ReadString('\r')
+	log.Printf("[VIDEOJET %s] raw >: %s, %s", d.Address, conn.RemoteAddr(), strings.Join(codes, "|"))
 
 	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
 	fmt.Fprintf(conn, "SMR|%d|\r", 2000)
@@ -406,6 +406,7 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 			log.Printf("[SERIAL %s] Ошибка загрузки кода %d", d.Address, successCount)
 			break
 		}
+		log.Printf("[VIDEOJET %s] RAW > %q", d.Address, resp)
 		successCount++
 	}
 
