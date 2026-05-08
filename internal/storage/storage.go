@@ -145,7 +145,7 @@ func runMigration(db *sql.DB) {
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
 func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0 and is_active = 1")
+	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
 	if err != nil {
 		return nil, err
 	}
@@ -230,6 +230,28 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
 		lineID, printerID, role)
 	return err
+}
+
+func (s *Store) GetPrintersByLine(lineID int) ([]core.PrinterConfig, error) {
+	query := `
+        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
+        FROM printers p
+        JOIN line_printers lp ON p.id = lp.printer_id
+        WHERE lp.line_id = ? AND p.is_active = 1`
+
+	rows, err := s.db.Query(query, lineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []core.PrinterConfig
+	for rows.Next() {
+		var p core.PrinterConfig
+		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
+		list = append(list, p)
+	}
+	return list, nil
 }
 
 func (s *Store) GetAssignments() ([]map[string]interface{}, error) {

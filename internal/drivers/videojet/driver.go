@@ -41,7 +41,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
+	//log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
 
 	// Videojet требует терминатор \r
 	_, err = conn.Write([]byte(cmd + "\r"))
@@ -51,14 +51,13 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
+	//log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
 	// Читаем до символа \r (терминатор ответа)
 	reader := bufio.NewReader(conn)
 	reply, err := reader.ReadString('\r')
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	//log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
 	return strings.TrimSpace(reply), nil
 }
@@ -112,7 +111,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		return "", err
 	}
 	// Формат ответа: GCL <уровень> [cite: 1102]
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	return strings.TrimPrefix(raw, "GST "), nil
 }
 
@@ -122,7 +121,7 @@ func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	// Ответ: QSZ | <nn> | <s> | [cite: 678]
 	parts := strings.Split(raw, "|")
 	if len(parts) >= 2 {
@@ -182,6 +181,185 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	return strings.TrimSpace(parts[3]), nil
 }
 
+// GetTemplateFields запрашивает список переменных в указанном макете
+func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
+	// Формируем команду GJF (Get Job Fields)
+	cmd := fmt.Sprintf("GJF|%s|", templateName)
+	raw, err := d.sendRaw(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ожидаемый ответ принтера: GJF|<JobName>|<Field1>|<Field2>|...|
+	if strings.HasPrefix(raw, "ERR") {
+		return nil, fmt.Errorf("принтер вернул ошибку на запрос полей макета %s: %s", templateName, raw)
+	}
+
+	parts := strings.Split(raw, "|")
+	var fields []string
+
+	// parts[0] == "GJF", parts[1] == templateName
+	// Сами переменные начинаются с индекса 2. Последний элемент может быть пустым из-за финального "|"
+	for i := 2; i < len(parts); i++ {
+		field := strings.TrimSpace(parts[i])
+		if field != "" {
+			fields = append(fields, field)
+		}
+	}
+
+	return fields, nil
+}
+
+// GetLastPrintedIndex запрашивает последний напечатанный индекс (команда SLR)
+func (d *Driver) GetLastPrintedIndex() (int, error) {
+	// Отправляем команду SLR
+	raw, err := d.sendRaw("SLR")
+	if err != nil {
+		return 0, err
+	}
+
+	// Ожидаемый ответ: SLR|<index>|
+	parts := strings.Split(raw, "|")
+	if len(parts) >= 2 {
+		indexStr := strings.TrimSpace(parts[1])
+		if indexStr == "" {
+			return 0, nil // Буфер пуст или еще ничего не напечатано
+		}
+
+		idx, err := strconv.Atoi(indexStr)
+		if err != nil {
+			return 0, fmt.Errorf("ошибка парсинга индекса %q: %v", indexStr, err)
+		}
+		return idx, nil
+	}
+
+	// Если принтер вернул ошибку выполнения (default failure response)
+	return 0, fmt.Errorf("неизвестный ответ на команду SLR: %s", raw)
+}
+
+// UpdateStaticFieldsSerial обновляет статические поля в режиме сериализации (команда SCF)
+func (d *Driver) UpdateStaticFieldsSerial(fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, d.Timeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Формируем команду SCF. Синтаксис: SCF|Field1=Val1|Field2=Val2|
+	var sb strings.Builder
+	sb.WriteString("SCF")
+	for name, value := range fields {
+		// Очищаем значение от лишних символов, если нужно
+		sb.WriteString(fmt.Sprintf("|%s=%s", name, value))
+	}
+	sb.WriteString("|\r")
+
+	_, err = conn.Write([]byte(sb.String()))
+	if err != nil {
+		return err
+	}
+
+	// Читаем ответ (ACK или ERR)
+	reader := bufio.NewReader(conn)
+	resp, _ := reader.ReadString('\r')
+
+	if strings.Contains(resp, "ERR") {
+		return fmt.Errorf("ошибка SCF: %s", resp)
+	}
+
+	log.Printf("[VIDEOJET %s] SCF (Статика) успешно: %v", d.Address, fields)
+	return nil
+}
+
+// GetTemplates запрашивает список шаблонов из памяти принтера
+func (d *Driver) GetTemplates() ([]string, error) {
+	// Команда GJL (Job List) запрашивает список доступных макетов
+	raw, err := d.sendRaw("GJL")
+	if err != nil {
+		return nil, err
+	}
+
+	parts := strings.Split(raw, "|")
+	var templates []string
+	log.Printf("[VIDEOJET %s] >: %v", d.Address, raw)
+
+	// Начинаем с индекса 1, так как parts[0] — это эхо команды "JLI"
+	for i := 1; i < len(parts); i++ {
+		name := strings.TrimSpace(parts[i])
+		if name != "" && name != "ERR" {
+			templates = append(templates, name)
+		}
+	}
+
+	if len(templates) == 0 {
+		return nil, fmt.Errorf("шаблоны не найдены или принтер вернул ошибку: %s", raw)
+	}
+
+	return templates, nil
+}
+
+// PrintBatchIndexed загружает пачку кодов с явным указанием индексов через команду SID
+func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	conn.Write([]byte("\r")) // Сброс парсера
+
+	// 1. Очищаем старый буфер сериализации (команда SCB)
+	fmt.Fprint(conn, "SCB\r")
+	reader.ReadString('\r')
+
+	// 2. Устанавливаем лимит записей (с небольшим запасом от размера пачки)
+	fmt.Fprintf(conn, "SMR|%d|\r", len(codes)+10)
+	reader.ReadString('\r')
+
+	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
+	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
+	resp, _ := reader.ReadString('\r')
+	if strings.Contains(resp, "ERR") {
+		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+	}
+	log.Printf("[VIDEOJET %s] >: %s]", d.Address, resp)
+
+	successCount := 0
+	for i, code := range codes {
+		// Подготовка кода для GS1 (замена \x1d на ~1)
+		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
+		currentIndex := startIndex + i
+
+		// 4. Заливаем данные с индексом (команда SID)
+		// Формат: SID|<index>|<data>|
+		fmt.Fprintf(conn, "SID|%d|%s|\r", currentIndex, cleanCode)
+
+		resp, err := reader.ReadString('\r')
+		if err != nil || strings.Contains(resp, "ERR") {
+			log.Printf("[VIDEOJET %s] Ошибка загрузки кода с индексом %d", d.Address, currentIndex)
+			break
+		}
+
+		log.Printf("[VIDEOJET %s] >: %s, %s", d.Address, resp, code)
+		successCount++
+	}
+
+	return successCount, nil
+}
+
 func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -199,6 +377,7 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	// 1. Очищаем старый буфер сериализации (команда SCB)
 	fmt.Fprint(conn, "SCB\r")
 	reader.ReadString('\r')
+	log.Printf("[VIDEOJET %s] raw >: %s, %s", d.Address, conn.RemoteAddr(), strings.Join(codes, "|"))
 
 	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
 	fmt.Fprintf(conn, "SMR|%d|\r", 2000)
@@ -227,63 +406,9 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 			log.Printf("[SERIAL %s] Ошибка загрузки кода %d", d.Address, successCount)
 			break
 		}
+		log.Printf("[VIDEOJET %s] RAW > %q", d.Address, resp)
 		successCount++
 	}
 
 	return successCount, nil
 }
-
-//func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
-//	d.mu.Lock()
-//	defer d.mu.Unlock()
-//
-//	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-//
-//	// 1. Увеличиваем общий таймаут на подключение до 10 секунд
-//	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-//	if err != nil {
-//		return 0, fmt.Errorf("ошибка подключения: %v", err)
-//	}
-//	defer conn.Close()
-//
-//	successCount := 0
-//	reader := bufio.NewReader(conn)
-//
-//	// Сброс буфера принтера (рекомендация Videojet)
-//	conn.Write([]byte("\r"))
-//
-//	for _, code := range codes {
-//		// Заменяем спецсимвол GS на ~1, как в вашем рабочем шаблоне
-//		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
-//
-//		// Формируем команду JDI
-//		cmd := fmt.Sprintf("JDI|1|%s=%s|\r", fieldName, cleanCode)
-//
-//		// Устанавливаем дедлайн на КАЖДУЮ команду (1 секунда)
-//		conn.SetDeadline(time.Now().Add(1 * time.Second))
-//
-//		_, err := conn.Write([]byte(cmd))
-//		if err != nil {
-//			log.Printf("[VIDEOJET %s] Оборвалась связь на коде %d: %v", d.Address, successCount, err)
-//			break
-//		}
-//
-//		// Ждем подтверждение (ID задания)
-//		resp, err := reader.ReadString('\r')
-//		if err != nil {
-//			log.Printf("[VIDEOJET %s] Принтер не ответил на код %d: %v", d.Address, successCount, err)
-//			break
-//		}
-//
-//		// Если в ответе есть число — код принят[cite: 2]
-//		if resp != "ERR\r" && resp != "NACK\r" && resp != "" {
-//			successCount++
-//		}
-//
-//		// ВАЖНО: Пауза 20мс. Даем принтеру время записать код в очередь.
-//		// Без этой паузы на больших пачках Videojet может "зависнуть".
-//		time.Sleep(20 * time.Millisecond)
-//	}
-//
-//	return successCount, nil
-//}
