@@ -97,13 +97,22 @@
         <!-- Блок 2: Пакетная загрузка ЧЗ -->
         <div style="flex: 1; min-width: 400px; background: var(--surface); padding: 20px; border-radius: 8px; border: 1px solid var(--primary);">
             <h3>Массовая загрузка (Линия ⟶ ЧЗ)</h3>
+
+            <div class="field">
+                <label>Выберите целевую линию:</label>
+                <select id="batch_line_target" style="width:100%; padding:8px; margin-bottom:15px; border-color: var(--primary);"></select>
+            </div>
+
+            <input type="hidden" id="batch_template">
+            <input type="hidden" id="batch_fieldname">
+
             <div id="batch_static_fields_container" style="margin-top: 15px; border-top: 1px solid #333; padding-top: 15px;">
-                <p style="color: var(--text-muted); font-size: 0.8rem;">Выберите шаблон в «Шаблонах», чтобы подтянуть статические поля (Дата, Партия и т.д.)</p>
+                <p style="color: var(--text-muted); font-size: 0.8rem;">Выберите шаблон во вкладке «Шаблоны», чтобы настроить поля.</p>
             </div>
 
             <div class="field" style="margin-top: 15px;">
                 <label>Список кодов ЧЗ:</label>
-                <textarea id="batch_codes" rows="6" style="width:100%; padding:8px; margin-bottom:15px; resize: vertical;"></textarea>
+                <textarea id="batch_codes" rows="6" style="width:100%; padding:8px; margin-bottom:15px; resize: vertical;" placeholder="Вставьте коды, каждый с новой строки..."></textarea>
             </div>
             <button class="btn" style="background: var(--primary); width: 100%; font-size: 1.1rem; padding: 12px;" onclick="sendBatchJobV2()">ОТПРАВИТЬ НА ЛИНИЮ</button>
         </div>

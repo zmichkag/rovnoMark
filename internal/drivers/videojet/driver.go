@@ -211,84 +211,6 @@ func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
 	return fields, nil
 }
 
-// GetTemplates запрашивает список шаблонов из памяти принтера
-func (d *Driver) GetTemplates() ([]string, error) {
-	// Команда GJL (Job List) запрашивает список доступных макетов
-	raw, err := d.sendRaw("GJL")
-	if err != nil {
-		return nil, err
-	}
-
-	parts := strings.Split(raw, "|")
-	var templates []string
-	log.Printf("[VIDEOJET %s] >: %v", d.Address, raw)
-
-	// Начинаем с индекса 1, так как parts[0] — это эхо команды "JLI"
-	for i := 1; i < len(parts); i++ {
-		name := strings.TrimSpace(parts[i])
-		if name != "" && name != "ERR" {
-			templates = append(templates, name)
-		}
-	}
-
-	if len(templates) == 0 {
-		return nil, fmt.Errorf("шаблоны не найдены или принтер вернул ошибку: %s", raw)
-	}
-
-	return templates, nil
-}
-
-func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-	if err != nil {
-		return 0, err
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	conn.Write([]byte("\r")) // Сброс парсера
-
-	// 1. Очищаем старый буфер сериализации (команда SCB)
-	fmt.Fprint(conn, "SCB\r")
-	reader.ReadString('\r')
-
-	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
-	fmt.Fprintf(conn, "SMR|%d|\r", 2000)
-	reader.ReadString('\r')
-
-	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
-	// Синтаксис: SHO | <имя_поля> |
-	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
-	resp, _ := reader.ReadString('\r')
-	if strings.Contains(resp, "ERR") {
-		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
-	}
-
-	successCount := 0
-	for _, code := range codes {
-		// Подготовка кода для GS1 (замена \x1d на ~1)
-		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
-
-		// 4. Заливаем данные в буфер (команда SDO)
-		// Синтаксис: SDO | <данные> |
-		fmt.Fprintf(conn, "SDO|%s|\r", cleanCode)
-
-		// При успехе SDO возвращает количество свободного места (SFS)
-		resp, err := reader.ReadString('\r')
-		if err != nil || strings.Contains(resp, "ERR") {
-			log.Printf("[SERIAL %s] Ошибка загрузки кода %d", d.Address, successCount)
-			break
-		}
-		successCount++
-	}
-
-	return successCount, nil
-}
-
 // GetLastPrintedIndex запрашивает последний напечатанный индекс (команда SLR)
 func (d *Driver) GetLastPrintedIndex() (int, error) {
 	// Отправляем команду SLR
@@ -314,6 +236,75 @@ func (d *Driver) GetLastPrintedIndex() (int, error) {
 
 	// Если принтер вернул ошибку выполнения (default failure response)
 	return 0, fmt.Errorf("неизвестный ответ на команду SLR: %s", raw)
+}
+
+// UpdateStaticFieldsSerial обновляет статические поля в режиме сериализации (команда SCF)
+func (d *Driver) UpdateStaticFieldsSerial(fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, d.Timeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Формируем команду SCF. Синтаксис: SCF|Field1=Val1|Field2=Val2|
+	var sb strings.Builder
+	sb.WriteString("SCF")
+	for name, value := range fields {
+		// Очищаем значение от лишних символов, если нужно
+		sb.WriteString(fmt.Sprintf("|%s=%s", name, value))
+	}
+	sb.WriteString("|\r")
+
+	_, err = conn.Write([]byte(sb.String()))
+	if err != nil {
+		return err
+	}
+
+	// Читаем ответ (ACK или ERR)
+	reader := bufio.NewReader(conn)
+	resp, _ := reader.ReadString('\r')
+
+	if strings.Contains(resp, "ERR") {
+		return fmt.Errorf("ошибка SCF: %s", resp)
+	}
+
+	log.Printf("[VIDEOJET %s] SCF (Статика) успешно: %v", d.Address, fields)
+	return nil
+}
+
+// GetTemplates запрашивает список шаблонов из памяти принтера
+func (d *Driver) GetTemplates() ([]string, error) {
+	// Команда GJL (Job List) запрашивает список доступных макетов
+	raw, err := d.sendRaw("GJL")
+	if err != nil {
+		return nil, err
+	}
+
+	parts := strings.Split(raw, "|")
+	var templates []string
+	log.Printf("[VIDEOJET %s] >: %v", d.Address, raw)
+
+	// Начинаем с индекса 1, так как parts[0] — это эхо команды "JLI"
+	for i := 1; i < len(parts); i++ {
+		name := strings.TrimSpace(parts[i])
+		if name != "" && name != "ERR" {
+			templates = append(templates, name)
+		}
+	}
+
+	if len(templates) == 0 {
+		return nil, fmt.Errorf("шаблоны не найдены или принтер вернул ошибку: %s", raw)
+	}
+
+	return templates, nil
 }
 
 // PrintBatchIndexed загружает пачку кодов с явным указанием индексов через команду SID
@@ -364,6 +355,57 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		}
 
 		log.Printf("[VIDEOJET %s] >: %s, %s", d.Address, resp, code)
+		successCount++
+	}
+
+	return successCount, nil
+}
+
+func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	conn.Write([]byte("\r")) // Сброс парсера
+
+	// 1. Очищаем старый буфер сериализации (команда SCB)
+	fmt.Fprint(conn, "SCB\r")
+	reader.ReadString('\r')
+
+	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
+	fmt.Fprintf(conn, "SMR|%d|\r", 2000)
+	reader.ReadString('\r')
+
+	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
+	// Синтаксис: SHO | <имя_поля> |
+	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
+	resp, _ := reader.ReadString('\r')
+	if strings.Contains(resp, "ERR") {
+		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+	}
+
+	successCount := 0
+	for _, code := range codes {
+		// Подготовка кода для GS1 (замена \x1d на ~1)
+		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
+
+		// 4. Заливаем данные в буфер (команда SDO)
+		// Синтаксис: SDO | <данные> |
+		fmt.Fprintf(conn, "SDO|%s|\r", cleanCode)
+
+		// При успехе SDO возвращает количество свободного места (SFS)
+		resp, err := reader.ReadString('\r')
+		if err != nil || strings.Contains(resp, "ERR") {
+			log.Printf("[SERIAL %s] Ошибка загрузки кода %d", d.Address, successCount)
+			break
+		}
 		successCount++
 	}
 
