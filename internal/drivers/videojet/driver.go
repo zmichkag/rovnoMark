@@ -55,6 +55,7 @@ func (d *Driver) ClearQueue() error {
 	_, err := d.sendRaw("CQI") // Очищает все элементы очереди [cite: 610]
 	return err
 }
+
 func (d *Driver) GetBufferFreeSpace() (int, error) {
 	raw, err := d.sendRaw("SFS")
 	if err != nil {
@@ -90,7 +91,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	//log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
+	log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
 
 	// Videojet требует терминатор \r
 	_, err = conn.Write([]byte(cmd + "\r"))
@@ -100,7 +101,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	//log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
+	log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
 	// Читаем до символа \r (терминатор ответа)
 	reader := bufio.NewReader(conn)
 	reply, err := reader.ReadString('\r')
@@ -160,7 +161,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		return "", err
 	}
 	// Формат ответа: GCL <уровень> [cite: 1102]
-	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	return strings.TrimPrefix(raw, "GST "), nil
 }
 
@@ -170,7 +171,7 @@ func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	//log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
 	// Ответ: QSZ | <nn> | <s> | [cite: 678]
 	parts := strings.Split(raw, "|")
 	if len(parts) >= 2 {
