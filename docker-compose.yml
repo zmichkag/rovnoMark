@@ -2,9 +2,10 @@ services:
   rovnomark:
     build: .
     container_name: rovnomark-app
+    # Теперь мы явно передаем флаги при запуске контейнера
+    command: ["/bin/marking-service", "--port=8080", "--debug"]
     ports:
       - "8080:8080"
     volumes:
-      # Папка ./data с хоста пробрасывается в рабочую папку приложения
       - ./data:/app/data
     restart: always
