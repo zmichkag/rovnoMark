@@ -178,13 +178,14 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 	return list, nil
 }
 
-// Привязать принтер к линии
+// AssignPrinterToLine Привязать принтер к линии
 func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
 		lineID, printerID, role)
 	return err
 }
 
+// GetPrintersByLine Показывает привязаные  принтеры
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	query := `
         SELECT p.id, p.name, p.ip, p.port, p.driver_type 
@@ -268,6 +269,15 @@ func New(path string) *Store {
 	return &Store{db: db}
 }
 
+// SaveTelemetry метод для сохранения среза данных
+func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO printer_telemetry (printer_id, cur_count, ribbon_level, status)
+		VALUES (?, ?, ?, ?)`,
+		printerID, count, ribbon, status)
+	return err
+}
+
 // createTables Создает таблички которых не хватает
 func createTables(db *sql.DB) {
 	// Линии
@@ -332,6 +342,20 @@ func createTables(db *sql.DB) {
         printed_at DATETIME,
         FOREIGN KEY(task_id) REFERENCES tasks(id)
     );`)
+
+	// Таблица периодических снимков состояния
+	db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    printer_id INTEGER,
+    cur_count TEXT,
+    ribbon_percent TEXT,
+    is_online TEXT,
+    FOREIGN KEY(printer_id) REFERENCES printers(id)
+);`)
+
+	// Индекс для быстрых отчетов по времени
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_telemetry_time ON printer_telemetry(timestamp);`)
 
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_status ON task_codes(task_id, status);`)
 }

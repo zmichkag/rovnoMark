@@ -38,6 +38,8 @@ func main() {
 		}
 	}
 
+	manager.StartTelemetryCollector(store, 5*time.Minute)
+
 	// 2. API для добавления нового принтера
 	http.HandleFunc("/api/printers/add", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
 	"strconv"
@@ -134,6 +135,56 @@ func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []mod
 	copy(logsCopy, pm.logs)
 
 	return statesCopy, logsCopy
+}
+
+func (pm *PrinterManager) telemetryFlusher(store *storage.Store) {
+	ticker := time.NewTicker(1 * time.Minute)
+	for range ticker.C {
+		pm.mu.RLock()
+		// Делаем снимок текущих состояний
+		snap := make(map[int]models.PrinterState)
+		for id, state := range pm.states {
+			snap[id] = state
+		}
+		pm.mu.RUnlock()
+
+		for id, state := range snap {
+			// Просто передаем всё как есть — строками.
+			// Принтер не умеет в риббон? Придет "N/A". Всё честно.
+			err := store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status)
+			if err != nil {
+				log.Printf("[STATS] Ошибка записи: %v", err)
+			}
+		}
+	}
+}
+
+// StartTelemetryCollector запускает фоновый процесс сбора статистики
+func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		// ticker.C — это канал, который будет "стрелять" раз в указанный интервал
+		for range ticker.C {
+			// ШАГ 1: Быстро делаем "снимок" состояний под защитой RLock
+			pm.mu.RLock()
+			snapshot := make(map[int]models.PrinterState)
+			for id, state := range pm.states {
+				snapshot[id] = state
+			}
+			pm.mu.RUnlock()
+			// С этого момента m.states может меняться другими горутинами,
+			// а мы работаем со своей копией 'snapshot' в спокойном темпе.
+
+			// ШАГ 2: Записываем данные из снимка в базу данных
+			for id, state := range snapshot {
+				// Передаем всё строками, как мы договорились (CurCount, Ribbon, Status)
+				err := store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status)
+				if err != nil {
+					log.Printf("[STATS] Ошибка записи для принтера %d: %v", id, err)
+				}
+			}
+		}
+	}()
 }
 
 func (pm *PrinterManager) backgroundPoller() {
