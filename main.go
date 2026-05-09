@@ -3,10 +3,13 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"rovnoMark/internal/core"
 	"rovnoMark/internal/models"
 	"strconv"
@@ -21,6 +24,23 @@ import (
 var uiFS embed.FS
 
 func main() {
+	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
+	port := flag.Int("port", 8080, "порт для HTTP сервера")
+	flag.Parse()
+
+	// 2. Настраиваем уровень логирования
+	logLevel := new(slog.LevelVar) // по умолчанию INFO
+	if *debugMode {
+		logLevel.Set(slog.LevelDebug)
+	}
+
+	// Создаем логгер (текстовый для разработки или JSON для прода)
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	logger := slog.New(handler)
+	slog.SetDefault(logger) // делаем его глобальным
+
+	slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode)
+
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
 	taskProcessor := &core.TaskProcessor{
@@ -490,6 +510,12 @@ func main() {
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))
 
-	fmt.Println("=== РОВНО: Стендалон запущен (http://localhost:8080) ===")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	addr := fmt.Sprintf(":%d", *port)
+	slog.Info("HTTP сервер запущен", "address", "http://localhost"+addr)
+
+	// Теперь ошибка сервера будет выводиться структурированно
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		slog.Error("Критическая ошибка сервера", "err", err)
+		os.Exit(1)
+	}
 }
