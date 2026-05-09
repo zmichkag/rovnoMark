@@ -13,7 +13,7 @@ COPY . .
 
 # Собираем статически скомпилированный бинарный файл
 # CGO_ENABLED=0 нужен для того, чтобы бинарник не зависел от системных библиотек (libc)
-RUN CGO_ENABLED=0 GOOS=linux go build -o marking-service ./cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o marking-service ./main.go
 
 # Stage 2: Финальный образ
 FROM alpine:latest
