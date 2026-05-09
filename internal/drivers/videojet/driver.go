@@ -20,6 +20,55 @@ type Driver struct {
 	CurTemplate string
 }
 
+// UpdateStaticFields обновляет статические поля в режиме сериализации (команда SCF)
+func (d *Driver) UpdateStaticFields(fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	// Формируем команду SCF. Синтаксис: SCF|<fieldname>=<data>|...| [cite: 935]
+	var sb strings.Builder
+	sb.WriteString("SCF")
+	for name, value := range fields {
+		// Очищаем значение от символов трубы (pipe), чтобы не сломать протокол Zipher
+		cleanValue := strings.ReplaceAll(value, "|", "")
+		sb.WriteString(fmt.Sprintf("|%s=%s", name, cleanValue))
+	}
+	sb.WriteString("|") // Закрывающий pipe обязателен
+
+	// Используем ваш надежный sendRaw (он сам управляет мьютексами, сокетами и таймаутами)
+	resp, err := d.sendRaw(sb.String())
+	if err != nil {
+		return fmt.Errorf("ошибка сети при отправке SCF: %w", err)
+	}
+
+	// Читаем ответ (ожидаем ACK)
+	if strings.Contains(resp, "ERR") {
+		return fmt.Errorf("принтер отклонил обновление статики (SCF): %s", resp)
+	}
+
+	log.Printf("[VIDEOJET %s] SCF (Статика) успешно обновлена: %v", d.Address, fields)
+	return nil
+}
+
+func (d *Driver) ClearQueue() error {
+	_, err := d.sendRaw("CQI") // Очищает все элементы очереди [cite: 610]
+	return err
+}
+func (d *Driver) GetBufferFreeSpace() (int, error) {
+	raw, err := d.sendRaw("SFS")
+	if err != nil {
+		return 0, err
+	}
+	// Ожидаем SFS|952368| [cite: 990]
+	parts := strings.Split(raw, "|")
+	if len(parts) >= 2 {
+		space, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+		return space, nil
+	}
+	return 0, fmt.Errorf("bad SFS response: %s", raw)
+}
+
 func New(ip string, port int) *Driver {
 	return &Driver{
 		Address: ip,
@@ -235,48 +284,6 @@ func (d *Driver) GetLastPrintedIndex() (int, error) {
 
 	// Если принтер вернул ошибку выполнения (default failure response)
 	return 0, fmt.Errorf("неизвестный ответ на команду SLR: %s", raw)
-}
-
-// UpdateStaticFieldsSerial обновляет статические поля в режиме сериализации (команда SCF)
-func (d *Driver) UpdateStaticFieldsSerial(fields map[string]string) error {
-	if len(fields) == 0 {
-		return nil
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", address, d.Timeout)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	// Формируем команду SCF. Синтаксис: SCF|Field1=Val1|Field2=Val2|
-	var sb strings.Builder
-	sb.WriteString("SCF")
-	for name, value := range fields {
-		// Очищаем значение от лишних символов, если нужно
-		sb.WriteString(fmt.Sprintf("|%s=%s", name, value))
-	}
-	sb.WriteString("|\r")
-
-	_, err = conn.Write([]byte(sb.String()))
-	if err != nil {
-		return err
-	}
-
-	// Читаем ответ (ACK или ERR)
-	reader := bufio.NewReader(conn)
-	resp, _ := reader.ReadString('\r')
-
-	if strings.Contains(resp, "ERR") {
-		return fmt.Errorf("ошибка SCF: %s", resp)
-	}
-
-	log.Printf("[VIDEOJET %s] SCF (Статика) успешно: %v", d.Address, fields)
-	return nil
 }
 
 // GetTemplates запрашивает список шаблонов из памяти принтера

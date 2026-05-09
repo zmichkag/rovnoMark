@@ -2,7 +2,9 @@ package core
 
 import (
 	"fmt"
-	"strconv" // Добавляем для конвертации ID в строку для логов
+	"rovnoMark/internal/models"
+	"rovnoMark/internal/storage"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,77 +24,95 @@ type Printer interface {
 	GetPrintSpeed() (string, error)
 	GetCurrentPrintCount() (string, error)
 	GetCurrentTemplate() (string, error)
+	ClearQueue() error                // Очистка очереди (команда CQI)
+	GetBufferFreeSpace() (int, error) // Сколько кодов еще можно дослать
+	UpdateStaticFields(fields map[string]string) error
 }
 
-//LineConfig
-
-type LineConfig struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	IsActive    bool   `json:"is_active"`
-	IsDeleted   bool   `json:"is_deleted"`
+// Добавляем возможность управления задачами
+type TaskProcessor struct {
+	Store   *storage.Store
+	Manager *PrinterManager
 }
 
-// PrinterConfig - физическое устройство
-type PrinterConfig struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	IP         string `json:"ip"`
-	Port       int    `json:"port"`
-	DriverType string `json:"driver_type"`
-	IsActive   bool   `json:"is_active"`
-	IsDeleted  bool   `json:"is_deleted"`
-}
+func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
+	go func() {
+		for {
+			// 1. Проверяем, активна ли еще задача в БД
+			// (Здесь должна быть проверка статуса task из Store)
 
-// PrinterState хранит полную телеметрию
-type PrinterState struct {
-	LastTemplate   string // Для Delta-проверки шаблона
-	LastStaticHash string // Для Delta-проверки полей
-	Status         string `json:"status"`
-	Ribbon         string `json:"ribbon"`
-	Queue          string `json:"queue"`
-	Speed          string `json:"speed"`
-	CurCount       string `json:"cur_count"`
-	CurTemplate    string `json:"cur_template"`
-}
+			// 2. Получаем принтеры линии
+			printers, _ := tp.Store.GetPrintersByLine(lineID)
+			for _, pCfg := range printers {
+				p := tp.Manager.GetPrinter(pCfg.ID)
+				if p == nil {
+					continue
+				}
 
-type LogEntry struct {
-	Time    string `json:"time"`
-	Printer string `json:"printer"`
-	Event   string `json:"event"`
+				// 3. Сколько места в буфере принтера?
+				freeSpace, err := p.GetBufferFreeSpace()
+				if err != nil || freeSpace < 10 {
+					continue
+				} // Ждем, если буфер забит или принтер оффлайн
+
+				// Держим в принтере не более 100 кодов для маневренности
+				targetLoad := 100 - (100 - freeSpace)
+				if targetLoad <= 0 {
+					continue
+				}
+
+				// 4. Берем коды из БД
+				pending, _ := tp.Store.GetNextPendingCodes(taskID, targetLoad)
+				if len(pending) == 0 {
+					continue
+				}
+
+				var codesOnly []string
+				for _, item := range pending {
+					codesOnly = append(codesOnly, item.Code)
+				}
+
+				// 5. Отправляем в принтер через SID
+				startIndex := int(time.Now().UnixNano() / 1e6) // Уникальный индекс для пачки
+				loaded, err := p.PrintBatchIndexed("code", startIndex, codesOnly)
+
+				if err == nil && loaded > 0 {
+					// 6. Обновляем статусы в БД: теперь они 'in_buffer' с привязкой к индексу
+					for i, item := range pending[:loaded] {
+						tp.Store.UpdateCodeStatus(item.ID, "in_buffer", startIndex+i)
+					}
+				}
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}()
 }
 
 type PrinterManager struct {
 	mu       sync.RWMutex
 	printers map[int]Printer
-	configs  map[int]PrinterConfig
-	states   map[int]PrinterState
-	logs     []LogEntry
+	configs  map[int]models.PrinterConfig // ИСПРАВЛЕНО
+	states   map[int]models.PrinterState  // ИСПРАВЛЕНО
+	logs     []models.LogEntry            // ИСПРАВЛЕНО
 }
 
 func NewPrinterManager() *PrinterManager {
-	pm := &PrinterManager{
+	return &PrinterManager{
 		printers: make(map[int]Printer),
-		configs:  make(map[int]PrinterConfig),
-		states:   make(map[int]PrinterState),
-		logs:     make([]LogEntry, 0),
+		configs:  make(map[int]models.PrinterConfig),
+		states:   make(map[int]models.PrinterState),
+		logs:     make([]models.LogEntry, 0),
 	}
-
-	go pm.backgroundPoller()
-
-	return pm
 }
 
-func (pm *PrinterManager) AddPrinter(config PrinterConfig, p Printer) {
+func (pm *PrinterManager) AddPrinter(config models.PrinterConfig, p Printer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	pm.configs[config.ID] = config
 	pm.printers[config.ID] = p
-	pm.states[config.ID] = PrinterState{Status: "INITIALIZING", Ribbon: "?", Queue: "?"}
+	pm.states[config.ID] = models.PrinterState{Status: "INITIALIZING", Ribbon: "?", Queue: "?"}
 
-	// Конвертируем int ID в строку для метода лога
 	pm.addLogNoLock(strconv.Itoa(config.ID), fmt.Sprintf("Принтер добавлен (%s)", config.IP))
 }
 
@@ -102,15 +122,15 @@ func (pm *PrinterManager) GetPrinter(id int) Printer {
 	return pm.printers[id]
 }
 
-func (pm *PrinterManager) GetDashboardData() (map[int]PrinterState, []LogEntry) {
+func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []models.LogEntry) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	statesCopy := make(map[int]PrinterState)
+	statesCopy := make(map[int]models.PrinterState)
 	for k, v := range pm.states {
 		statesCopy[k] = v
 	}
-	logsCopy := make([]LogEntry, len(pm.logs))
+	logsCopy := make([]models.LogEntry, len(pm.logs))
 	copy(logsCopy, pm.logs)
 
 	return statesCopy, logsCopy
@@ -150,7 +170,7 @@ func (pm *PrinterManager) backgroundPoller() {
 
 			pm.mu.Lock()
 			oldState := pm.states[id]
-			newState := PrinterState{
+			newState := models.PrinterState{
 				LastTemplate:   oldState.LastTemplate,
 				LastStaticHash: oldState.LastStaticHash,
 			}
@@ -195,12 +215,12 @@ func (pm *PrinterManager) backgroundPoller() {
 }
 
 func (pm *PrinterManager) addLogNoLock(printer, event string) {
-	entry := LogEntry{
+	entry := models.LogEntry{
 		Time:    time.Now().Format("15:04:05"),
 		Printer: printer,
 		Event:   event,
 	}
-	pm.logs = append([]LogEntry{entry}, pm.logs...)
+	pm.logs = append([]models.LogEntry{entry}, pm.logs...)
 	if len(pm.logs) > 50 {
 		pm.logs = pm.logs[:50]
 	}
@@ -213,7 +233,7 @@ func (pm *PrinterManager) addLog(printer, event string) {
 }
 
 // GetPrinterState возвращает копию текущего состояния принтера
-func (pm *PrinterManager) GetPrinterState(id int) PrinterState {
+func (pm *PrinterManager) GetPrinterState(id int) models.PrinterState {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.states[id]

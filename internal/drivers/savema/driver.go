@@ -17,6 +17,21 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
+func (d *Driver) UpdateStaticFields(fields map[string]string) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *Driver) ClearQueue() error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *Driver) GetBufferFreeSpace() (int, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
 	//TODO implement me
 	panic("implement me")

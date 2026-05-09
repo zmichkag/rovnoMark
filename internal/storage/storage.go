@@ -2,8 +2,9 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
-	"rovnoMark/internal/core"
+	"rovnoMark/internal/models"
 
 	_ "modernc.org/sqlite"
 )
@@ -12,6 +13,228 @@ type Store struct {
 	db *sql.DB
 }
 
+// UpdateCodeStatus переводит код из 'pending' в 'in_buffer' и присваивает ему индекс принтера
+func (s *Store) UpdateCodeStatus(codeID int, status string, printerIndex int) error {
+	_, err := s.db.Exec(`
+		UPDATE task_codes 
+		SET status = ?, printer_index = ? 
+		WHERE id = ?`, status, printerIndex, codeID)
+	return err
+}
+
+// SetTaskStatus меняет статус всей партии (например, на 'completed' или 'stopped')
+func (s *Store) SetTaskStatus(taskID int, status string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
+	return err
+}
+
+// CreateTask Создание задачи и возврат ID
+func (s *Store) CreateTask(lineID int, template string) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO tasks (line_id, template_name, status) VALUES (?, ?, 'active')`, lineID, template)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// AppendCodes Массовая дозаливка кодов в статусе pending
+func (s *Store) AppendCodes(taskID int64, codes []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, _ := tx.Prepare(`INSERT INTO task_codes (task_id, code, status) VALUES (?, ?, 'pending')`)
+	for _, c := range codes {
+		stmt.Exec(taskID, c)
+	}
+	return tx.Commit()
+}
+
+// GetNextPendingCodes выбирает порцию кодов, ожидающих печати.
+// Используется для наполнения внутреннего буфера принтера.
+func (s *Store) GetNextPendingCodes(taskID int, limit int) ([]models.TaskCode, error) {
+	// 1. Выполняем запрос
+	rows, err := s.db.Query(`
+        SELECT id, code 
+        FROM task_codes 
+        WHERE task_id = ? AND status = 'pending' 
+        LIMIT ?`, taskID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка запроса кодов: %w", err)
+	}
+	defer rows.Close()
+
+	var list []models.TaskCode
+
+	// 2. Итерируемся по результатам
+	for rows.Next() {
+		var tc models.TaskCode
+		// Обязательно проверяем ошибку Scan!
+		if err := rows.Scan(&tc.ID, &tc.Code); err != nil {
+			return nil, fmt.Errorf("ошибка сканирования строки: %w", err)
+		}
+		list = append(list, tc)
+	}
+
+	// 3. Проверяем, не случилась ли ошибка в процессе итерации
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка после чтения всех строк: %w", err)
+	}
+
+	return list, nil
+}
+
+// Синхронизация статуса 'printed' на основе индекса SID от принтера
+func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
+	res, err := s.db.Exec(`
+		UPDATE task_codes 
+		SET status = 'printed', printed_at = CURRENT_TIMESTAMP 
+		WHERE task_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
+		taskID, lastIndex)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// GetAllActivePrinters (для инициализации менеджера при запуске)
+func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) { // Замена core -> models
+	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.PrinterConfig
+	for rows.Next() {
+		var p models.PrinterConfig
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
+			continue
+		}
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+func (s *Store) GetPrinterLineMap() (map[int]int, error) {
+	rows, err := s.db.Query("SELECT printer_id, line_id FROM line_printers")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[int]int)
+	for rows.Next() {
+		var pid, lid int
+		rows.Scan(&pid, &lid)
+		m[pid] = lid
+	}
+	return m, nil
+}
+
+func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
+	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
+	var id interface{} = p.ID
+	if p.ID == 0 {
+		id = nil
+	}
+
+	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive)
+	if err != nil {
+		return 0, err
+	}
+
+	if p.ID == 0 {
+		return res.LastInsertId()
+	}
+	return int64(p.ID), nil
+}
+
+// Сохранить или обновить линию
+func (s *Store) SaveLine(l models.LineConfig) error {
+	query := `INSERT OR REPLACE INTO lines (id, name, description, is_active) VALUES (?, ?, ?, ?)`
+	var id interface{} = l.ID
+	if l.ID == 0 {
+		id = nil
+	}
+	_, err := s.db.Exec(query, id, l.Name, l.Description, l.IsActive)
+	return err
+}
+
+// Получить все активные линии
+func (s *Store) GetAllLines() ([]models.LineConfig, error) {
+	rows, err := s.db.Query("SELECT id, name, description, is_active FROM lines WHERE is_deleted = 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.LineConfig
+	for rows.Next() {
+		var l models.LineConfig
+		rows.Scan(&l.ID, &l.Name, &l.Description, &l.IsActive)
+		list = append(list, l)
+	}
+	return list, nil
+}
+
+// Привязать принтер к линии
+func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
+		lineID, printerID, role)
+	return err
+}
+
+func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
+	query := `
+        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
+        FROM printers p
+        JOIN line_printers lp ON p.id = lp.printer_id
+        WHERE lp.line_id = ? AND p.is_active = 1`
+
+	rows, err := s.db.Query(query, lineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.PrinterConfig
+	for rows.Next() {
+		var p models.PrinterConfig
+		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+// GetAssignments возвращает список всех привязок линий к принтерам с их ролями
+func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
+	query := `
+		SELECT l.name as line_name, p.name as printer_name, lp.role 
+		FROM line_printers lp
+		JOIN lines l ON lp.line_id = l.id
+		JOIN printers p ON lp.printer_id = p.id
+	`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var lName, pName, role string
+
+		if err := rows.Scan(&lName, &pName, &role); err != nil {
+			log.Printf("ОШИБКА SCAN В ПРИВЯЗКАХ: %v", err)
+			continue
+		}
+		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
+	}
+	return result, nil
+}
+
+// New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
 func New(path string) *Store {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -45,6 +268,7 @@ func New(path string) *Store {
 	return &Store{db: db}
 }
 
+// createTables Создает таблички которых не хватает
 func createTables(db *sql.DB) {
 	// Линии
 	db.Exec(`CREATE TABLE IF NOT EXISTS lines (
@@ -88,8 +312,28 @@ func createTables(db *sql.DB) {
 		FOREIGN KEY(printer_id) REFERENCES printers(id)
 	);`)
 
-	// Индексы
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_event_log_time ON event_log(timestamp);`)
+	// Таблица задач (Партий)
+	db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        line_id INTEGER,
+        template_name TEXT,
+        status TEXT DEFAULT 'active', -- 'active', 'completed', 'stopped'
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(line_id) REFERENCES lines(id)
+    );`)
+
+	// Таблица кодов с расширенными статусами и индексами SID
+	db.Exec(`CREATE TABLE IF NOT EXISTS task_codes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        code TEXT NOT NULL,
+        status TEXT DEFAULT 'pending', -- 'pending', 'in_buffer', 'printed'
+        printer_index INTEGER,          -- Индекс, присвоенный в очереди принтера (SID)
+        printed_at DATETIME,
+        FOREIGN KEY(task_id) REFERENCES tasks(id)
+    );`)
+
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_status ON task_codes(task_id, status);`)
 }
 
 // runMigration перетаскивает данные из бэкапа прозрачно для пользователя
@@ -141,141 +385,4 @@ func runMigration(db *sql.DB) {
 	// 5. Удаляем бэкап
 	db.Exec("DROP TABLE printers_v1_backup")
 	log.Println("=== МИГРАЦИЯ УСПЕШНО ЗАВЕРШЕНА ===")
-}
-
-// GetAllActivePrinters (для инициализации менеджера при запуске)
-func (s *Store) GetAllPrinters() ([]core.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []core.PrinterConfig
-	for rows.Next() {
-		var p core.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
-			log.Printf("ОШИБКА ЧТЕНИЯ ПРИНТЕРА ИЗ БД: %v", err)
-			continue
-		}
-		list = append(list, p)
-	}
-	return list, nil
-}
-
-func (s *Store) GetPrinterLineMap() (map[int]int, error) {
-	rows, err := s.db.Query("SELECT printer_id, line_id FROM line_printers")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	m := make(map[int]int)
-	for rows.Next() {
-		var pid, lid int
-		rows.Scan(&pid, &lid)
-		m[pid] = lid
-	}
-	return m, nil
-}
-
-func (s *Store) SavePrinter(p core.PrinterConfig) (int64, error) {
-	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
-	var id interface{} = p.ID
-	if p.ID == 0 {
-		id = nil
-	}
-
-	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive)
-	if err != nil {
-		return 0, err
-	}
-
-	if p.ID == 0 {
-		return res.LastInsertId()
-	}
-	return int64(p.ID), nil
-}
-
-// Сохранить или обновить линию
-func (s *Store) SaveLine(l core.LineConfig) error {
-	query := `INSERT OR REPLACE INTO lines (id, name, description, is_active) VALUES (?, ?, ?, ?)`
-	var id interface{} = l.ID
-	if l.ID == 0 {
-		id = nil
-	}
-	_, err := s.db.Exec(query, id, l.Name, l.Description, l.IsActive)
-	return err
-}
-
-// Получить все активные линии
-func (s *Store) GetAllLines() ([]core.LineConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, description, is_active FROM lines WHERE is_deleted = 0")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []core.LineConfig
-	for rows.Next() {
-		var l core.LineConfig
-		rows.Scan(&l.ID, &l.Name, &l.Description, &l.IsActive)
-		list = append(list, l)
-	}
-	return list, nil
-}
-
-// Привязать принтер к линии
-func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
-		lineID, printerID, role)
-	return err
-}
-
-func (s *Store) GetPrintersByLine(lineID int) ([]core.PrinterConfig, error) {
-	query := `
-        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
-        FROM printers p
-        JOIN line_printers lp ON p.id = lp.printer_id
-        WHERE lp.line_id = ? AND p.is_active = 1`
-
-	rows, err := s.db.Query(query, lineID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []core.PrinterConfig
-	for rows.Next() {
-		var p core.PrinterConfig
-		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
-		list = append(list, p)
-	}
-	return list, nil
-}
-
-func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
-	query := `
-		SELECT l.name as line_name, p.name as printer_name, lp.role 
-		FROM line_printers lp
-		JOIN lines l ON lp.line_id = l.id
-		JOIN printers p ON lp.printer_id = p.id
-	`
-	rows, err := s.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []map[string]interface{}
-	for rows.Next() {
-		var lName, pName, role string
-
-		if err := rows.Scan(&lName, &pName, &role); err != nil {
-			log.Printf("ОШИБКА SCAN В ПРИВЯЗКАХ: %v", err)
-			continue
-		}
-		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
-	}
-	return result, nil
 }
