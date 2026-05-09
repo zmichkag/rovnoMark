@@ -12,21 +12,19 @@ RUN go mod download
 COPY . .
 
 # Собираем статически скомпилированный бинарный файл
-# CGO_ENABLED=0 нужен для того, чтобы бинарник не зависел от системных библиотек (libc)
 RUN CGO_ENABLED=0 GOOS=linux go build -o marking-service ./main.go
 
 # Stage 2: Финальный образ
 FROM alpine:latest
 
-# Добавляем сертификаты для защищенных соединений (нужны для связи с ИС МП / Честный ЗНАК)
-RUN apk --no-cache add ca-certificates
+# Устанавливаем сертификаты и таймзоны (важно для логов)
+RUN apk --no-cache add ca-certificates tzdata
 
-WORKDIR /root/
+# Складываем экзешник в системную папку /bin/
+COPY --from=builder /app/marking-service /bin/marking-service
 
-# Копируем только исполняемый файл из первого контейнера
-COPY --from=builder /app/marking-service .
-# Копируем конфиги, если они не пробрасываются через volumes
-COPY --from=builder /app/config ./config
+# Устанавливаем рабочую директорию туда, куда будет смотреть Volume из compose
+WORKDIR /app/data
 
-# Запуск приложения
-CMD ["./marking-service"]
+# Запуск приложения (оно создаст rovnoMark.db прямо в /app/data)
+CMD ["/bin/marking-service"]
