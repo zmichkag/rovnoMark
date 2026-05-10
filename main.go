@@ -35,9 +35,9 @@ func main() {
 	}
 
 	// Создаем логгер (текстовый для разработки или JSON для прода)
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
 	logger := slog.New(handler)
-	slog.SetDefault(logger) // делаем его глобальным
+	slog.SetDefault(logger)
 
 	slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode)
 
