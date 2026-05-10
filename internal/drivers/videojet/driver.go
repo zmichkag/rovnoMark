@@ -19,6 +19,7 @@ type Driver struct {
 	mu          sync.Mutex
 	currstate   string
 	CurTemplate string
+	conn        net.Conn
 }
 
 // sendRaw — низкоуровневый обмен данными
@@ -26,44 +27,60 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", address, d.Timeout)
-	if err != nil {
-		return "", err
+	// 1. Если соединения нет, создаем его (один раз!)
+	if d.conn == nil {
+		address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+		conn, err := net.DialTimeout("tcp", address, d.Timeout)
+		if err != nil {
+			slog.Error("VIDEOJET Connect Error", "ip", d.Address, "err", err)
+			return "", err
+		}
+		d.conn = conn
+
+		// При новом подключении "чистим горло" парсеру
+		d.conn.Write([]byte("\r"))
+		time.Sleep(10 * time.Millisecond)
 	}
-	defer conn.Close()
 
-	// 1. ПЕРВЫМ ДЕЛОМ ШЛЕМ \r (Сброс по мануалу Zipher)
-	// Это очистит буфер принтера перед нашей командой [cite: 99]
-	conn.Write([]byte("\r"))
+	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
 
-	// 2. ТЕПЕРЬ ШЛЕМ КОМАНДУ
 	slog.Debug("VIDEOJET IO Out", "ip", d.Address, "cmd", cmd)
-	_, err = conn.Write([]byte(cmd + "\r"))
+
+	// 2. Отправляем саму команду
+	_, err := d.conn.Write([]byte(cmd + "\r"))
 	if err != nil {
+		d.conn.Close()
+		d.conn = nil // Сбрасываем соединение при ошибке
 		return "", err
 	}
 
-	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	reader := bufio.NewReader(conn)
+	// 3. Читаем ответ побайтно (как sock.recv(1) в Python)
+	var reply []byte
+	buf := make([]byte, 1)
+	for {
+		_, err := d.conn.Read(buf)
+		if err != nil {
+			d.conn.Close()
+			d.conn = nil // При таймауте закроем сокет, в следующий раз переподключится
+			return "", err
+		}
 
-	// Читаем ответ до разделителя \r [cite: 84]
-	reply, err := reader.ReadString('\r')
-	if err != nil {
-		return "", err
+		if buf[0] == '\r' {
+			// Если дошли до \r, но ничего не прочитали (эхо пустого сброса) — читаем дальше
+			if len(reply) == 0 {
+				continue
+			}
+			break // Конец ответа
+		}
+
+		if buf[0] != '\n' { // Игнорируем \n
+			reply = append(reply, buf[0])
+		}
 	}
 
-	cleanReply := strings.TrimSpace(reply)
-
-	// Если получили пустую строку (отголосок первого \r), читаем еще раз
-	if cleanReply == "" {
-		reply, _ = reader.ReadString('\r')
-		cleanReply = strings.TrimSpace(reply)
-	}
-
+	cleanReply := strings.TrimSpace(string(reply))
 	slog.Debug("VIDEOJET IO In", "ip", d.Address, "cmd", cmd, "resp", cleanReply)
 
-	time.Sleep(200 * time.Millisecond)
 	return cleanReply, nil
 }
 
