@@ -184,7 +184,7 @@ func (d *Driver) GetStatus() (string, error) {
 
 // GetRemainingRibbon использует команду GCL (Consumable Levels) [cite: 1086]
 func (d *Driver) GetRemainingRibbon() (string, error) {
-	raw, err := d.sendRaw("GST")
+	raw, err := d.sendRaw("GCL")
 	if err != nil {
 		return "", err
 	}
