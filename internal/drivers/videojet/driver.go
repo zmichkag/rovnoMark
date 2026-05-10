@@ -183,7 +183,7 @@ func (d *Driver) GetStatus() (string, error) {
 }
 
 // GetRemainingRibbon использует команду GCL (Consumable Levels)
-func (d *Driver) GetRemainingRibbon() (string, error) {
+func (d *Driver) GetRemainingRibbon(queueName string) (string, error) {
 	raw, err := d.sendRaw("QSZ")
 	if err != nil {
 		return "", err
