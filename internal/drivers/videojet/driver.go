@@ -62,6 +62,8 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	}
 
 	slog.Debug("VIDEOJET IO In", "ip", d.Address, "cmd", cmd, "resp", cleanReply)
+
+	time.Sleep(200 * time.Millisecond)
 	return cleanReply, nil
 }
 
