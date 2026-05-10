@@ -17,8 +17,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o marking-service ./main.go
 # Stage 2: Финальный образ
 FROM alpine:latest
 
-# Устанавливаем сертификаты и таймзоны (важно для логов)
+# Добавляем сертификаты и tzdata для настройки времени
 RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /root/
 
 # Складываем экзешник в системную папку /bin/
 COPY --from=builder /app/marking-service /bin/marking-service

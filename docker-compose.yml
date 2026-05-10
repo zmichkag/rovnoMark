@@ -6,6 +6,8 @@ services:
     command: ["/bin/marking-service", "--debug"]
     ports:
       - "8080:8080"
+    environment:
+      - TZ=Europe/Moscow
     volumes:
       - ./data:/app/data
     logging:
