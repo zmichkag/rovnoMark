@@ -212,7 +212,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 
 // GetQueueCapacity запрашивает QSZ (Queue Size) [cite: 673]
 func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
-	raw, err := d.sendRaw("QSZ")
+	raw, err := d.sendRaw("GCL")
 	if err != nil {
 		return "", err
 	}
