@@ -189,6 +189,8 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		return "", err
 	}
 
+	slog.Debug("VIDEOJET IO", "ip", d.Address, "reply", raw)
+
 	// 1. Убираем префикс "GCL"
 	clean := strings.TrimPrefix(raw, "GCL")
 	clean = strings.TrimSpace(clean)
