@@ -21,6 +21,12 @@ type Driver struct {
 	CurTemplate string
 }
 
+func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
+	//TODO implement me
+	slog.Error("VIDEOJET Connect Error", "ip", d.Address)
+	return "0", nil
+}
+
 // sendRaw — низкоуровневый обмен данными
 func (d *Driver) sendRaw(cmd string) (string, error) {
 	d.mu.Lock()
