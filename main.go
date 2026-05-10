@@ -57,6 +57,7 @@ func main() {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		}
 	}
+
 	go manager.BackgroundPoller()
 
 	manager.StartTelemetryCollector(store, 5*time.Minute)
