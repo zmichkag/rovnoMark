@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -47,7 +48,10 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 		return fmt.Errorf("принтер отклонил обновление статики (SCF): %s", resp)
 	}
 
-	log.Printf("[VIDEOJET %s] SCF (Статика) успешно обновлена: %v", d.Address, fields)
+	slog.Debug("VIDEOJET IO",
+		"ip", d.Address,
+		"reply", fields,
+	)
 	return nil
 }
 
@@ -91,13 +95,19 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	log.Printf("[VIDEOJET %s] Посылаю: %s", d.Address, cmd)
+	slog.Debug("VIDEOJET IO",
+		"ip", d.Address,
+		"send", cmd,
+	)
 
 	// Videojet требует терминатор \r
 	_, err = conn.Write([]byte(cmd + "\r"))
 	if err != nil {
 		return "", err
-		log.Printf("[VIDEOJET %s] поломалось %s", d.Address, cmd)
+		slog.Error("VIDEOJET IO",
+			"ip", d.Address,
+			"send", cmd,
+		)
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
@@ -108,7 +118,11 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	//log.Printf("[VIDEOJET %s] SEND: %q, REPLY: %s", d.Address, cmd, reply)
+	slog.Debug("VIDEOJET IO",
+		"ip", d.Address,
+		"send", cmd,
+		"reply", reply,
+	)
 	return strings.TrimSpace(reply), nil
 }
 
