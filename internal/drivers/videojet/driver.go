@@ -226,7 +226,7 @@ func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 }
 
 func (d *Driver) GetRemainingRibbon() (string, error) {
-	raw, err := d.sendRaw("GSL")
+	raw, err := d.sendRaw("GCL")
 	if err != nil {
 		return "", err
 	}
