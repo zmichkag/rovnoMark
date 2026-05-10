@@ -8,16 +8,15 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/app/data
-    logging: # Указываем теги, чтобы Promtail легко их нашел
+    logging:
       driver: "json-file"
       options:
-        tag: "{{.Name}}"
-    restart: always
+        tag: "{{.Name}}" # Это поможет Promtail найти логи приложения
 
   loki:
     image: grafana/loki:latest
     ports:
-      - "3100:3100"
+      - "3100:3100" # Твоя локальная Графана постучится сюда
     command: -config.file=/etc/loki/local-config.yaml
 
   promtail:
@@ -26,11 +25,3 @@ services:
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
       - ./promtail-config.yaml:/etc/promtail/config.yaml
     command: -config.file=/etc/promtail/config.yaml
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    restart: always
