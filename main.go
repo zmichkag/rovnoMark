@@ -24,7 +24,7 @@ import (
 var uiFS embed.FS
 
 func main() {
-	debugMode := flag.Bool("debug", true, "включить расширенный дебаг-режим")
+	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
 	flag.Parse()
 

@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
 	"strconv"
@@ -188,6 +189,7 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 }
 
 func (pm *PrinterManager) BackgroundPoller() {
+	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
 	for {
 		pm.mu.RLock()
 		var ids []int
@@ -261,7 +263,8 @@ func (pm *PrinterManager) BackgroundPoller() {
 			pm.states[id] = newState
 			pm.mu.Unlock()
 		}
-		time.Sleep(2 * time.Second)
+		slog.Debug("Итерация опроса завершена", "printers_count", len(ids))
+		time.Sleep(5 * time.Second)
 	}
 }
 
