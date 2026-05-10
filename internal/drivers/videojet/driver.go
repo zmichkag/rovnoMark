@@ -182,18 +182,28 @@ func (d *Driver) GetStatus() (string, error) {
 	}
 }
 
-// GetRemainingRibbon использует команду GCL (Consumable Levels) [cite: 1086]
+// GetRemainingRibbon использует команду GCL (Consumable Levels)
 func (d *Driver) GetRemainingRibbon() (string, error) {
 	raw, err := d.sendRaw("GCL")
 	if err != nil {
 		return "", err
 	}
-	slog.Debug("VIDEOJET IO",
-		"ip", d.Address,
-		"reply", raw,
-	)
 
-	return strings.TrimPrefix(raw, "GCL "), nil
+	// 1. Убираем префикс "GCL "
+	clean := strings.TrimPrefix(raw, "GCL")
+	clean = strings.TrimSpace(clean)
+
+	// 2. Убираем финальный разделитель, если он есть [cite: 1112, 1114]
+	clean = strings.TrimSuffix(clean, "|")
+
+	if clean == "" || strings.Contains(clean, "ERR") {
+		return "N/A", nil
+	}
+
+	// Если принтер вернул "85 90" (две головы),
+	// заменяем на слэш для красоты в UI: "85/90%"
+	value := strings.ReplaceAll(clean, "|", "/")
+	return value, nil
 }
 
 // GetQueueCapacity запрашивает QSZ (Queue Size) [cite: 673]
