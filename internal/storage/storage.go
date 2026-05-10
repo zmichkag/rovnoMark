@@ -327,6 +327,7 @@ func createTables(db *sql.DB) {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         line_id INTEGER,
         template_name TEXT,
+        dynamic_field_name TEXT, -- Добавлено
         status TEXT DEFAULT 'active', -- 'active', 'completed', 'stopped'
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(line_id) REFERENCES lines(id)
