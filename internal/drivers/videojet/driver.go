@@ -182,27 +182,27 @@ func (d *Driver) GetStatus() (string, error) {
 	}
 }
 
-// GetRemainingRibbon использует команду GCL (Consumable Levels)
-func (d *Driver) GetRemainingRibbon(queueName string) (string, error) {
-	raw, err := d.sendRaw("QSZ")
-	if err != nil {
-		return "", err
-	}
-	slog.Debug("VIDEOJET IO",
-		"ip", d.Address,
-		"reply", raw,
-	)
-	// Ответ: GCL | 30 | 50 |
-	parts := strings.Split(raw, "|")
-	if len(parts) >= 2 {
-		return strings.TrimSpace(parts[1]), nil
-	}
-
-	return "0", nil
-}
+//// GetRemainingRibbon использует команду GCL (Consumable Levels)
+//func (d *Driver) GetRemainingRibbon(queueName string) (string, error) {
+//	raw, err := d.sendRaw("QSZ")
+//	if err != nil {
+//		return "", err
+//	}
+//	slog.Debug("VIDEOJET IO",
+//		"ip", d.Address,
+//		"reply", raw,
+//	)
+//	// Ответ: GCL | 30 | 50 |
+//	parts := strings.Split(raw, "|")
+//	if len(parts) >= 2 {
+//		return strings.TrimSpace(parts[1]), nil
+//	}
+//
+//	return "0", nil
+//}
 
 // GetQueueCapacity запрашивает QSZ (Queue Size) [cite: 673]
-func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
+func (d *Driver) GetRemainingRibbon() (string, error) {
 	raw, err := d.sendRaw("QSZ")
 	if err != nil {
 		return "", err
