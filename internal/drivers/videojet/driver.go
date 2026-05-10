@@ -29,34 +29,39 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	conn, err := net.DialTimeout("tcp", address, d.Timeout)
 	if err != nil {
-		// Ошибка подключения — это уровень Error или Warn
-		slog.Error("VIDEOJET Connect Error", "ip", d.Address, "err", err)
 		return "", err
 	}
 	defer conn.Close()
 
+	// 1. ПЕРВЫМ ДЕЛОМ ШЛЕМ \r (Сброс по мануалу Zipher)
+	// Это очистит буфер принтера перед нашей командой [cite: 99]
 	conn.Write([]byte("\r"))
-	// Логируем исходящую команду в Debug
-	slog.Debug("VIDEOJET IO Out", "ip", d.Address, "cmd", cmd)
 
+	// 2. ТЕПЕРЬ ШЛЕМ КОМАНДУ
+	slog.Debug("VIDEOJET IO Out", "ip", d.Address, "cmd", cmd)
 	_, err = conn.Write([]byte(cmd + "\r"))
 	if err != nil {
-		slog.Error("VIDEOJET Write Error", "ip", d.Address, "cmd", cmd, "err", err)
 		return "", err
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
 	reader := bufio.NewReader(conn)
+
+	// Читаем ответ до разделителя \r [cite: 84]
 	reply, err := reader.ReadString('\r')
 	if err != nil {
-		slog.Error("VIDEOJET Read Error", "ip", d.Address, "cmd", cmd, "err", err)
 		return "", err
 	}
 
 	cleanReply := strings.TrimSpace(reply)
-	// Логируем входящий ответ в Debug
-	slog.Debug("VIDEOJET IO In", "ip", d.Address, "cmd", cmd, "resp", cleanReply)
 
+	// Если получили пустую строку (отголосок первого \r), читаем еще раз
+	if cleanReply == "" {
+		reply, _ = reader.ReadString('\r')
+		cleanReply = strings.TrimSpace(reply)
+	}
+
+	slog.Debug("VIDEOJET IO In", "ip", d.Address, "cmd", cmd, "resp", cleanReply)
 	return cleanReply, nil
 }
 
