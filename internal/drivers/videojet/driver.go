@@ -234,7 +234,11 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		"ip", d.Address,
 		"reply", raw,
 	)
-	return raw, nil
+	parts := strings.Split(raw, "|")
+	if len(parts) >= 2 {
+		return strings.TrimSpace(parts[1]), nil
+	}
+	return strings.TrimSpace(parts[1]), nil
 }
 
 // PrintTemplate выполняет выбор задания (SLA) и команду печати (PRN) [cite: 123, 347]
