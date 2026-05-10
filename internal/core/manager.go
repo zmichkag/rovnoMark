@@ -29,6 +29,7 @@ type Printer interface {
 	ClearQueue() error                // Очистка очереди (команда CQI)
 	GetBufferFreeSpace() (int, error) // Сколько кодов еще можно дослать
 	UpdateStaticFields(fields map[string]string) error
+	InitSession(fieldName string, maxQueue int) error
 }
 
 // Добавляем возможность управления задачами

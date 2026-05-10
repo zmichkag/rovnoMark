@@ -59,6 +59,33 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	return cleanReply, nil
 }
 
+// InitSession
+func (d *Driver) InitSession(fieldName string, maxQueue int) error {
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	conn.Write([]byte("\r"))
+
+	send := func(c string) (string, error) {
+		fmt.Fprint(conn, c+"\r")
+		return reader.ReadString('\r')
+	}
+
+	send("SCB")
+	send(fmt.Sprintf("SMR|%d|", maxQueue))
+
+	resp, _ := send(fmt.Sprintf("SHO|%s|", fieldName))
+	if strings.Contains(resp, "ERR") {
+		return fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+	}
+	return nil
+}
+
 // UpdateStaticFields обновляет статические поля в режиме сериализации (команда SCF)
 func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	if len(fields) == 0 {
@@ -342,14 +369,14 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return reader.ReadString('\r')
 	}
 
-	send("SCB")
-	send(fmt.Sprintf("SMR|%d|", len(codes)+10))
+	//send("SCB")
+	//send(fmt.Sprintf("SMR|%d|", len(codes)+10))
 
-	resp, _ := send(fmt.Sprintf("SHO|%s|", fieldName))
-	if strings.Contains(resp, "ERR") {
-		slog.Error("VIDEOJET Serialization Error", "ip", d.Address, "field", fieldName, "resp", resp)
-		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
-	}
+	//resp, _ := send(fmt.Sprintf("SHO|%s|", fieldName))
+	//if strings.Contains(resp, "ERR") {
+	//	slog.Error("VIDEOJET Serialization Error", "ip", d.Address, "field", fieldName, "resp", resp)
+	//	return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+	//}
 
 	successCount := 0
 	for i, code := range codes {

@@ -17,6 +17,11 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
+func (d *Driver) InitSession(fieldName string, maxQueue int) error {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	//TODO implement me
 	panic("implement me")
