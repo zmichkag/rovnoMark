@@ -139,28 +139,6 @@ func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []mod
 	return statesCopy, logsCopy
 }
 
-func (pm *PrinterManager) telemetryFlusher(store *storage.Store) {
-	ticker := time.NewTicker(1 * time.Minute)
-	for range ticker.C {
-		pm.mu.RLock()
-		// Делаем снимок текущих состояний
-		snap := make(map[int]models.PrinterState)
-		for id, state := range pm.states {
-			snap[id] = state
-		}
-		pm.mu.RUnlock()
-
-		for id, state := range snap {
-			// Просто передаем всё как есть — строками.
-			// Принтер не умеет в риббон? Придет "N/A". Всё честно.
-			err := store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status)
-			if err != nil {
-				log.Printf("[STATS] Ошибка записи: %v", err)
-			}
-		}
-	}
-}
-
 // StartTelemetryCollector запускает фоновый процесс сбора статистики
 func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval time.Duration) {
 	go func() {
@@ -179,8 +157,8 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 
 			// ШАГ 2: Записываем данные из снимка в базу данных
 			for id, state := range snapshot {
-				// Передаем всё строками, как мы договорились (CurCount, Ribbon, Status)
-				err := store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status)
+				// Теперь передаем и state.CurTemplate
+				err := store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status, state.CurTemplate)
 				if err != nil {
 					log.Printf("[STATS] Ошибка записи для принтера %d: %v", id, err)
 				}
@@ -223,7 +201,13 @@ func (pm *PrinterManager) BackgroundPoller() {
 			}
 
 			pm.mu.Lock()
+
 			oldState := pm.states[id]
+
+			// Если старый шаблон был известен и он не совпадает с новым
+			if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
+				pm.addLogNoLock(strconv.Itoa(id), fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
+			}
 			newState := models.PrinterState{
 				LastTemplate:   oldState.LastTemplate,
 				LastStaticHash: oldState.LastStaticHash,

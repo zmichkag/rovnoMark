@@ -189,21 +189,23 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		return "", err
 	}
 
-	// 1. Убираем префикс "GCL "
+	// 1. Убираем префикс "GCL"
 	clean := strings.TrimPrefix(raw, "GCL")
 	clean = strings.TrimSpace(clean)
 
-	// 2. Убираем финальный разделитель, если он есть [cite: 1112, 1114]
+	// 2. Убираем финальный разделитель
 	clean = strings.TrimSuffix(clean, "|")
 
 	if clean == "" || strings.Contains(clean, "ERR") {
 		return "N/A", nil
 	}
 
-	// Если принтер вернул "85 90" (две головы),
-	// заменяем на слэш для красоты в UI: "85/90%"
+	// 3. Заменяем любые разделители (пробел или пайп) на слэш для UI
+	// Это обработает и "20|50"  и "35 40"
 	value := strings.ReplaceAll(clean, "|", "/")
-	return value, nil
+	value = strings.ReplaceAll(value, " ", "/")
+
+	return value + "%", nil
 }
 
 // GetQueueCapacity запрашивает QSZ (Queue Size) [cite: 673]

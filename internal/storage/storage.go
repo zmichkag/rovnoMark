@@ -270,11 +270,11 @@ func New(path string) *Store {
 }
 
 // SaveTelemetry метод для сохранения среза данных
-func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status string) error {
+func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status string, template string) error {
 	_, err := s.db.Exec(`
-        INSERT INTO printer_telemetry (printer_id, cur_count, ribbon, status)
-        VALUES (?, ?, ?, ?)`,
-		printerID, count, ribbon, status)
+        INSERT INTO printer_telemetry (printer_id, cur_count, ribbon, status, template)
+        VALUES (?, ?, ?, ?, ?)`,
+		printerID, count, ribbon, status, template)
 	return err
 }
 
@@ -346,14 +346,15 @@ func createTables(db *sql.DB) {
 
 	// Таблица периодических снимков состояния
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        printer_id INTEGER,
-        cur_count TEXT,   -- было count, лучше использовать cur_count как в модели
-        ribbon TEXT,
-        status TEXT,
-        FOREIGN KEY(printer_id) REFERENCES printers(id)
-    );`)
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+		printer_id INTEGER,
+		cur_count TEXT,
+		ribbon TEXT,
+		status TEXT,
+		template TEXT, -- Добавлено для аналитики смен
+		FOREIGN KEY(printer_id) REFERENCES printers(id)
+	);`)
 	if err != nil {
 		log.Printf("[DB ERROR] Таблица телеметрии не создана: %v", err)
 	}
