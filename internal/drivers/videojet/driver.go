@@ -209,19 +209,19 @@ func (d *Driver) GetStatus() (string, error) {
 
 // GetQueueCapacity запрашивает QSZ (Queue Size) [cite: 673]
 func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
-	raw, err := d.sendRaw("QSZ")
-	if err != nil {
-		return "", err
-	}
-	slog.Debug("VIDEOJET IO",
-		"ip", d.Address,
-		"reply", raw,
-	)
-	// Ответ: QSZ | <nn> | <s> | [cite: 678]
-	parts := strings.Split(raw, "|")
-	if len(parts) >= 2 {
-		return strings.TrimSpace(parts[1]), nil
-	}
+	//raw, err := d.sendRaw("QSZ")
+	//if err != nil {
+	//	return "", err
+	//}
+	//slog.Debug("VIDEOJET IO",
+	//	"ip", d.Address,
+	//	"reply", raw,
+	//)
+	//// Ответ: QSZ | <nn> | <s> | [cite: 678]
+	//parts := strings.Split(raw, "|")
+	//if len(parts) >= 2 {
+	//	return strings.TrimSpace(parts[1]), nil
+	//}
 	return "0", nil
 }
 
