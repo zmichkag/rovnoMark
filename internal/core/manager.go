@@ -187,7 +187,7 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 	}()
 }
 
-func (pm *PrinterManager) backgroundPoller() {
+func (pm *PrinterManager) BackgroundPoller() {
 	for {
 		pm.mu.RLock()
 		var ids []int

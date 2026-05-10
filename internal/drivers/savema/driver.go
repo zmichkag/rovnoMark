@@ -2,7 +2,7 @@ package savema
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -83,7 +83,11 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[SAVEMA %s] SEND: %s, REPLY: %s", d.Address, cmd, string(reader[:reply]))
+	slog.Debug("SAVEMA IO",
+		"ip", d.Address,
+		"send", cmd,
+		"reply", string(reader[:reply]),
+	)
 	return string(reader[:reply]), nil
 }
 

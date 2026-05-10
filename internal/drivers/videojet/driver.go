@@ -174,8 +174,11 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Формат ответа: GCL <уровень> [cite: 1102]
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	slog.Debug("VIDEOJET IO",
+		"ip", d.Address,
+		"reply", raw,
+	)
+
 	return strings.TrimPrefix(raw, "GST "), nil
 }
 
@@ -185,7 +188,10 @@ func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[VIDEOJET %s] RAW: %s", d.Address, raw)
+	slog.Debug("VIDEOJET IO",
+		"ip", d.Address,
+		"reply", raw,
+	)
 	// Ответ: QSZ | <nn> | <s> | [cite: 678]
 	parts := strings.Split(raw, "|")
 	if len(parts) >= 2 {
