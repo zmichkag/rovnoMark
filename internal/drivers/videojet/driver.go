@@ -29,32 +29,35 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	conn, err := net.DialTimeout("tcp", address, d.Timeout)
 	if err != nil {
+		// Ошибка подключения — это уровень Error или Warn
+		slog.Error("VIDEOJET Connect Error", "ip", d.Address, "err", err)
 		return "", err
 	}
 	defer conn.Close()
 
-	// 1. СБРОС ПАРСЕРА (как в Python-скрипте)
 	conn.Write([]byte("\r"))
+	// Логируем исходящую команду в Debug
+	slog.Debug("VIDEOJET IO Out", "ip", d.Address, "cmd", cmd)
 
-	// 2. ОТПРАВКА КОМАНДЫ
 	_, err = conn.Write([]byte(cmd + "\r"))
 	if err != nil {
+		slog.Error("VIDEOJET Write Error", "ip", d.Address, "cmd", cmd, "err", err)
 		return "", err
 	}
 
 	conn.SetReadDeadline(time.Now().Add(d.Timeout))
 	reader := bufio.NewReader(conn)
-
-	// Читаем ответ. Если первым пришел пустой \r (эхо сброса), читаем следующую строку
 	reply, err := reader.ReadString('\r')
 	if err != nil {
+		slog.Error("VIDEOJET Read Error", "ip", d.Address, "cmd", cmd, "err", err)
 		return "", err
 	}
-	if strings.TrimSpace(reply) == "" {
-		reply, _ = reader.ReadString('\r')
-	}
 
-	return strings.TrimSpace(reply), nil
+	cleanReply := strings.TrimSpace(reply)
+	// Логируем входящий ответ в Debug
+	slog.Debug("VIDEOJET IO In", "ip", d.Address, "cmd", cmd, "resp", cleanReply)
+
+	return cleanReply, nil
 }
 
 // InitSession
@@ -182,17 +185,18 @@ func (d *Driver) GetStatus() (string, error) {
 
 // GetRemainingRibbon использует команду GCL (Consumable Levels)
 func (d *Driver) GetRemainingRibbon() (string, error) {
-	// Шлем именно GCL!
 	raw, err := d.sendRaw("GCL")
 	if err != nil {
 		return "", err
 	}
-
-	// Ответ от Python был "GCL|43|"
-	// Разбираем по пайпу |
+	slog.Debug("VIDEOJET IO",
+		"ip", d.Address,
+		"reply", raw,
+	)
+	// Ответ: GCL | 30 | <s> | [cite: 678]
 	parts := strings.Split(raw, "|")
 	if len(parts) >= 2 {
-		return strings.TrimSpace(parts[1]), nil // Вернет "43"
+		return strings.TrimSpace(parts[1]), nil
 	}
 	return "0", nil
 }
