@@ -184,7 +184,7 @@ func (d *Driver) GetStatus() (string, error) {
 
 // GetRemainingRibbon использует команду GCL (Consumable Levels) [cite: 1086]
 func (d *Driver) GetRemainingRibbon() (string, error) {
-	raw, err := d.sendRaw("GCS")
+	raw, err := d.sendRaw("GCL")
 	if err != nil {
 		return "", err
 	}
@@ -193,7 +193,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 		"reply", raw,
 	)
 
-	return strings.TrimPrefix(raw, "GCS "), nil
+	return strings.TrimPrefix(raw, "GCL "), nil
 }
 
 // GetQueueCapacity запрашивает QSZ (Queue Size) [cite: 673]
