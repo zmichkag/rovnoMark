@@ -21,37 +21,70 @@ type Driver struct {
 	CurTemplate string
 }
 
+// sendRaw — низкоуровневый обмен данными
+func (d *Driver) sendRaw(cmd string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", address, d.Timeout)
+	if err != nil {
+		// Ошибка подключения — это уровень Error или Warn
+		slog.Error("VIDEOJET Connect Error", "ip", d.Address, "err", err)
+		return "", err
+	}
+	defer conn.Close()
+
+	// Логируем исходящую команду в Debug
+	slog.Debug("VIDEOJET IO Out", "ip", d.Address, "cmd", cmd)
+
+	_, err = conn.Write([]byte(cmd + "\r"))
+	if err != nil {
+		slog.Error("VIDEOJET Write Error", "ip", d.Address, "cmd", cmd, "err", err)
+		return "", err
+	}
+
+	conn.SetReadDeadline(time.Now().Add(d.Timeout))
+	reader := bufio.NewReader(conn)
+	reply, err := reader.ReadString('\r')
+	if err != nil {
+		slog.Error("VIDEOJET Read Error", "ip", d.Address, "cmd", cmd, "err", err)
+		return "", err
+	}
+
+	cleanReply := strings.TrimSpace(reply)
+	// Логируем входящий ответ в Debug
+	slog.Debug("VIDEOJET IO In", "ip", d.Address, "cmd", cmd, "resp", cleanReply)
+
+	return cleanReply, nil
+}
+
 // UpdateStaticFields обновляет статические поля в режиме сериализации (команда SCF)
 func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	if len(fields) == 0 {
 		return nil
 	}
 
-	// Формируем команду SCF. Синтаксис: SCF|<fieldname>=<data>|...| [cite: 935]
 	var sb strings.Builder
 	sb.WriteString("SCF")
 	for name, value := range fields {
-		// Очищаем значение от символов трубы (pipe), чтобы не сломать протокол Zipher
 		cleanValue := strings.ReplaceAll(value, "|", "")
 		sb.WriteString(fmt.Sprintf("|%s=%s", name, cleanValue))
 	}
-	sb.WriteString("|") // Закрывающий pipe обязателен
+	sb.WriteString("|")
 
-	// Используем ваш надежный sendRaw (он сам управляет мьютексами, сокетами и таймаутами)
 	resp, err := d.sendRaw(sb.String())
 	if err != nil {
-		return fmt.Errorf("ошибка сети при отправке SCF: %w", err)
+		slog.Error("VIDEOJET SCF Failed", "ip", d.Address, "err", err)
+		return err
 	}
 
-	// Читаем ответ (ожидаем ACK)
 	if strings.Contains(resp, "ERR") {
-		return fmt.Errorf("принтер отклонил обновление статики (SCF): %s", resp)
+		slog.Warn("VIDEOJET SCF Rejected", "ip", d.Address, "resp", resp, "fields", fields)
+		return fmt.Errorf("принтер отклонил SCF: %s", resp)
 	}
 
-	slog.Debug("VIDEOJET IO",
-		"ip", d.Address,
-		"reply", fields,
-	)
+	slog.Info("VIDEOJET Static Updated", "ip", d.Address, "count", len(fields))
 	return nil
 }
 
@@ -82,71 +115,28 @@ func New(ip string, port int) *Driver {
 	}
 }
 
-// sendRaw
-func (d *Driver) sendRaw(cmd string) (string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// Склеиваем IP и Port. %d — формат для целого числа.
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-
-	conn, err := net.DialTimeout("tcp", address, d.Timeout)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	slog.Debug("VIDEOJET IO",
-		"ip", d.Address,
-		"send", cmd,
-	)
-
-	// Videojet требует терминатор \r
-	_, err = conn.Write([]byte(cmd + "\r"))
-	if err != nil {
-		return "", err
-		slog.Error("VIDEOJET IO",
-			"ip", d.Address,
-			"send", cmd,
-		)
-	}
-
-	conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	log.Printf("[VIDEOJET %s] Жду ответа...", d.Address)
-	// Читаем до символа \r (терминатор ответа)
-	reader := bufio.NewReader(conn)
-	reply, err := reader.ReadString('\r')
-	if err != nil {
-		return "", err
-	}
-	slog.Debug("VIDEOJET IO",
-		"ip", d.Address,
-		"send", cmd,
-		"reply", reply,
-	)
-	return strings.TrimSpace(reply), nil
-}
-
-// GetStatus запрашивает GST и разбирает состояние [cite: 426]
+// GetStatus запрашивает GST и разбирает состояние
 func (d *Driver) GetStatus() (string, error) {
-	// Ответ выглядит так: STS |overall|error|job|batch|total|
 	raw, err := d.sendRaw("GST")
 	if err != nil {
 		return "", err
 	}
 
 	d.currstate = raw
-
 	parts := strings.Split(raw, "|")
 	if len(parts) < 2 {
 		return "ОШИБКА ПРОТОКОЛА", nil
 	}
 
-	// overallstate: 0-Shutdown, 3-Running, 4-Offline [cite: 1256-1260]
-	// errorstate: 0-No errors, 1-Warnings, 2-Faults [cite: 1300-1302]
 	stateCode := parts[1]
 	errorCode := ""
 	if len(parts) > 2 {
 		errorCode = parts[2]
+	}
+
+	// Если есть ошибка в статусе — логируем это как Warn
+	if errorCode != "0" && errorCode != "" {
+		slog.Warn("VIDEOJET Device Warning", "ip", d.Address, "state", stateCode, "error_code", errorCode)
 	}
 
 	switch stateCode {
@@ -157,9 +147,6 @@ func (d *Driver) GetStatus() (string, error) {
 	case "2":
 		return "ГОТОВ", nil
 	case "3":
-		if errorCode == "2" {
-			return "ПЕЧАТЬ (ОШИБКА)", nil
-		}
 		return "ПЕЧАТЬ", nil
 	case "4":
 		return "ГОТОВ", nil
@@ -334,11 +321,11 @@ func (d *Driver) GetTemplates() ([]string, error) {
 	return templates, nil
 }
 
-// PrintBatchIndexed загружает пачку кодов с явным указанием индексов через команду SID
+// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	slog.Info("VIDEOJET Batch Start", "ip", d.Address, "field", fieldName, "count", len(codes), "start_idx", startIndex)
 
+	// Мы открываем соединение вручную, так как здесь пакетная передача
 	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {
@@ -347,44 +334,37 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-	conn.Write([]byte("\r")) // Сброс парсера
+	conn.Write([]byte("\r"))
 
-	// 1. Очищаем старый буфер сериализации (команда SCB)
-	fmt.Fprint(conn, "SCB\r")
-	reader.ReadString('\r')
+	// Вспомогательная функция для чистых логов внутри цикла
+	send := func(c string) (string, error) {
+		fmt.Fprint(conn, c+"\r")
+		return reader.ReadString('\r')
+	}
 
-	// 2. Устанавливаем лимит записей (с небольшим запасом от размера пачки)
-	fmt.Fprintf(conn, "SMR|%d|\r", len(codes)+10)
-	reader.ReadString('\r')
+	send("SCB")
+	send(fmt.Sprintf("SMR|%d|", len(codes)+10))
 
-	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
-	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
-	resp, _ := reader.ReadString('\r')
+	resp, _ := send(fmt.Sprintf("SHO|%s|", fieldName))
 	if strings.Contains(resp, "ERR") {
+		slog.Error("VIDEOJET Serialization Error", "ip", d.Address, "field", fieldName, "resp", resp)
 		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
 	}
-	log.Printf("[VIDEOJET %s] >: %s]", d.Address, resp)
 
 	successCount := 0
 	for i, code := range codes {
-		// Подготовка кода для GS1 (замена \x1d на ~1)
 		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
-		currentIndex := startIndex + i
+		currIdx := startIndex + i
 
-		// 4. Заливаем данные с индексом (команда SID)
-		// Формат: SID|<index>|<data>|
-		fmt.Fprintf(conn, "SID|%d|%s|\r", currentIndex, cleanCode)
-
-		resp, err := reader.ReadString('\r')
-		if err != nil || strings.Contains(resp, "ERR") {
-			log.Printf("[VIDEOJET %s] Ошибка загрузки кода с индексом %d", d.Address, currentIndex)
+		r, err := send(fmt.Sprintf("SID|%d|%s|", currIdx, cleanCode))
+		if err != nil || strings.Contains(r, "ERR") {
+			slog.Warn("VIDEOJET SID Item Failed", "ip", d.Address, "idx", currIdx, "err", err, "resp", r)
 			break
 		}
-
-		log.Printf("[VIDEOJET %s] >: %s, %s", d.Address, resp, code)
 		successCount++
 	}
 
+	slog.Info("VIDEOJET Batch Finished", "ip", d.Address, "loaded", successCount, "total", len(codes))
 	return successCount, nil
 }
 
