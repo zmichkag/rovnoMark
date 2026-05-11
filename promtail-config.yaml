@@ -23,6 +23,8 @@ scrape_configs:
           expressions:
             ip: ip       # Извлекаем поле ip из JSON
             level: level # Извлекаем уровень лога (INFO/DEBUG/ERROR)
+            msg: msg
       - labels:
           ip:            # Делаем ip полноценной меткой
-          level:         # Делаем level полноценной меткой
+          level:
+          msg:

@@ -235,6 +235,36 @@ func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+// GetTelemetry возвращает историю состояния принтера
+func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}, error) {
+	query := `
+		SELECT timestamp, cur_count, ribbon, status, template 
+		FROM printer_telemetry 
+		WHERE printer_id = ? 
+		ORDER BY timestamp DESC 
+		LIMIT ?`
+
+	rows, err := s.db.Query(query, printerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var ts, count, ribbon, status, template string
+		rows.Scan(&ts, &count, &ribbon, &status, &template)
+		result = append(result, map[string]interface{}{
+			"time":     ts,
+			"count":    count,
+			"ribbon":   ribbon,
+			"status":   status,
+			"template": template,
+		})
+	}
+	return result, nil
+}
+
 // New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
 func New(path string) *Store {
 	db, err := sql.Open("sqlite", path)

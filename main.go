@@ -134,6 +134,26 @@ func main() {
 		})
 	})
 
+	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		printerIDStr := r.URL.Query().Get("printer_id")
+		limitStr := r.URL.Query().Get("limit")
+
+		idInt, _ := strconv.Atoi(printerIDStr)
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil || limit <= 0 {
+			limit = 100 // По умолчанию 100 записей
+		}
+
+		data, err := store.GetTelemetry(idInt, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(data)
+	})
+
 	// 4. API для отправки ПАЧКИ (Честный Знак)
 	http.HandleFunc("/api/batch", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
