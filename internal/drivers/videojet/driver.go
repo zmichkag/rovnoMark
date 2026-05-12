@@ -91,28 +91,28 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 
 // InitSession
 func (d *Driver) InitSession(fieldName string, maxQueue int) error {
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	// Вместо открытия нового соединения используем существующий механизм sendRaw
+
+	// 1. Очистка буфера
+	if _, err := d.sendRaw("SCB"); err != nil {
+		return fmt.Errorf("SCB failed: %v", err)
+	}
+
+	// 2. Установка лимита очереди
+	if _, err := d.sendRaw(fmt.Sprintf("SMR|%d|", maxQueue)); err != nil {
+		return fmt.Errorf("SMR failed: %v", err)
+	}
+
+	// 3. Выбор поля
+	resp, err := d.sendRaw(fmt.Sprintf("SHO|%s|", fieldName))
 	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	conn.Write([]byte("\r"))
-
-	send := func(c string) (string, error) {
-		fmt.Fprint(conn, c+"\r")
-		return reader.ReadString('\r')
+		return fmt.Errorf("SHO failed: %v", err)
 	}
 
-	send("SCB")
-	send(fmt.Sprintf("SMR|%d|", maxQueue))
-
-	resp, _ := send(fmt.Sprintf("SHO|%s|", fieldName))
 	if strings.Contains(resp, "ERR") {
 		return fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
 	}
+
 	return nil
 }
 
