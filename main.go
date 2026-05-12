@@ -43,10 +43,10 @@ func main() {
 
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
-	taskProcessor := &core.TaskProcessor{
-		Store:   store,
-		Manager: manager,
-	}
+	//taskProcessor := &core.TaskProcessor{
+	//	Store:   store,
+	//	Manager: manager,
+	//}
 
 	// 1. Загружаем все принтеры из базы в работу
 	savedPrinters, _ := store.GetAllPrinters()
@@ -467,7 +467,7 @@ func main() {
 		// 4. ЗАПУСКАЕМ НАКАЧКУ (Task Pumping)
 		// Эта функция запускает бесконечный цикл в горутине, который будет
 		// следить за буфером принтеров на линии и подливать туда коды
-		taskProcessor.StartPumping(req.LineID, int(taskID))
+		//taskProcessor.StartPumping(req.LineID, int(taskID))
 
 		// Логируем для контроля в консоли
 		log.Printf("[TASK] Создана активная партия ID:%d для линии %d (Шаблон: %s)", taskID, req.LineID, req.Template)
@@ -478,7 +478,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "active",
 			"task_id": taskID,
-			"message": "Партия запущена, процесс накачки кодов активирован",
+			//"message": "Партия запущена, процесс накачки кодов активирован",
 		})
 	})
 
