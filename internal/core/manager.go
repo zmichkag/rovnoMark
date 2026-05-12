@@ -30,6 +30,7 @@ type Printer interface {
 	GetBufferFreeSpace() (int, error) // Сколько кодов еще можно дослать
 	UpdateStaticFields(fields map[string]string) error
 	InitSession(fieldName string, maxQueue int) error
+	SelectTemplate(template string) error
 }
 
 // Добавляем возможность управления задачами

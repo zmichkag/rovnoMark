@@ -17,6 +17,11 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
+func (d *Driver) SelectTemplate(template string) error {
+	// заглушка
+	return nil
+}
+
 func (d *Driver) InitSession(fieldName string, maxQueue int) error {
 	//TODO implement me
 	panic("implement me")

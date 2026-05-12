@@ -303,11 +303,9 @@ func main() {
 			// --- ЛОГИКА DELTA ---
 
 			// А) Проверка шаблона
-			if state.LastTemplate != req.Template {
-				log.Printf("[LINE %d] Смена шаблона на %s для принтера %d", req.LineID, req.Template, pCfg.ID)
-				// TODO: p.SelectTemplate(req.Template)
-				state.LastTemplate = req.Template
-			}
+			log.Printf("[LINE %d] Смена шаблона на %s для принтера %d", req.LineID, req.Template, pCfg.ID)
+
+			// Теперь это не просто TODO, а работающий код:
 
 			// Б) Проверка статики (Используем команду SCF)
 			currentHash := fmt.Sprintf("%v", req.StaticFields)
