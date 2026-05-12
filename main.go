@@ -268,6 +268,7 @@ func main() {
 	// 4.1. НОВЫЙ API (Версия 1.5): Линейно-центричный и индексированный
 	http.HandleFunc("/api/v2/line/batch", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
+			slog.Warn("Попытка доступа неверным методом", "method", r.Method, "remote", r.RemoteAddr)
 			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
 			return
 		}
@@ -281,62 +282,94 @@ func main() {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Error("Ошибка декодирования JSON", "err", err)
 			http.Error(w, "JSON Error", http.StatusBadRequest)
 			return
 		}
 
-		// 1. Получаем список принтеров, привязанных к линии
+		slog.Debug("Входящий запрос v2/batch",
+			"line_id", req.LineID,
+			"template", req.Template,
+			"codes_count", len(req.Codes),
+		)
+
+		// 1. Получаем список принтеров
 		printersInLine, err := store.GetPrintersByLine(req.LineID)
-		if err != nil || len(printersInLine) == 0 {
+		if err != nil {
+			slog.Error("Ошибка обращения к БД при поиске принтеров", "line_id", req.LineID, "err", err)
+			http.Error(w, "DB Error", http.StatusInternalServerError)
+			return
+		}
+
+		if len(printersInLine) == 0 {
+			slog.Warn("Запрос на пустую линию", "line_id", req.LineID)
 			http.Error(w, "No printers on this line", http.StatusNotFound)
 			return
 		}
 
+		slog.Debug("Принтеры на линии найдены", "count", len(printersInLine), "line_id", req.LineID)
+
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
-				continue // На случай, если принтер удален из памяти
-			}
-
-			state := manager.GetPrinterState(pCfg.ID)
-
-			// --- ЛОГИКА DELTA ---
-
-			// А) Проверка шаблона
-			log.Printf("[LINE %d] Смена шаблона на %s для принтера %d", req.LineID, req.Template, pCfg.ID)
-
-			// Теперь это не просто TODO, а работающий код:
-
-			// Б) Проверка статики (Используем команду SCF)
-			currentHash := fmt.Sprintf("%v", req.StaticFields)
-			if state.LastStaticHash != currentHash && len(req.StaticFields) > 0 {
-				log.Printf("[LINE %d] Обновление статических полей для принтера %d", req.LineID, pCfg.ID)
-
-				// Вызываем наш новый метод обновления "на лету"
-				err := p.UpdateStaticFields(req.StaticFields)
-				if err != nil {
-					log.Printf("[LINE %d] Ошибка обновления статики на принтере %d: %v", req.LineID, pCfg.ID, err)
-					// Пропускаем печать кодов для этого принтера, чтобы не напечатать брак со старой датой!
-					continue
-				}
-
-				// Фиксируем успешное обновление в менеджере
-				manager.UpdatePrinterDeltaState(pCfg.ID, state.LastTemplate, currentHash)
-				state.LastStaticHash = currentHash
-			}
-
-			// --- ПЕЧАТЬ SID ---
-			// В качестве индекса пока используем Timestamp
-			startIndex := int(time.Now().Unix())
-
-			// Вызываем метод с поддержкой SID и SLR
-			loaded, err := p.PrintBatchIndexed(req.DynamicField, startIndex, req.Codes)
-			if err != nil {
-				log.Printf("Ошибка печати на принтере %d: %v", pCfg.ID, err)
+				slog.Warn("Принтер числится в БД, но отсутствует в памяти менеджера", "id", pCfg.ID)
 				continue
 			}
 
-			log.Printf("[LINE %d] Загружено %d кодов на принтер %d (Start Index: %d)", req.LineID, loaded, pCfg.ID, startIndex)
+			state := manager.GetPrinterState(pCfg.ID)
+			l := slog.With("printer_id", pCfg.ID, "printer_name", pCfg.Name)
+
+			// --- ЛОГИКА DELTA ---
+
+			// А) Проверка и смена шаблона
+			if state.LastTemplate != req.Template {
+				l.Debug("Delta: Смена шаблона", "old", state.LastTemplate, "new", req.Template)
+
+				if err := p.SelectTemplate(req.Template); err != nil {
+					l.Error("Delta: Ошибка смены шаблона", "err", err)
+					continue
+				}
+				// Обновляем состояние в памяти, чтобы не дергать SelectTemplate в следующий раз
+				manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, state.LastStaticHash)
+				l.Info("Delta: Шаблон успешно изменен")
+			} else {
+				l.Debug("Delta: Шаблон не изменился, пропускаем SLA")
+			}
+
+			// Б) Проверка статики
+			currentHash := fmt.Sprintf("%v", req.StaticFields)
+			if state.LastStaticHash != currentHash && len(req.StaticFields) > 0 {
+				l.Debug("Delta: Обнаружено изменение статических полей",
+					"old_hash", state.LastStaticHash,
+					"new_hash", currentHash,
+				)
+
+				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
+					l.Error("Delta: Ошибка обновления статики", "err", err)
+					continue
+				}
+
+				manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
+				l.Info("Delta: Статические поля обновлены")
+			} else {
+				l.Debug("Delta: Статика не изменилась, пропускаем SCF")
+			}
+
+			// --- ПЕЧАТЬ SID ---
+			startIndex := int(time.Now().Unix())
+			l.Debug("Запуск загрузки пачки SID", "start_index", startIndex, "field", req.DynamicField)
+
+			loaded, err := p.PrintBatchIndexed(req.DynamicField, startIndex, req.Codes)
+			if err != nil {
+				l.Error("Критическая ошибка печати пачки", "err", err)
+				continue
+			}
+
+			l.Info("Пачка успешно загружена",
+				"loaded", loaded,
+				"total_sent", len(req.Codes),
+				"start_index", startIndex,
+			)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
