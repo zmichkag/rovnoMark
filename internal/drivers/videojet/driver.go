@@ -135,6 +135,7 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 		slog.Error("VIDEOJET SCF Failed", "ip", d.Address, "err", err)
 		return err
 	}
+	slog.Debug("VIDEOJET", "ip", d.Address, "SCF Reply", resp)
 
 	if strings.Contains(resp, "ERR") {
 		slog.Warn("VIDEOJET SCF Rejected", "ip", d.Address, "resp", resp, "fields", fields)

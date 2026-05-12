@@ -502,7 +502,7 @@ func main() {
 				return
 			}
 
-			// Обновление статики (ДОБАВЛЕНА ПРОВЕРКА ОШИБКИ)
+			// Обновление статики
 			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
 				slog.Error("Ошибка записи статики", "printer", pCfg.Name, "err", err)
 				sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка статики на %s", pCfg.Name))
