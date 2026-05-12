@@ -438,47 +438,82 @@ func main() {
 		json.NewEncoder(w).Encode(fields)
 	})
 
-	// Регистрация новой партии
+	// Регистрация новой партии с проверкой оборудования (Handshake)
 	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
-		// 1. Проверяем метод запроса
 		if r.Method != http.MethodPost {
 			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// 2. Декодируем запрос с проверкой на ошибки
 		var req struct {
-			LineID   int    `json:"line_id"`
-			Template string `json:"template"`
+			LineID           int               `json:"line_id"`
+			Template         string            `json:"template_name"`
+			DynamicFieldName string            `json:"dynamic_field_name"`
+			StaticFields     map[string]string `json:"static_fields"`
 		}
+
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			slog.Warn("Handshake: Ошибка JSON", "err", err)
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
 
-		// 3. Создаем задачу в базе данных
-		// Метод возвращает ID новой записи
-		taskID, err := store.CreateTask(req.LineID, req.Template)
+		// 1. Проверяем, есть ли принтеры на линии вообще
+		printersInLine, err := store.GetPrintersByLine(req.LineID)
+		if err != nil || len(printersInLine) == 0 {
+			slog.Warn("Handshake: Линия пуста или не найдена", "line_id", req.LineID)
+			http.Error(w, "Line is empty or not found", http.StatusNotFound)
+			return
+		}
+
+		// 2. СИНХРОННЫЙ HANDSHAKE: Пробуем настроить каждый принтер
+		for _, pCfg := range printersInLine {
+			p := manager.GetPrinter(pCfg.ID)
+			if p == nil {
+				http.Error(w, fmt.Sprintf("Принтер ID %d не инициализирован", pCfg.ID), http.StatusServiceUnavailable)
+				return
+			}
+
+			// А) Проверяем статус (должен быть не ОФФЛАЙН)
+			status, err := p.GetStatus()
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Принтер %s не отвечает", pCfg.Name), http.StatusGatewayTimeout)
+				return
+			}
+			slog.Info("Принтер готов к задаче", "name", pCfg.Name, "status", status)
+
+			// Б) Выбираем шаблон (SelectTemplate вернет ошибку, если файла нет)
+			if err := p.SelectTemplate(req.Template); err != nil {
+				http.Error(w, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err), http.StatusInternalServerError)
+				return
+			}
+
+			// В) Грузим статику
+			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
+				http.Error(w, fmt.Sprintf("Ошибка статики на %s: %v", pCfg.Name, err), http.StatusInternalServerError)
+				return
+			}
+
+			// Обновляем Delta-состояние, чтобы фоновый процесс знал, что всё уже настроено
+			currentHash := fmt.Sprintf("%v", req.StaticFields)
+			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
+		}
+
+		// 3. Если всё железо ответило ОК — сохраняем задачу в БД
+		staticBytes, _ := json.Marshal(req.StaticFields)
+		taskID, err := store.CreateTask(req.LineID, req.Template, req.DynamicFieldName, string(staticBytes))
 		if err != nil {
-			http.Error(w, "DB Error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
 
-		// 4. ЗАПУСКАЕМ НАКАЧКУ (Task Pumping)
-		// Эта функция запускает бесконечный цикл в горутине, который будет
-		// следить за буфером принтеров на линии и подливать туда коды
-		//taskProcessor.StartPumping(req.LineID, int(taskID))
+		slog.Info("Handshake УСПЕШЕН", "task_id", taskID, "line", req.LineID, "template", req.Template)
 
-		// Логируем для контроля в консоли
-		log.Printf("[TASK] Создана активная партия ID:%d для линии %d (Шаблон: %s)", taskID, req.LineID, req.Template)
-
-		// 5. Отправляем успешный ответ
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "active",
 			"task_id": taskID,
-			//"message": "Партия запущена, процесс накачки кодов активирован",
 		})
 	})
 
@@ -527,16 +562,13 @@ func main() {
 				continue
 			}
 
-			// А) Получаем последний реально напечатанный индекс (Команда SGP в Zipher)
 			lastIdx, err := p.GetLastPrintedIndex()
 			if err != nil {
-				log.Printf("Ошибка получения индекса с принтера %d: %v", pCfg.ID, err)
 				continue
 			}
 
-			// Б) Синхронизируем БД: всё, что принтер подтвердил, помечаем как 'printed'
-			// Всё, что было в буфере, но не напечатано, останется в статусе 'in_buffer' или вернется в 'pending'
-			affected, _ := store.MarkAsPrinted(taskID, lastIdx)
+			// Теперь передаем ID принтера, чтобы не отметить лишнего с другой головы
+			affected, _ := store.MarkAsPrinted(taskID, pCfg.ID, lastIdx)
 
 			// В) Очищаем физическую очередь принтера (Команда CQI), чтобы не допечатывать лишнее
 			p.ClearQueue()

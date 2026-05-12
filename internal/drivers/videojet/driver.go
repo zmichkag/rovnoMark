@@ -371,6 +371,8 @@ func (d *Driver) GetTemplates() ([]string, error) {
 
 // PrintBatchIndexed загружает пачку кодов через SID (с индексами)
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	slog.Info("VIDEOJET Batch Start", "ip", d.Address, "field", fieldName, "count", len(codes), "start_idx", startIndex)
 
 	// Мы открываем соединение вручную, так как здесь пакетная передача

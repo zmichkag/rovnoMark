@@ -60,7 +60,7 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				} // Ждем, если буфер забит или принтер оффлайн
 
 				// Держим в принтере не более 100 кодов для маневренности
-				targetLoad := 100 - (100 - freeSpace)
+				targetLoad := 100 - (10 - freeSpace)
 				if targetLoad <= 0 {
 					continue
 				}
@@ -81,9 +81,9 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				loaded, err := p.PrintBatchIndexed("code", startIndex, codesOnly)
 
 				if err == nil && loaded > 0 {
-					// 6. Обновляем статусы в БД: теперь они 'in_buffer' с привязкой к индексу
 					for i, item := range pending[:loaded] {
-						tp.Store.UpdateCodeStatus(item.ID, "in_buffer", startIndex+i)
+						// Передаем pCfg.ID как четвертый аргумент
+						tp.Store.UpdateCodeStatus(item.ID, "in_buffer", startIndex+i, pCfg.ID)
 					}
 				}
 			}
