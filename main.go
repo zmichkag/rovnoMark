@@ -440,11 +440,10 @@ func main() {
 
 	// Регистрация новой партии с проверкой оборудования (Handshake)
 	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json") // Сразу ставим JSON
+		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Only POST method allowed"})
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST method allowed")
 			return
 		}
 
@@ -456,88 +455,78 @@ func main() {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON: " + err.Error()})
+			sendJSONError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
 			return
 		}
 
-		// --- ПРОВЕРКА 1: Существует ли линия в принципе? ---
+		// 1. Проверка линии
 		exists, err := store.CheckLineExists(req.LineID)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Database check failed"})
+			sendJSONError(w, http.StatusInternalServerError, "Database check failed")
 			return
 		}
 		if !exists {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "Line not found",
-				"details": fmt.Sprintf("Линия с ID %d не зарегистрирована в системе", req.LineID),
-			})
+			sendJSONError(w, http.StatusNotFound, fmt.Sprintf("Линия %d не найдена", req.LineID))
 			return
 		}
 
-		// --- ПРОВЕРКА 2: Привязаны ли принтеры? ---
+		// 2. Проверка принтеров
 		printersInLine, err := store.GetPrintersByLine(req.LineID)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch printers for line"})
+		if err != nil || len(printersInLine) == 0 {
+			sendJSONError(w, http.StatusUnprocessableEntity, "На линии нет активных принтеров")
 			return
 		}
 
-		if len(printersInLine) == 0 {
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":   "No printers assigned",
-				"details": fmt.Sprintf("На линии %d нет активных принтеров. Привяжите их в настройках.", req.LineID),
-			})
-			return
-		}
-
-		// --- ПРОВЕРКА 3: Handshake с оборудованием ---
+		// 3. Handshake
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Printer ID %d is not initialized in memory", pCfg.ID)})
-				return
+				continue
 			}
 
+			// Физический статус
 			status, err := p.GetStatus()
 			if err != nil {
-				w.WriteHeader(http.StatusGatewayTimeout)
-				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Принтер %s не отвечает", pCfg.Name)})
+				sendJSONError(w, http.StatusGatewayTimeout, fmt.Sprintf("Принтер %s не отвечает", pCfg.Name))
 				return
 			}
-			slog.Info("Принтер готов к задаче", "name", pCfg.Name, "status", status)
+			if status != "ГОТОВ" {
+				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s занят (статус: %s)", pCfg.Name, status))
+				return
+			}
 
+			// Выбор макета
 			if err := p.SelectTemplate(req.Template); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Макет '%s' не найден на принтере %s", req.Template, pCfg.Name)})
+				slog.Error("Макет не найден", "template", req.Template, "printer", pCfg.Name)
+				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Макет '%s' не найден на %s", req.Template, pCfg.Name))
 				return
 			}
 
-			p.UpdateStaticFields(req.StaticFields)
+			// Обновление статики (ДОБАВЛЕНА ПРОВЕРКА ОШИБКИ)
+			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
+				slog.Error("Ошибка записи статики", "printer", pCfg.Name, "err", err)
+				sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка статики на %s", pCfg.Name))
+				return
+			}
+
+			// Фиксируем состояние в Delta-кэше (ВАЖНО ДЛЯ PUMPER)
 			currentHash := fmt.Sprintf("%v", req.StaticFields)
 			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
+
+			slog.Info("Принтер настроен", "name", pCfg.Name, "template", req.Template)
 		}
 
-		// --- ФИНАЛ: Сохранение задачи ---
+		// 4. Сохранение
 		staticBytes, _ := json.Marshal(req.StaticFields)
 		taskID, err := store.CreateTask(req.LineID, req.Template, req.DynamicFieldName, string(staticBytes))
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			// Здесь мы уже знаем, что LineID верный, так что это реальная ошибка записи
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save task: " + err.Error()})
+			sendJSONError(w, http.StatusInternalServerError, "Failed to save task")
 			return
 		}
 
 		slog.Info("Handshake УСПЕШЕН", "task_id", taskID, "line", req.LineID)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "active",
-			"task_id": taskID,
-		})
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "active", "task_id": taskID})
 	})
 
 	// Дозаливка кодов (Асинхронно)
@@ -627,4 +616,9 @@ func main() {
 		slog.Error("Критическая ошибка сервера", "err", err)
 		os.Exit(1)
 	}
+}
+
+func sendJSONError(w http.ResponseWriter, code int, msg string) {
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
