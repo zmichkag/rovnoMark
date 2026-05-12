@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -572,25 +571,30 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "appended", "count": len(req.Codes)})
 	})
 
-	// Метод Graceful Stop: корректное завершение печати и сверка остатков
 	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
-		// 1. Получаем ID задачи из запроса
-		taskIDStr := r.URL.Query().Get("id")
-		taskID, err := strconv.Atoi(taskIDStr)
-		if err != nil {
-			http.Error(w, "Invalid Task ID", http.StatusBadRequest)
+		if r.Method != http.MethodPost {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
 			return
 		}
 
-		// 2. Нам нужно знать, на какой линии работала задача, чтобы найти принтеры
-		// (Для этого можно либо передать line_id в запросе, либо быстро дернуть из БД)
-		lineIDStr := r.URL.Query().Get("line_id")
-		lineID, _ := strconv.Atoi(lineIDStr)
+		var req struct {
+			LineID int `json:"line_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
 
-		log.Printf("[STOP] Инициирована остановка задачи ID:%d на линии %d", taskID, lineID)
+		// 1. Ищем, какая задача сейчас активна
+		// Используем нормальное имя переменной, например activeTemplate
+		taskID, activeTemplate, err := store.GetActiveTaskID(req.LineID)
+		if err != nil || taskID == 0 {
+			sendJSONError(w, http.StatusNotFound, "Нет активных задач на этой линии")
+			return
+		}
 
-		// 3. Опрашиваем принтеры на линии для финальной сверки
-		printers, _ := store.GetPrintersByLine(lineID)
+		// 2. СВЕРКА (RECONCILIATION)
+		printers, _ := store.GetPrintersByLine(req.LineID)
 		report := make(map[string]interface{})
 
 		for _, pCfg := range printers {
@@ -601,31 +605,38 @@ func main() {
 
 			lastIdx, err := p.GetLastPrintedIndex()
 			if err != nil {
+				slog.Error("Ошибка индекса", "printer", pCfg.Name, "err", err)
 				continue
 			}
 
-			// Теперь передаем ID принтера, чтобы не отметить лишнего с другой головы
-			affected, _ := store.MarkAsPrinted(taskID, pCfg.ID, lastIdx)
-
-			// В) Очищаем физическую очередь принтера (Команда CQI), чтобы не допечатывать лишнее
+			confirmed, _ := store.MarkAsPrinted(taskID, pCfg.ID, lastIdx)
 			p.ClearQueue()
 
-			report[pCfg.Name] = map[string]interface{}{
-				"last_printed_index": lastIdx,
-				"confirmed_codes":    affected,
-				"status":             "cleared",
+			report[pCfg.Name] = map[string]int{
+				"last_index": lastIdx,
+				"confirmed":  int(confirmed),
 			}
 		}
 
-		// 4. Меняем статус задачи в БД на завершенную
-		store.SetTaskStatus(taskID, "stopped")
+		// 3. Закрываем задачу в БД
+		if err := store.StopTask(taskID); err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка при закрытии задачи")
+			return
+		}
 
-		// 5. Отправляем отчет в 1С/MES
+		// ИСПОЛЬЗУЕМ ПЕРЕМЕННУЮ ЗДЕСЬ:
+		slog.Info("Задача остановлена",
+			"task_id", taskID,
+			"template", activeTemplate, // Теперь Go доволен
+			"line", req.LineID,
+		)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"task_id": taskID,
-			"status":  "stopped",
-			"report":  report,
+			"status":   "stopped",
+			"task_id":  taskID,
+			"template": activeTemplate,
+			"results":  report,
 		})
 	})
 

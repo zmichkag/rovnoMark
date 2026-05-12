@@ -67,6 +67,12 @@ func (s *Store) AppendCodes(taskID int64, codes []string) error {
 	return tx.Commit()
 }
 
+// StopTask переводит задачу в статус остановленной
+func (s *Store) StopTask(taskID int) error {
+	_, err := s.db.Exec("UPDATE tasks SET status = 'stopped' WHERE id = ?", taskID)
+	return err
+}
+
 func (s *Store) GetActiveTaskID(lineID int) (int, string, error) {
 	var id int
 	var template string
