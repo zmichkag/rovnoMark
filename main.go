@@ -20,6 +20,7 @@ import (
 	"rovnoMark/internal/storage"
 )
 
+//
 //go:embed ui/*
 var uiFS embed.FS
 
@@ -325,15 +326,15 @@ func main() {
 			if state.LastTemplate != req.Template {
 				l.Debug("Delta: Смена шаблона", "old", state.LastTemplate, "new", req.Template)
 
-				if err := p.SelectTemplate(req.Template); err != nil {
+				// Добавляем nil, так как здесь нам нужно просто переключить макет
+				if err := p.SelectTemplate(req.Template, nil); err != nil {
 					l.Error("Delta: Ошибка смены шаблона", "err", err)
 					continue
 				}
-				// Обновляем состояние в памяти, чтобы не дергать SelectTemplate в следующий раз
+
+				// Обновляем состояние в памяти
 				manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, state.LastStaticHash)
 				l.Info("Delta: Шаблон успешно изменен")
-			} else {
-				l.Debug("Delta: Шаблон не изменился, пропускаем SLA")
 			}
 
 			// Б) Проверка статики
@@ -443,111 +444,112 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method != http.MethodPost {
-			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST method allowed")
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
 			return
 		}
 
 		var req struct {
 			LineID           int               `json:"line_id"`
 			Template         string            `json:"template_name"`
-			DynamicFieldName string            `json:"dynamic_field_name"`
+			DynamicFieldName string            `json:"dynamic_field_name"` // Может быть пустым для статики
 			StaticFields     map[string]string `json:"static_fields"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			sendJSONError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
+			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 
-		// 1. Проверка линии
+		// --- 1. ПРОВЕРКА СУЩЕСТВОВАНИЯ ЛИНИИ ---
 		exists, err := store.CheckLineExists(req.LineID)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Database check failed")
-			return
-		}
-		if !exists {
-			sendJSONError(w, http.StatusNotFound, fmt.Sprintf("Линия %d не найдена", req.LineID))
+		if err != nil || !exists {
+			sendJSONError(w, http.StatusNotFound, "Линия не найдена")
 			return
 		}
 
-		activeID, activeTemplate, err := store.GetActiveTaskID(req.LineID)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки статуса линии")
-			return
-		}
+		// --- 2. МЕХАНИЗМ БЛОКИРОВКИ: Есть ли активная задача? ---
+		activeID, activeTmpl, _ := store.GetActiveTaskID(req.LineID)
 		if activeID != 0 {
-			w.WriteHeader(http.StatusConflict) // 409 Conflict
+			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":          "Line Busy",
-				"details":        fmt.Sprintf("Линия занята активной задачей ID:%d (Макет: %s). Сначала остановите её.", activeID, activeTemplate),
-				"active_task_id": activeID,
+				"error":            "Line is busy",
+				"active_task_id":   activeID,
+				"current_template": activeTmpl,
 			})
 			return
 		}
 
-		// 2. Проверка принтеров
-		printersInLine, err := store.GetPrintersByLine(req.LineID)
-		if err != nil || len(printersInLine) == 0 {
-			sendJSONError(w, http.StatusUnprocessableEntity, "На линии нет активных принтеров")
+		// --- 3. ПОИСК ПРИНТЕРОВ ---
+		printersInLine, _ := store.GetPrintersByLine(req.LineID)
+		if len(printersInLine) == 0 {
+			sendJSONError(w, http.StatusUnprocessableEntity, "На линии нет принтеров")
 			return
 		}
 
-		// 3. Handshake
+		// --- 4. HANDSHAKE
+		// --- 4. HANDSHAKE (РАЗВИЛКА СТАТИКА / ДИНАМИКА) ---
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
 				continue
 			}
 
-			// Физический статус
-			status, err := p.GetStatus()
-			if err != nil {
-				sendJSONError(w, http.StatusGatewayTimeout, fmt.Sprintf("Принтер %s не отвечает", pCfg.Name))
-				return
-			}
+			// Проверка статуса (ГОТОВ)
+			status, _ := p.GetStatus()
 			if status != "ГОТОВ" {
-				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s занят (статус: %s)", pCfg.Name, status))
+				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s занят (%s)", pCfg.Name, status))
 				return
 			}
 
-			// Выбор макета
-			if err := p.SelectTemplate(req.Template); err != nil {
-				slog.Error("Макет не найден", "template", req.Template, "printer", pCfg.Name)
-				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Макет '%s' не найден на %s", req.Template, pCfg.Name))
-				return
+			if req.DynamicFieldName == "" {
+				// --- ПУТЬ А: СТАТИЧЕСКАЯ ПЕЧАТЬ (ВСЁ В ОДНОМ SLA) ---
+				slog.Info("Handshake: Статический режим", "printer", pCfg.Name)
+
+				// Очищаем старые очереди кодов (на всякий случай)
+				p.ClearQueue()
+
+				// Вызываем обновленный SelectTemplate с полями. Принтер загрузит макет и СРАЗУ обновит текст.
+				if err := p.SelectTemplate(req.Template, req.StaticFields); err != nil {
+					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Ошибка SLA на %s: %v", pCfg.Name, err))
+					return
+				}
+			} else {
+				// --- ПУТЬ Б: ДИНАМИЧЕСКАЯ ПЕЧАТЬ (МАРКИРОВКА) ---
+				slog.Info("Handshake: Динамический режим (ЧЗ)", "field", req.DynamicFieldName)
+
+				// 1. Сначала просто выбираем макет (SLA без полей)
+				if err := p.SelectTemplate(req.Template, nil); err != nil {
+					sendJSONError(w, http.StatusBadRequest, "Макет не найден")
+					return
+				}
+
+				// 2. Инициализируем сессию (SHO). Теперь принтер ждет SCF и данные для SID/SDO.
+				if err := p.InitSession(req.DynamicFieldName, 1000); err != nil {
+					sendJSONError(w, http.StatusBadRequest, "Ошибка SHO: "+err.Error())
+					return
+				}
+
+				// 3. Теперь SCF легален, так как поле сериализации задано!
+				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
+					sendJSONError(w, http.StatusInternalServerError, "Ошибка SCF: "+err.Error())
+					return
+				}
 			}
 
-			// Инициализация сессии и динамического поля (SHO)
-			// Здесь мы передаем имя поля для ЧЗ и задаем лимит очереди (например, 1000)
-			if err := p.InitSession(req.DynamicFieldName, 1000); err != nil {
-				slog.Error("Ошибка привязки динамического поля", "field", req.DynamicFieldName, "printer", pCfg.Name, "err", err)
-				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Поле '%s' недоступно для печати на %s", req.DynamicFieldName, pCfg.Name))
-				return
-			}
-
-			// Обновление статики
-			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-				slog.Error("Ошибка записи статики", "printer", pCfg.Name, "err", err)
-				sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка статики на %s", pCfg.Name))
-				return
-			}
-
-			// Фиксируем состояние в Delta-кэше (ВАЖНО ДЛЯ PUMPER)
+			// Фиксируем состояние
 			currentHash := fmt.Sprintf("%v", req.StaticFields)
 			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
-
-			slog.Info("Принтер настроен", "name", pCfg.Name, "template", req.Template)
 		}
 
-		// 4. Сохранение
+		// --- 5. СОХРАНЕНИЕ ЗАДАЧИ ---
 		staticBytes, _ := json.Marshal(req.StaticFields)
 		taskID, err := store.CreateTask(req.LineID, req.Template, req.DynamicFieldName, string(staticBytes))
 		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Failed to save task")
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка записи задачи в БД")
 			return
 		}
 
-		slog.Info("Handshake УСПЕШЕН", "task_id", taskID, "line", req.LineID)
+		slog.Info("Задача создана", "id", taskID, "mode", "dynamic="+strconv.FormatBool(req.DynamicFieldName != ""))
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "active", "task_id": taskID})
 	})

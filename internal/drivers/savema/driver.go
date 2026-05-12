@@ -17,8 +17,10 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
-func (d *Driver) SelectTemplate(template string) error {
-	// заглушка
+func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
+	// Пока здесь остается заглушка для будущего протокола Savema,
+	// но сигнатура теперь соответствует интерфейсу Printer
+	slog.Debug("SAVEMA: Выбор шаблона (заглушка)", "template", template, "fields_count", len(fields))
 	return nil
 }
 

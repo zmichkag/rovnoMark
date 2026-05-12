@@ -247,10 +247,20 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 	return strings.TrimSpace(parts[1]), nil
 }
 
-// SelectTemplate выполняет выбор задания (SLA)
-func (d *Driver) SelectTemplate(name string) error {
-	// Команда SLA просто выбирает макет без команды PRN
-	res, err := d.sendRaw(fmt.Sprintf("SLA|%s|", name))
+// SelectTemplate поддерживает опциональную передачу статических полей (Job with Data)
+func (d *Driver) SelectTemplate(name string, fields map[string]string) error {
+	var sb strings.Builder
+	sb.WriteString("SLA|")
+	sb.WriteString(name)
+	sb.WriteString("|")
+
+	// Если поля переданы, добавляем их прямо в команду SLA
+	for k, v := range fields {
+		cleanValue := strings.ReplaceAll(v, "|", "")
+		sb.WriteString(fmt.Sprintf("%s=%s|", k, cleanValue))
+	}
+
+	res, err := d.sendRaw(sb.String())
 	if err != nil || strings.Contains(res, "ERR") {
 		return fmt.Errorf("ошибка выбора макета %s: %s", name, res)
 	}
