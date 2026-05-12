@@ -67,6 +67,17 @@ func (s *Store) AppendCodes(taskID int64, codes []string) error {
 	return tx.Commit()
 }
 
+func (s *Store) GetActiveTaskID(lineID int) (int, string, error) {
+	var id int
+	var template string
+	// Ищем задачу со статусом 'active' для конкретной линии
+	err := s.db.QueryRow("SELECT id, template_name FROM tasks WHERE line_id = ? AND status = 'active' LIMIT 1", lineID).Scan(&id, &template)
+	if err == sql.ErrNoRows {
+		return 0, "", nil
+	}
+	return id, template, err
+}
+
 // CheckLineExists проверяет, существует ли линия в базе данных
 func (s *Store) CheckLineExists(id int) (bool, error) {
 	var exists bool

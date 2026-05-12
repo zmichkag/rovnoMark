@@ -470,6 +470,21 @@ func main() {
 			return
 		}
 
+		activeID, activeTemplate, err := store.GetActiveTaskID(req.LineID)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки статуса линии")
+			return
+		}
+		if activeID != 0 {
+			w.WriteHeader(http.StatusConflict) // 409 Conflict
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          "Line Busy",
+				"details":        fmt.Sprintf("Линия занята активной задачей ID:%d (Макет: %s). Сначала остановите её.", activeID, activeTemplate),
+				"active_task_id": activeID,
+			})
+			return
+		}
+
 		// 2. Проверка принтеров
 		printersInLine, err := store.GetPrintersByLine(req.LineID)
 		if err != nil || len(printersInLine) == 0 {
