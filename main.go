@@ -502,6 +502,14 @@ func main() {
 				return
 			}
 
+			// Инициализация сессии и динамического поля (SHO)
+			// Здесь мы передаем имя поля для ЧЗ и задаем лимит очереди (например, 1000)
+			if err := p.InitSession(req.DynamicFieldName, 1000); err != nil {
+				slog.Error("Ошибка привязки динамического поля", "field", req.DynamicFieldName, "printer", pCfg.Name, "err", err)
+				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Поле '%s' недоступно для печати на %s", req.DynamicFieldName, pCfg.Name))
+				return
+			}
+
 			// Обновление статики
 			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
 				slog.Error("Ошибка записи статики", "printer", pCfg.Name, "err", err)
