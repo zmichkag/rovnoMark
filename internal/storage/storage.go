@@ -67,6 +67,13 @@ func (s *Store) AppendCodes(taskID int64, codes []string) error {
 	return tx.Commit()
 }
 
+// CheckLineExists проверяет, существует ли линия в базе данных
+func (s *Store) CheckLineExists(id int) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM lines WHERE id = ? AND is_deleted = 0)", id).Scan(&exists)
+	return exists, err
+}
+
 // GetNextPendingCodes выбирает порцию кодов, ожидающих печати.
 // Используется для наполнения внутреннего буфера принтера.
 func (s *Store) GetNextPendingCodes(taskID int, limit int) ([]models.TaskCode, error) {

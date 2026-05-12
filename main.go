@@ -440,8 +440,11 @@ func main() {
 
 	// Регистрация новой партии с проверкой оборудования (Handshake)
 	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json") // Сразу ставим JSON
+
 		if r.Method != http.MethodPost {
-			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Only POST method allowed"})
 			return
 		}
 
@@ -453,63 +456,83 @@ func main() {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Handshake: Ошибка JSON", "err", err)
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON: " + err.Error()})
 			return
 		}
 
-		// 1. Проверяем, есть ли принтеры на линии вообще
+		// --- ПРОВЕРКА 1: Существует ли линия в принципе? ---
+		exists, err := store.CheckLineExists(req.LineID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Database check failed"})
+			return
+		}
+		if !exists {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "Line not found",
+				"details": fmt.Sprintf("Линия с ID %d не зарегистрирована в системе", req.LineID),
+			})
+			return
+		}
+
+		// --- ПРОВЕРКА 2: Привязаны ли принтеры? ---
 		printersInLine, err := store.GetPrintersByLine(req.LineID)
-		if err != nil || len(printersInLine) == 0 {
-			slog.Warn("Handshake: Линия пуста или не найдена", "line_id", req.LineID)
-			http.Error(w, "Line is empty or not found", http.StatusNotFound)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to fetch printers for line"})
 			return
 		}
 
-		// 2. СИНХРОННЫЙ HANDSHAKE: Пробуем настроить каждый принтер
+		if len(printersInLine) == 0 {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "No printers assigned",
+				"details": fmt.Sprintf("На линии %d нет активных принтеров. Привяжите их в настройках.", req.LineID),
+			})
+			return
+		}
+
+		// --- ПРОВЕРКА 3: Handshake с оборудованием ---
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
-				http.Error(w, fmt.Sprintf("Принтер ID %d не инициализирован", pCfg.ID), http.StatusServiceUnavailable)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Printer ID %d is not initialized in memory", pCfg.ID)})
 				return
 			}
 
-			// А) Проверяем статус (должен быть не ОФФЛАЙН)
 			status, err := p.GetStatus()
 			if err != nil {
-				http.Error(w, fmt.Sprintf("Принтер %s не отвечает", pCfg.Name), http.StatusGatewayTimeout)
+				w.WriteHeader(http.StatusGatewayTimeout)
+				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Принтер %s не отвечает", pCfg.Name)})
 				return
 			}
 			slog.Info("Принтер готов к задаче", "name", pCfg.Name, "status", status)
 
-			// Б) Выбираем шаблон (SelectTemplate вернет ошибку, если файла нет)
 			if err := p.SelectTemplate(req.Template); err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err), http.StatusInternalServerError)
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Макет '%s' не найден на принтере %s", req.Template, pCfg.Name)})
 				return
 			}
 
-			// В) Грузим статику
-			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка статики на %s: %v", pCfg.Name, err), http.StatusInternalServerError)
-				return
-			}
-
-			// Обновляем Delta-состояние, чтобы фоновый процесс знал, что всё уже настроено
+			p.UpdateStaticFields(req.StaticFields)
 			currentHash := fmt.Sprintf("%v", req.StaticFields)
 			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
 		}
 
-		// 3. Если всё железо ответило ОК — сохраняем задачу в БД
+		// --- ФИНАЛ: Сохранение задачи ---
 		staticBytes, _ := json.Marshal(req.StaticFields)
 		taskID, err := store.CreateTask(req.LineID, req.Template, req.DynamicFieldName, string(staticBytes))
 		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			// Здесь мы уже знаем, что LineID верный, так что это реальная ошибка записи
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save task: " + err.Error()})
 			return
 		}
 
-		slog.Info("Handshake УСПЕШЕН", "task_id", taskID, "line", req.LineID, "template", req.Template)
-
-		w.Header().Set("Content-Type", "application/json")
+		slog.Info("Handshake УСПЕШЕН", "task_id", taskID, "line", req.LineID)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "active",
