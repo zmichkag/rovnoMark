@@ -22,6 +22,11 @@ type Driver struct {
 	conn        net.Conn
 }
 
+func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
+	//TODO implement me
+	panic("implement me")
+}
+
 // sendRaw — низкоуровневый обмен данными
 func (d *Driver) sendRaw(cmd string) (string, error) {
 	d.mu.Lock()
@@ -241,25 +246,14 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 	return strings.TrimSpace(parts[1]), nil
 }
 
-// PrintTemplate выполняет выбор задания (SLA) и команду печати (PRN) [cite: 123, 347]
-func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
-	// 1. Формируем команду выбора задания с полями [cite: 123]
-	// SLA |имя|поле1=значение|поле2=значение|
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("SLA|%s", template))
-	for k, v := range fields {
-		sb.WriteString(fmt.Sprintf("|%s=%s", k, v))
+// SelectTemplate выполняет выбор задания (SLA)
+func (d *Driver) SelectTemplate(name string) error {
+	// Команда SLA просто выбирает макет без команды PRN
+	res, err := d.sendRaw(fmt.Sprintf("SLA|%s|", name))
+	if err != nil || strings.Contains(res, "ERR") {
+		return fmt.Errorf("ошибка выбора макета %s: %s", name, res)
 	}
-	sb.WriteString("|")
-
-	res, err := d.sendRaw(sb.String())
-	if err != nil || res == "ERR" {
-		return fmt.Errorf("ошибка выбора задания: %v", err)
-	}
-
-	// 2. Команда на физическую печать [cite: 347]
-	_, err = d.sendRaw("PRN")
-	return err
+	return nil
 }
 
 func (d *Driver) GetPrintSpeed() (string, error) {
