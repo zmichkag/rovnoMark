@@ -44,6 +44,7 @@ type LogEntry struct {
 type TaskCode struct {
 	ID           int       `json:"id"`
 	TaskID       int       `json:"task_id"`
+	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
 	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'
 	PrinterIndex int       `json:"printer_index"` // Индекс SID от принтера

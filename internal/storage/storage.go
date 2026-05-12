@@ -101,13 +101,23 @@ func (s *Store) GetNextPendingCodes(taskID int, limit int) ([]models.TaskCode, e
 	return list, nil
 }
 
-// Синхронизация статуса 'printed' на основе индекса SID от принтера
+// MarkAsPrinted синхронизирует статус 'printed' для конкретного принтера на линии
 func (s *Store) MarkAsPrinted(taskID int, printerID int, lastIndex int) (int64, error) {
 	res, err := s.db.Exec(`
 		UPDATE task_codes 
 		SET status = 'printed', printed_at = CURRENT_TIMESTAMP 
 		WHERE task_id = ? AND printer_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
 		taskID, printerID, lastIndex)
+
+	// Обрабатываем ошибку выполнения запроса
+	if err != nil {
+		slog.Error("Ошибка при обновлении статуса 'printed'",
+			"task_id", taskID,
+			"printer_id", printerID,
+			"err", err)
+		return 0, err
+	}
+
 	return res.RowsAffected()
 }
 
@@ -370,7 +380,7 @@ func createTables(db *sql.DB) {
 	db.Exec(`CREATE TABLE IF NOT EXISTS task_codes (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		task_id INTEGER,
-		printer_id INTEGER,          -- НОВАЯ КОЛОНКА
+		printer_id INTEGER,          
 		code TEXT NOT NULL,
 		status TEXT DEFAULT 'pending',
 		printer_index INTEGER,
