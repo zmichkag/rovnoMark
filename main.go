@@ -461,7 +461,7 @@ func main() {
 
 		var req struct {
 			LineID           int               `json:"line_id"`
-			Template         string            `json:"template"`
+			Template         string            `json:"template_name"`
 			DynamicFieldName string            `json:"dynamic_field"` // Имя поля для ЧЗ
 			StaticFields     map[string]string `json:"static_fields"` // Даты, партии и т.д.
 		}
