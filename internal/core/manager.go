@@ -39,36 +39,40 @@ type TaskProcessor struct {
 	Manager *PrinterManager
 }
 
+// StartPumping
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	go func() {
 		for {
-			// 1. Проверяем, активна ли еще задача в БД
-			// (Здесь должна быть проверка статуса task из Store)
+			// 1. Получаем принтеры линии
+			printers, err := tp.Store.GetPrintersByLine(lineID)
+			if err != nil {
+				// Если база заблокирована или отвалилась, просто ждем и пробуем снова
+				time.Sleep(2 * time.Second)
+				continue
+			}
 
-			// 2. Получаем принтеры линии
-			printers, _ := tp.Store.GetPrintersByLine(lineID)
 			for _, pCfg := range printers {
 				p := tp.Manager.GetPrinter(pCfg.ID)
 				if p == nil {
 					continue
 				}
 
-				// 3. Сколько места в буфере принтера?
+				// 2. Сколько места в буфере принтера?
 				freeSpace, err := p.GetBufferFreeSpace()
 				if err != nil || freeSpace < 10 {
-					continue
-				} // Ждем, если буфер забит или принтер оффлайн
+					continue // Ждем, если буфер забит или принтер оффлайн
+				}
 
 				// Держим в принтере не более 100 кодов для маневренности
-				targetLoad := 100 - (10 - freeSpace)
+				targetLoad := min(100, freeSpace)
 				if targetLoad <= 0 {
 					continue
 				}
 
-				// 4. Берем коды из БД
-				pending, _ := tp.Store.GetNextPendingCodes(taskID, targetLoad)
-				if len(pending) == 0 {
-					continue
+				// 3. Берем коды из БД
+				pending, err := tp.Store.GetNextPendingCodes(taskID, targetLoad)
+				if err != nil || len(pending) == 0 {
+					continue // Кодов пока нет или база занята
 				}
 
 				var codesOnly []string
@@ -76,17 +80,28 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 					codesOnly = append(codesOnly, item.Code)
 				}
 
-				// 5. Отправляем в принтер через SID
-				startIndex := int(time.Now().UnixNano() / 1e6) // Уникальный индекс для пачки
+				// 4. БЕРЕМ ИНДЕКС ИЗ БАЗЫ!
+				// pending[0].PrinterIndex - это реальный порядковый номер, который мы присвоили при вставке
+				startIndex := pending[0].PrinterIndex
+
+				// 5. Отправляем в принтер через SID (название переменной "code" захардкожено для MVP)
 				loaded, err := p.PrintBatchIndexed("code", startIndex, codesOnly)
 
 				if err == nil && loaded > 0 {
-					for i, item := range pending[:loaded] {
-						// Передаем pCfg.ID как четвертый аргумент
-						tp.Store.UpdateCodeStatus(item.ID, "in_buffer", startIndex+i, pCfg.ID)
+					// 6. Обновляем статус ПАЧКОЙ.
+					// Метод UpdateCodeStatus принимает: taskID, status, printerID, limit
+					// Мы передаем ровно то количество, которое принтер успешно проглотил (loaded)
+					errUpdate := tp.Store.UpdateCodeStatus(taskID, "in_buffer", pCfg.ID, loaded)
+					if errUpdate != nil {
+						slog.Error("Накачка: Ошибка обновления статусов в БД", "task", taskID, "err", errUpdate)
+					} else {
+						slog.Debug("Накачка: Загружена пачка", "printer", pCfg.Name, "count", loaded, "start_idx", startIndex)
 					}
+				} else if err != nil {
+					slog.Warn("Накачка: Ошибка отправки в принтер", "printer", pCfg.Name, "err", err)
 				}
 			}
+			// Пауза перед следующим опросом
 			time.Sleep(1 * time.Second)
 		}
 	}()

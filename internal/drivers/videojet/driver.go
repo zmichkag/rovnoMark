@@ -381,43 +381,20 @@ func (d *Driver) GetTemplates() ([]string, error) {
 }
 
 // PrintBatchIndexed загружает пачку кодов через SID (с индексами)
+// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	// Мьютекс не нужен, он уже есть внутри sendRaw
 	slog.Info("VIDEOJET Batch Start", "ip", d.Address, "field", fieldName, "count", len(codes), "start_idx", startIndex)
-
-	// Мы открываем соединение вручную, так как здесь пакетная передача
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-	if err != nil {
-		return 0, err
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	conn.Write([]byte("\r"))
-
-	// Вспомогательная функция для чистых логов внутри цикла
-	send := func(c string) (string, error) {
-		fmt.Fprint(conn, c+"\r")
-		return reader.ReadString('\r')
-	}
-
-	//send("SCB")
-	//send(fmt.Sprintf("SMR|%d|", len(codes)+10))
-
-	//resp, _ := send(fmt.Sprintf("SHO|%s|", fieldName))
-	//if strings.Contains(resp, "ERR") {
-	//	slog.Error("VIDEOJET Serialization Error", "ip", d.Address, "field", fieldName, "resp", resp)
-	//	return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
-	//}
 
 	successCount := 0
 	for i, code := range codes {
 		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
 		currIdx := startIndex + i
 
-		r, err := send(fmt.Sprintf("SID|%d|%s|", currIdx, cleanCode))
+		// Используем уже существующий механизм sendRaw!
+		cmd := fmt.Sprintf("SID|%d|%s|", currIdx, cleanCode)
+		r, err := d.sendRaw(cmd)
+
 		if err != nil || strings.Contains(r, "ERR") {
 			slog.Warn("VIDEOJET SID Item Failed", "ip", d.Address, "idx", currIdx, "err", err, "resp", r)
 			break
@@ -429,6 +406,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	return successCount, nil
 }
 
+// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
 func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

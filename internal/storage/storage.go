@@ -97,11 +97,11 @@ func (s *Store) AppendTaskCodes(taskID int, printerID int, codes []string) error
 // GetNextPendingCodes выбирает порцию кодов, ожидающих печати.
 // Используется для наполнения внутреннего буфера принтера.
 func (s *Store) GetNextPendingCodes(taskID int, limit int) ([]models.TaskCode, error) {
-	// 1. Выполняем запрос
 	rows, err := s.db.Query(`
-        SELECT id, code 
+        SELECT id, code, printer_index -- ДОБАВЛЕН printer_index
         FROM task_codes 
         WHERE task_id = ? AND status = 'pending' 
+        ORDER BY printer_index ASC     -- ДОБАВЛЕНА СОРТИРОВКА
         LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка запроса кодов: %w", err)
@@ -109,22 +109,14 @@ func (s *Store) GetNextPendingCodes(taskID int, limit int) ([]models.TaskCode, e
 	defer rows.Close()
 
 	var list []models.TaskCode
-
-	// 2. Итерируемся по результатам
 	for rows.Next() {
 		var tc models.TaskCode
-		// Обязательно проверяем ошибку Scan!
-		if err := rows.Scan(&tc.ID, &tc.Code); err != nil {
-			return nil, fmt.Errorf("ошибка сканирования строки: %w", err)
+		// СКАНИРУЕМ 3 ПОЛЯ
+		if err := rows.Scan(&tc.ID, &tc.Code, &tc.PrinterIndex); err != nil {
+			return nil, fmt.Errorf("ошибка сканирования: %w", err)
 		}
 		list = append(list, tc)
 	}
-
-	// 3. Проверяем, не случилась ли ошибка в процессе итерации
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("ошибка после чтения всех строк: %w", err)
-	}
-
 	return list, nil
 }
 

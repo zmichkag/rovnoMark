@@ -230,8 +230,13 @@ func main() {
 				return
 			}
 
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"assigned"}`))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":     "assigned",
+				"line_id":    req.LineID,
+				"printer_id": req.PrinterID,
+			})
 			return
 		}
 
@@ -239,151 +244,151 @@ func main() {
 	})
 
 	// 4. API для отправки ПАЧКИ (Честный Знак)
-	http.HandleFunc("/api/batch", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			PrinterID string   `json:"printer_id"`
-			FieldName string   `json:"field_name"`
-			Codes     []string `json:"codes"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "JSON Error", http.StatusBadRequest)
-			return
-		}
-		idInt, _ := strconv.Atoi(req.PrinterID)
-		p := manager.GetPrinter(idInt)
-		if p == nil {
-			http.Error(w, "Printer not found", http.StatusNotFound)
-			return
-		}
+	//http.HandleFunc("/api/batch", func(w http.ResponseWriter, r *http.Request) {
+	//	if r.Method != http.MethodPost {
+	//		http.Error(w, "Only POST", http.StatusMethodNotAllowed)
+	//		return
+	//	}
+	//	var req struct {
+	//		PrinterID string   `json:"printer_id"`
+	//		FieldName string   `json:"field_name"`
+	//		Codes     []string `json:"codes"`
+	//	}
+	//	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	//		http.Error(w, "JSON Error", http.StatusBadRequest)
+	//		return
+	//	}
+	//	idInt, _ := strconv.Atoi(req.PrinterID)
+	//	p := manager.GetPrinter(idInt)
+	//	if p == nil {
+	//		http.Error(w, "Printer not found", http.StatusNotFound)
+	//		return
+	//	}
+	//
+	//	// Вызываем метод Batch через унифицированный интерфейс[cite: 4]
+	//	loaded, err := p.PrintBatch(req.FieldName, req.Codes)
+	//	if err != nil {
+	//		http.Error(w, err.Error(), http.StatusInternalServerError)
+	//		return
+	//	}
+	//
+	//	w.Header().Set("Content-Type", "application/json")
+	//	json.NewEncoder(w).Encode(map[string]interface{}{
+	//		"status": "success",
+	//		"loaded": loaded,
+	//	})
+	//})
 
-		// Вызываем метод Batch через унифицированный интерфейс[cite: 4]
-		loaded, err := p.PrintBatch(req.FieldName, req.Codes)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "success",
-			"loaded": loaded,
-		})
-	})
-
-	// 4.1. НОВЫЙ API (Версия 1.5): Линейно-центричный и индексированный
-	http.HandleFunc("/api/v2/line/batch", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			slog.Warn("Попытка доступа неверным методом", "method", r.Method, "remote", r.RemoteAddr)
-			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			LineID       int               `json:"line_id"`
-			Template     string            `json:"template"`
-			StaticFields map[string]string `json:"static_fields"`
-			DynamicField string            `json:"dynamic_field"`
-			Codes        []string          `json:"codes"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Error("Ошибка декодирования JSON", "err", err)
-			http.Error(w, "JSON Error", http.StatusBadRequest)
-			return
-		}
-
-		slog.Debug("Входящий запрос v2/batch",
-			"line_id", req.LineID,
-			"template", req.Template,
-			"codes_count", len(req.Codes),
-		)
-
-		// 1. Получаем список принтеров
-		printersInLine, err := store.GetPrintersByLine(req.LineID)
-		if err != nil {
-			slog.Error("Ошибка обращения к БД при поиске принтеров", "line_id", req.LineID, "err", err)
-			http.Error(w, "DB Error", http.StatusInternalServerError)
-			return
-		}
-
-		if len(printersInLine) == 0 {
-			slog.Warn("Запрос на пустую линию", "line_id", req.LineID)
-			http.Error(w, "No printers on this line", http.StatusNotFound)
-			return
-		}
-
-		slog.Debug("Принтеры на линии найдены", "count", len(printersInLine), "line_id", req.LineID)
-
-		for _, pCfg := range printersInLine {
-			p := manager.GetPrinter(pCfg.ID)
-			if p == nil {
-				slog.Warn("Принтер числится в БД, но отсутствует в памяти менеджера", "id", pCfg.ID)
-				continue
-			}
-
-			state := manager.GetPrinterState(pCfg.ID)
-			l := slog.With("printer_id", pCfg.ID, "printer_name", pCfg.Name)
-
-			// --- ЛОГИКА DELTA ---
-
-			// А) Проверка и смена шаблона
-			if state.LastTemplate != req.Template {
-				l.Debug("Delta: Смена шаблона", "old", state.LastTemplate, "new", req.Template)
-
-				if err := p.SelectTemplate(req.Template, nil); err != nil {
-					l.Error("Delta: Ошибка смены шаблона", "err", err)
-					continue
-				}
-				// Обновляем состояние в памяти, чтобы не дергать SelectTemplate в следующий раз
-				manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, state.LastStaticHash)
-				l.Info("Delta: Шаблон успешно изменен")
-			} else {
-				l.Debug("Delta: Шаблон не изменился, пропускаем SLA")
-			}
-
-			// Б) Проверка статики
-			currentHash := fmt.Sprintf("%v", req.StaticFields)
-			if state.LastStaticHash != currentHash && len(req.StaticFields) > 0 {
-				l.Debug("Delta: Обнаружено изменение статических полей",
-					"old_hash", state.LastStaticHash,
-					"new_hash", currentHash,
-				)
-
-				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-					l.Error("Delta: Ошибка обновления статики", "err", err)
-					continue
-				}
-
-				manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
-				l.Info("Delta: Статические поля обновлены")
-			} else {
-				l.Debug("Delta: Статика не изменилась, пропускаем SCF")
-			}
-
-			// --- ПЕЧАТЬ SID ---
-			startIndex := int(time.Now().Unix())
-			l.Debug("Запуск загрузки пачки SID", "start_index", startIndex, "field", req.DynamicField)
-
-			loaded, err := p.PrintBatchIndexed(req.DynamicField, startIndex, req.Codes)
-			if err != nil {
-				l.Error("Критическая ошибка печати пачки", "err", err)
-				continue
-			}
-
-			l.Info("Пачка успешно загружена",
-				"loaded", loaded,
-				"total_sent", len(req.Codes),
-				"start_index", startIndex,
-			)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
-	})
+	//// 4.1. НОВЫЙ API (Версия 1.5): Линейно-центричный и индексированный
+	//http.HandleFunc("/api/v2/line/batch", func(w http.ResponseWriter, r *http.Request) {
+	//	if r.Method != http.MethodPost {
+	//		slog.Warn("Попытка доступа неверным методом", "method", r.Method, "remote", r.RemoteAddr)
+	//		http.Error(w, "Only POST", http.StatusMethodNotAllowed)
+	//		return
+	//	}
+	//
+	//	var req struct {
+	//		LineID       int               `json:"line_id"`
+	//		Template     string            `json:"template"`
+	//		StaticFields map[string]string `json:"static_fields"`
+	//		DynamicField string            `json:"dynamic_field"`
+	//		Codes        []string          `json:"codes"`
+	//	}
+	//
+	//	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	//		slog.Error("Ошибка декодирования JSON", "err", err)
+	//		http.Error(w, "JSON Error", http.StatusBadRequest)
+	//		return
+	//	}
+	//
+	//	slog.Debug("Входящий запрос v2/batch",
+	//		"line_id", req.LineID,
+	//		"template", req.Template,
+	//		"codes_count", len(req.Codes),
+	//	)
+	//
+	//	// 1. Получаем список принтеров
+	//	printersInLine, err := store.GetPrintersByLine(req.LineID)
+	//	if err != nil {
+	//		slog.Error("Ошибка обращения к БД при поиске принтеров", "line_id", req.LineID, "err", err)
+	//		http.Error(w, "DB Error", http.StatusInternalServerError)
+	//		return
+	//	}
+	//
+	//	if len(printersInLine) == 0 {
+	//		slog.Warn("Запрос на пустую линию", "line_id", req.LineID)
+	//		http.Error(w, "No printers on this line", http.StatusNotFound)
+	//		return
+	//	}
+	//
+	//	slog.Debug("Принтеры на линии найдены", "count", len(printersInLine), "line_id", req.LineID)
+	//
+	//	for _, pCfg := range printersInLine {
+	//		p := manager.GetPrinter(pCfg.ID)
+	//		if p == nil {
+	//			slog.Warn("Принтер числится в БД, но отсутствует в памяти менеджера", "id", pCfg.ID)
+	//			continue
+	//		}
+	//
+	//		state := manager.GetPrinterState(pCfg.ID)
+	//		l := slog.With("printer_id", pCfg.ID, "printer_name", pCfg.Name)
+	//
+	//		// --- ЛОГИКА DELTA ---
+	//
+	//		// А) Проверка и смена шаблона
+	//		if state.LastTemplate != req.Template {
+	//			l.Debug("Delta: Смена шаблона", "old", state.LastTemplate, "new", req.Template)
+	//
+	//			if err := p.SelectTemplate(req.Template, nil); err != nil {
+	//				l.Error("Delta: Ошибка смены шаблона", "err", err)
+	//				continue
+	//			}
+	//			// Обновляем состояние в памяти, чтобы не дергать SelectTemplate в следующий раз
+	//			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, state.LastStaticHash)
+	//			l.Info("Delta: Шаблон успешно изменен")
+	//		} else {
+	//			l.Debug("Delta: Шаблон не изменился, пропускаем SLA")
+	//		}
+	//
+	//		// Б) Проверка статики
+	//		currentHash := fmt.Sprintf("%v", req.StaticFields)
+	//		if state.LastStaticHash != currentHash && len(req.StaticFields) > 0 {
+	//			l.Debug("Delta: Обнаружено изменение статических полей",
+	//				"old_hash", state.LastStaticHash,
+	//				"new_hash", currentHash,
+	//			)
+	//
+	//			if err := p.UpdateStaticFields(req.StaticFields); err != nil {
+	//				l.Error("Delta: Ошибка обновления статики", "err", err)
+	//				continue
+	//			}
+	//
+	//			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
+	//			l.Info("Delta: Статические поля обновлены")
+	//		} else {
+	//			l.Debug("Delta: Статика не изменилась, пропускаем SCF")
+	//		}
+	//
+	//		// --- ПЕЧАТЬ SID ---
+	//		startIndex := int(time.Now().Unix())
+	//		l.Debug("Запуск загрузки пачки SID", "start_index", startIndex, "field", req.DynamicField)
+	//
+	//		loaded, err := p.PrintBatchIndexed(req.DynamicField, startIndex, req.Codes)
+	//		if err != nil {
+	//			l.Error("Критическая ошибка печати пачки", "err", err)
+	//			continue
+	//		}
+	//
+	//		l.Info("Пачка успешно загружена",
+	//			"loaded", loaded,
+	//			"total_sent", len(req.Codes),
+	//			"start_index", startIndex,
+	//		)
+	//	}
+	//
+	//	w.Header().Set("Content-Type", "application/json")
+	//	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+	//})
 
 	// Получение списка шаблонов из памяти принтера (GET /api/templates?printer_id=X)
 	http.HandleFunc("/api/templates", func(w http.ResponseWriter, r *http.Request) {
@@ -473,9 +478,20 @@ func main() {
 			return
 		}
 
+		// --- ИНИЦИАЛИЗАЦИЯ ПРИНТЕРА ---
+		printers, _ := store.GetPrintersByLine(req.LineID)
+		for _, pCfg := range printers {
+			p := manager.GetPrinter(pCfg.ID)
+			if p != nil {
+				// Загружаем макет в память (SLA)
+				p.SelectTemplate(req.Template, nil)
+				// Очищаем буфер и указываем, в какое поле будем лить переменные (SHO, SCB)
+				// 2000 - достаточный лимит очереди для Videojet
+				p.InitSession("code", 2000)
+			}
+		}
+
 		// 4. ЗАПУСКАЕМ НАКАЧКУ (Task Pumping)
-		// Эта функция запускает бесконечный цикл в горутине, который будет
-		// следить за буфером принтеров на линии и подливать туда коды
 		taskProcessor.StartPumping(req.LineID, int(taskID))
 
 		// Логируем для контроля в консоли
