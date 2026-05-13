@@ -41,9 +41,12 @@ func (s *Store) SetTaskStatus(taskID int, status string) error {
 	return err
 }
 
-// CreateTask Создание задачи и возврат ID
-func (s *Store) CreateTask(lineID int, template string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO tasks (line_id, template_name, status) VALUES (?, ?, 'active')`, lineID, template)
+// CreateTask Создание задачи с поддержкой динамических полей и статики
+func (s *Store) CreateTask(lineID int, template string, dynamicField string, staticJSON string) (int64, error) {
+	res, err := s.db.Exec(`
+        INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, status) 
+        VALUES (?, ?, ?, ?, 'active')`,
+		lineID, template, dynamicField, staticJSON)
 	if err != nil {
 		return 0, err
 	}
