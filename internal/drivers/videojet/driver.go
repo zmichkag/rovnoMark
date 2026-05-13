@@ -152,7 +152,7 @@ func (d *Driver) ClearQueue() error {
 }
 
 func (d *Driver) GetBufferFreeSpace() (int, error) {
-	raw, err := d.sendRaw("SFS")
+	raw, err := d.sendRaw("SRC")
 	if err != nil {
 		return 0, err
 	}
