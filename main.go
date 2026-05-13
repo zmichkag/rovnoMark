@@ -28,9 +28,12 @@ var uiFS embed.FS
 func sendJSONError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{
+	err := json.NewEncoder(w).Encode(map[string]string{
 		"error": msg,
 	})
+	if err != nil {
+		return
+	}
 }
 
 func main() {
@@ -95,7 +98,10 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"printer_id": newID})
+		err = json.NewEncoder(w).Encode(map[string]interface{}{"printer_id": newID})
+		if err != nil {
+			return
+		}
 	})
 
 	// 3. API для дашборда (Мониторинг)
@@ -317,6 +323,17 @@ func main() {
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+
+		// 0. Проверяем, не занята ли линия другой задачей
+		activeID, err := store.GetActiveTaskByLine(req.LineID)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
+			return
+		}
+		if activeID != 0 {
+			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", req.LineID, activeID))
 			return
 		}
 

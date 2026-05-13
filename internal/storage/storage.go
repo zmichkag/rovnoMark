@@ -13,6 +13,18 @@ type Store struct {
 	db *sql.DB
 }
 
+// CreateTask Создание задачи с поддержкой динамических полей и статики
+func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string) (int64, error) {
+	res, err := s.db.Exec(`
+        INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, status) 
+        VALUES (?, ?, ?, ?, 'active')`,
+		lineID, template, dynamicField, staticJSON)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 // UpdateCodeStatus переводит код из 'pending' в 'in_buffer' и присваивает ему индекс принтера
 func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit int) error {
 	// Мы обновляем статус только для конкретной задачи и конкретного принтера,
@@ -34,10 +46,95 @@ func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit
 	return err
 }
 
-// SetTaskStatus меняет статус всей партии (например, на 'completed' или 'stopped')
-func (s *Store) SetTaskStatus(taskID int, status string) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
-	return err
+// GetPrintersByLine Показывает привязаные  принтеры
+func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
+	query := `
+        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
+        FROM printers p
+        JOIN line_printers lp ON p.id = lp.printer_id
+        WHERE lp.line_id = ? AND p.is_active = 1`
+
+	rows, err := s.db.Query(query, lineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.PrinterConfig
+	for rows.Next() {
+		var p models.PrinterConfig
+		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+// GetAssignments возвращает список всех привязок линий к принтерам с их ролями
+func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
+	query := `
+		SELECT l.name as line_name, p.name as printer_name, lp.role 
+		FROM line_printers lp
+		JOIN lines l ON lp.line_id = l.id
+		JOIN printers p ON lp.printer_id = p.id
+	`
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var lName, pName, role string
+
+		if err := rows.Scan(&lName, &pName, &role); err != nil {
+			log.Printf("ОШИБКА SCAN В ПРИВЯЗКАХ: %v", err)
+			continue
+		}
+		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
+	}
+	return result, nil
+}
+
+// GetTelemetry возвращает историю состояния принтера
+func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}, error) {
+	query := `
+		SELECT timestamp, cur_count, ribbon, status, template 
+		FROM printer_telemetry 
+		WHERE printer_id = ? 
+		ORDER BY timestamp DESC 
+		LIMIT ?`
+
+	rows, err := s.db.Query(query, printerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var ts, count, ribbon, status, template string
+		rows.Scan(&ts, &count, &ribbon, &status, &template)
+		result = append(result, map[string]interface{}{
+			"time":     ts,
+			"count":    count,
+			"ribbon":   ribbon,
+			"status":   status,
+			"template": template,
+		})
+	}
+	return result, nil
+}
+
+// GetActiveTaskByLine возвращает ID активной задачи для линии, если она есть
+func (s *Store) GetActiveTaskByLine(lineID int) (int, error) {
+	var taskID int
+	query := `SELECT id FROM tasks WHERE line_id = ? AND status = 'active' LIMIT 1`
+	err := s.db.QueryRow(query, lineID).Scan(&taskID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return taskID, err
 }
 
 // GetTaskStatus возвращает текущий статус задачи для контроля остановки накачки
@@ -52,18 +149,6 @@ func (s *Store) GetTaskDynamicField(taskID int) (string, error) {
 	var field string
 	err := s.db.QueryRow("SELECT dynamic_field_name FROM tasks WHERE id = ?", taskID).Scan(&field)
 	return field, err
-}
-
-// CreateTask Создание задачи с поддержкой динамических полей и статики
-func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string) (int64, error) {
-	res, err := s.db.Exec(`
-        INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, status) 
-        VALUES (?, ?, ?, ?, 'active')`,
-		lineID, template, dynamicField, staticJSON)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
 }
 
 // GetLineIDByTask потом добавтиь метод проверки задачи, чтобы не мучить main запросами
@@ -257,86 +342,6 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	return err
 }
 
-// GetPrintersByLine Показывает привязаные  принтеры
-func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
-	query := `
-        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
-        FROM printers p
-        JOIN line_printers lp ON p.id = lp.printer_id
-        WHERE lp.line_id = ? AND p.is_active = 1`
-
-	rows, err := s.db.Query(query, lineID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []models.PrinterConfig
-	for rows.Next() {
-		var p models.PrinterConfig
-		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
-		list = append(list, p)
-	}
-	return list, nil
-}
-
-// GetAssignments возвращает список всех привязок линий к принтерам с их ролями
-func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
-	query := `
-		SELECT l.name as line_name, p.name as printer_name, lp.role 
-		FROM line_printers lp
-		JOIN lines l ON lp.line_id = l.id
-		JOIN printers p ON lp.printer_id = p.id
-	`
-	rows, err := s.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []map[string]interface{}
-	for rows.Next() {
-		var lName, pName, role string
-
-		if err := rows.Scan(&lName, &pName, &role); err != nil {
-			log.Printf("ОШИБКА SCAN В ПРИВЯЗКАХ: %v", err)
-			continue
-		}
-		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
-	}
-	return result, nil
-}
-
-// GetTelemetry возвращает историю состояния принтера
-func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}, error) {
-	query := `
-		SELECT timestamp, cur_count, ribbon, status, template 
-		FROM printer_telemetry 
-		WHERE printer_id = ? 
-		ORDER BY timestamp DESC 
-		LIMIT ?`
-
-	rows, err := s.db.Query(query, printerID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []map[string]interface{}
-	for rows.Next() {
-		var ts, count, ribbon, status, template string
-		rows.Scan(&ts, &count, &ribbon, &status, &template)
-		result = append(result, map[string]interface{}{
-			"time":     ts,
-			"count":    count,
-			"ribbon":   ribbon,
-			"status":   status,
-			"template": template,
-		})
-	}
-	return result, nil
-}
-
 // New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
 func New(path string) *Store {
 	db, err := sql.Open("sqlite", path)
@@ -377,6 +382,12 @@ func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status
         INSERT INTO printer_telemetry (printer_id, cur_count, ribbon, status, template)
         VALUES (?, ?, ?, ?, ?)`,
 		printerID, count, ribbon, status, template)
+	return err
+}
+
+// SetTaskStatus меняет статус всей партии (например, на 'completed' или 'stopped')
+func (s *Store) SetTaskStatus(taskID int, status string) error {
+	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err
 }
 
