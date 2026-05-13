@@ -250,7 +250,7 @@ func (d *Driver) GetRemainingRibbon() (string, error) {
 // SelectTemplate поддерживает опциональную передачу статических полей (Job with Data)
 func (d *Driver) SelectTemplate(name string, fields map[string]string) error {
 	var sb strings.Builder
-	sb.WriteString("SLA|")
+	sb.WriteString("SLA")
 	sb.WriteString(name)
 	sb.WriteString("|")
 
