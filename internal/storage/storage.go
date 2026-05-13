@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"log/slog"
 	"rovnoMark/internal/models"
 
 	_ "modernc.org/sqlite"
@@ -15,11 +14,11 @@ type Store struct {
 }
 
 // UpdateCodeStatus переводит код из 'pending' в 'in_buffer' и присваивает ему индекс принтера
-func (s *Store) UpdateCodeStatus(codeID int, status string, printerIndex int, printerID int) error {
+func (s *Store) UpdateCodeStatus(codeID int, status string, printerIndex int) error {
 	_, err := s.db.Exec(`
 		UPDATE task_codes 
-		SET status = ?, printer_index = ?, printer_id = ? 
-		WHERE id = ?`, status, printerIndex, printerID, codeID)
+		SET status = ?, printer_index = ? 
+		WHERE id = ?`, status, printerIndex, codeID)
 	return err
 }
 
@@ -30,65 +29,56 @@ func (s *Store) SetTaskStatus(taskID int, status string) error {
 }
 
 // CreateTask Создание задачи и возврат ID
-func (s *Store) CreateTask(lineID int, template, dynamicField, staticFieldsJSON string) (int64, error) {
-	res, err := s.db.Exec(`
-        INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, status) 
-        VALUES (?, ?, ?, ?, 'active')`,
-		lineID, template, dynamicField, staticFieldsJSON)
-
+func (s *Store) CreateTask(lineID int, template string) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO tasks (line_id, template_name, status) VALUES (?, ?, 'active')`, lineID, template)
 	if err != nil {
-		// Логируем ошибку БД со всеми контекстными данными
-		slog.Error("Ошибка SQL при создании задачи",
-			"err", err,
-			"line_id", lineID,
-			"template", template,
-		)
 		return 0, err
 	}
-
-	id, _ := res.LastInsertId()
-
-	// Debug-лог для подтверждения записи в базу
-	slog.Debug("Запись задачи создана в БД", "task_id", id, "line_id", lineID)
-
-	return id, nil
+	return res.LastInsertId()
 }
 
-// AppendCodes Массовая дозаливка кодов в статусе pending
-func (s *Store) AppendCodes(taskID int64, codes []string) error {
+// А лучше добавьте сразу метод проверки задачи, чтобы не мучить main.go запросами
+func (s *Store) GetLineIDByTask(taskID int) (int, error) {
+	var lineID int
+	err := s.db.QueryRow("SELECT line_id FROM tasks WHERE id = ?", taskID).Scan(&lineID)
+	return lineID, err
+}
+
+// AppendTaskCodes вставляет пачку кодов, автоматически вычисляя индексы для конкретного принтера
+func (s *Store) AppendTaskCodes(taskID int, printerID int, codes []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	stmt, _ := tx.Prepare(`INSERT INTO task_codes (task_id, code, status) VALUES (?, ?, 'pending')`)
-	for _, c := range codes {
-		stmt.Exec(taskID, c)
+	defer tx.Rollback()
+
+	// 1. Узнаем последний индекс для этого принтера в этой задаче
+	var lastIndex int
+	err = tx.QueryRow(`
+		SELECT COALESCE(MAX(printer_index), -1) 
+		FROM task_codes 
+		WHERE task_id = ? AND printer_id = ?`,
+		taskID, printerID).Scan(&lastIndex)
+
+	// 2. Вставляем коды с инкрементом индекса
+	stmt, err := tx.Prepare(`
+		INSERT INTO task_codes (task_id, printer_id, code, printer_index, status) 
+		VALUES (?, ?, ?, ?, 'pending')`)
+	if err != nil {
+		return err
 	}
+	defer stmt.Close()
+
+	for i, code := range codes {
+		// Если последний был -1, первый станет 0 (как вы и просили для Videojet)
+		nextIndex := lastIndex + 1 + i
+		_, err := stmt.Exec(taskID, printerID, code, nextIndex)
+		if err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
-}
-
-// StopTask переводит задачу в статус остановленной
-func (s *Store) StopTask(taskID int) error {
-	_, err := s.db.Exec("UPDATE tasks SET status = 'stopped' WHERE id = ?", taskID)
-	return err
-}
-
-func (s *Store) GetActiveTaskID(lineID int) (int, string, error) {
-	var id int
-	var template string
-	// Ищем задачу со статусом 'active' для конкретной линии
-	err := s.db.QueryRow("SELECT id, template_name FROM tasks WHERE line_id = ? AND status = 'active' LIMIT 1", lineID).Scan(&id, &template)
-	if err == sql.ErrNoRows {
-		return 0, "", nil
-	}
-	return id, template, err
-}
-
-// CheckLineExists проверяет, существует ли линия в базе данных
-func (s *Store) CheckLineExists(id int) (bool, error) {
-	var exists bool
-	err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM lines WHERE id = ? AND is_deleted = 0)", id).Scan(&exists)
-	return exists, err
 }
 
 // GetNextPendingCodes выбирает порцию кодов, ожидающих печати.
@@ -125,23 +115,16 @@ func (s *Store) GetNextPendingCodes(taskID int, limit int) ([]models.TaskCode, e
 	return list, nil
 }
 
-// MarkAsPrinted синхронизирует статус 'printed' для конкретного принтера на линии
-func (s *Store) MarkAsPrinted(taskID int, printerID int, lastIndex int) (int64, error) {
+// Синхронизация статуса 'printed' на основе индекса SID от принтера
+func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
 	res, err := s.db.Exec(`
 		UPDATE task_codes 
 		SET status = 'printed', printed_at = CURRENT_TIMESTAMP 
-		WHERE task_id = ? AND printer_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
-		taskID, printerID, lastIndex)
-
-	// Обрабатываем ошибку выполнения запроса
+		WHERE task_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
+		taskID, lastIndex)
 	if err != nil {
-		slog.Error("Ошибка при обновлении статуса 'printed'",
-			"task_id", taskID,
-			"printer_id", printerID,
-			"err", err)
 		return 0, err
 	}
-
 	return res.RowsAffected()
 }
 
@@ -401,16 +384,15 @@ func createTables(db *sql.DB) {
 	);`)
 
 	// Таблица задач (Партий)
-	db.Exec(`CREATE TABLE IF NOT EXISTS task_codes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id INTEGER,
-		printer_id INTEGER,          
-		code TEXT NOT NULL,
-		status TEXT DEFAULT 'pending',
-		printer_index INTEGER,
-		printed_at DATETIME,
-		FOREIGN KEY(task_id) REFERENCES tasks(id)
-	);`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        line_id INTEGER,
+        template_name TEXT,
+        dynamic_field_name TEXT, -- Добавлено
+        status TEXT DEFAULT 'active', -- 'active', 'completed', 'stopped'
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(line_id) REFERENCES lines(id)
+    );`)
 
 	// Таблица кодов с расширенными статусами и индексами SID
 	db.Exec(`CREATE TABLE IF NOT EXISTS task_codes (

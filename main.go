@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,9 +20,17 @@ import (
 	"rovnoMark/internal/storage"
 )
 
-//
 //go:embed ui/*
 var uiFS embed.FS
+
+// sendJSONError отправляет стандартизированный JSON-ответ с ошибкой
+func sendJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{
+		"error": msg,
+	})
+}
 
 func main() {
 	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
@@ -43,10 +52,10 @@ func main() {
 
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
-	//taskProcessor := &core.TaskProcessor{
-	//	Store:   store,
-	//	Manager: manager,
-	//}
+	taskProcessor := &core.TaskProcessor{
+		Store:   store,
+		Manager: manager,
+	}
 
 	// 1. Загружаем все принтеры из базы в работу
 	savedPrinters, _ := store.GetAllPrinters()
@@ -325,15 +334,15 @@ func main() {
 			if state.LastTemplate != req.Template {
 				l.Debug("Delta: Смена шаблона", "old", state.LastTemplate, "new", req.Template)
 
-				// Добавляем nil, так как здесь нам нужно просто переключить макет
 				if err := p.SelectTemplate(req.Template, nil); err != nil {
 					l.Error("Delta: Ошибка смены шаблона", "err", err)
 					continue
 				}
-
-				// Обновляем состояние в памяти
+				// Обновляем состояние в памяти, чтобы не дергать SelectTemplate в следующий раз
 				manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, state.LastStaticHash)
 				l.Info("Delta: Шаблон успешно изменен")
+			} else {
+				l.Debug("Delta: Шаблон не изменился, пропускаем SLA")
 			}
 
 			// Б) Проверка статики
@@ -438,163 +447,131 @@ func main() {
 		json.NewEncoder(w).Encode(fields)
 	})
 
-	// Регистрация новой партии с проверкой оборудования (Handshake)
+	// Регистрация новой партии
 	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
+		// 1. Проверяем метод запроса
+		if r.Method != http.MethodPost {
+			http.Error(w, "Only POST", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// 2. Декодируем запрос с проверкой на ошибки
+		var req struct {
+			LineID   int    `json:"line_id"`
+			Template string `json:"template"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// 3. Создаем задачу в базе данных
+		// Метод возвращает ID новой записи
+		taskID, err := store.CreateTask(req.LineID, req.Template)
+		if err != nil {
+			http.Error(w, "DB Error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// 4. ЗАПУСКАЕМ НАКАЧКУ (Task Pumping)
+		// Эта функция запускает бесконечный цикл в горутине, который будет
+		// следить за буфером принтеров на линии и подливать туда коды
+		taskProcessor.StartPumping(req.LineID, int(taskID))
+
+		// Логируем для контроля в консоли
+		log.Printf("[TASK] Создана активная партия ID:%d для линии %d (Шаблон: %s)", taskID, req.LineID, req.Template)
+
+		// 5. Отправляем успешный ответ
 		w.Header().Set("Content-Type", "application/json")
-
-		if r.Method != http.MethodPost {
-			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
-			return
-		}
-
-		var req struct {
-			LineID           int               `json:"line_id"`
-			Template         string            `json:"template_name"`
-			DynamicFieldName string            `json:"dynamic_field_name"` // Может быть пустым для статики
-			StaticFields     map[string]string `json:"static_fields"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
-			return
-		}
-
-		// --- 1. ПРОВЕРКА СУЩЕСТВОВАНИЯ ЛИНИИ ---
-		exists, err := store.CheckLineExists(req.LineID)
-		if err != nil || !exists {
-			sendJSONError(w, http.StatusNotFound, "Линия не найдена")
-			return
-		}
-
-		// --- 2. МЕХАНИЗМ БЛОКИРОВКИ: Есть ли активная задача? ---
-		activeID, activeTmpl, _ := store.GetActiveTaskID(req.LineID)
-		if activeID != 0 {
-			w.WriteHeader(http.StatusConflict)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":            "Line is busy",
-				"active_task_id":   activeID,
-				"current_template": activeTmpl,
-			})
-			return
-		}
-
-		// --- 3. ПОИСК ПРИНТЕРОВ ---
-		printersInLine, _ := store.GetPrintersByLine(req.LineID)
-		if len(printersInLine) == 0 {
-			sendJSONError(w, http.StatusUnprocessableEntity, "На линии нет принтеров")
-			return
-		}
-
-		// --- 4. HANDSHAKE
-		// --- 4. HANDSHAKE (РАЗВИЛКА СТАТИКА / ДИНАМИКА) ---
-		for _, pCfg := range printersInLine {
-			p := manager.GetPrinter(pCfg.ID)
-			if p == nil {
-				continue
-			}
-
-			// Проверка статуса (ГОТОВ)
-			status, _ := p.GetStatus()
-			if status != "ГОТОВ" {
-				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s занят (%s)", pCfg.Name, status))
-				return
-			}
-
-			if req.DynamicFieldName == "" {
-				// --- ПУТЬ А: СТАТИЧЕСКАЯ ПЕЧАТЬ (ВСЁ В ОДНОМ SLA) ---
-				slog.Info("Handshake: Статический режим", "printer", pCfg.Name)
-
-				// Очищаем старые очереди кодов (на всякий случай)
-				p.ClearQueue()
-
-				// Вызываем обновленный SelectTemplate с полями. Принтер загрузит макет и СРАЗУ обновит текст.
-				if err := p.SelectTemplate(req.Template, req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Ошибка SLA на %s: %v", pCfg.Name, err))
-					return
-				}
-			} else {
-				// --- ПУТЬ Б: ДИНАМИЧЕСКАЯ ПЕЧАТЬ (МАРКИРОВКА) ---
-				slog.Info("Handshake: Динамический режим (ЧЗ)", "field", req.DynamicFieldName)
-
-				// 1. Сначала просто выбираем макет (SLA без полей)
-				if err := p.SelectTemplate(req.Template, nil); err != nil {
-					sendJSONError(w, http.StatusBadRequest, "Макет не найден")
-					return
-				}
-
-				// 2. Инициализируем сессию (SHO). Теперь принтер ждет SCF и данные для SID/SDO.
-				if err := p.InitSession(req.DynamicFieldName, 1000); err != nil {
-					sendJSONError(w, http.StatusBadRequest, "Ошибка SHO: "+err.Error())
-					return
-				}
-
-				// 3. Теперь SCF легален, так как поле сериализации задано!
-				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка SCF: "+err.Error())
-					return
-				}
-			}
-
-			// Фиксируем состояние
-			currentHash := fmt.Sprintf("%v", req.StaticFields)
-			manager.UpdatePrinterDeltaState(pCfg.ID, req.Template, currentHash)
-		}
-
-		// --- 5. СОХРАНЕНИЕ ЗАДАЧИ ---
-		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(req.LineID, req.Template, req.DynamicFieldName, string(staticBytes))
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка записи задачи в БД")
-			return
-		}
-
-		slog.Info("Задача создана", "id", taskID, "mode", "dynamic="+strconv.FormatBool(req.DynamicFieldName != ""))
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "active", "task_id": taskID})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "active",
+			"task_id": taskID,
+			"message": "Партия запущена, процесс накачки кодов активирован",
+		})
 	})
 
-	// Дозаливка кодов (Асинхронно)
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TaskID int64    `json:"task_id"`
-			Codes  []string `json:"codes"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-
-		err := store.AppendCodes(req.TaskID, req.Codes)
-		if err != nil {
-			http.Error(w, "DB Error", http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "appended", "count": len(req.Codes)})
-	})
-
-	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
 			return
 		}
 
 		var req struct {
-			LineID int `json:"line_id"`
+			TaskID     int      `json:"task_id"`
+			PrinterSeq int      `json:"printer_seq"` // Порядковый номер на линии (1, 2...)
+			Codes      []string `json:"codes"`
 		}
+
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 
-		// 1. Ищем, какая задача сейчас активна
-		// Используем нормальное имя переменной, например activeTemplate
-		taskID, activeTemplate, err := store.GetActiveTaskID(req.LineID)
-		if err != nil || taskID == 0 {
-			sendJSONError(w, http.StatusNotFound, "Нет активных задач на этой линии")
+		// 1. Находим Линию по ID задачи напрямую через Store
+		lineID, err := store.GetLineIDByTask(req.TaskID)
+		if err != nil {
+			sendJSONError(w, http.StatusNotFound, "Задача не найдена")
 			return
 		}
 
-		// 2. СВЕРКА (RECONCILIATION)
-		printers, _ := store.GetPrintersByLine(req.LineID)
+		// 2. Получаем список принтеров этой линии
+		printers, err := store.GetPrintersByLine(lineID)
+		if err != nil || len(printers) == 0 {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка получения конфигурации линии")
+			return
+		}
+
+		// 3. Определяем целевой принтер по порядковому номеру (seq)
+		// 1С шлет 1, 2, 3... мы переводим в индекс массива 0, 1, 2...
+		if req.PrinterSeq < 1 || req.PrinterSeq > len(printers) {
+			sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("На линии %d всего %d принтеров. Вы запросили №%d", lineID, len(printers), req.PrinterSeq))
+			return
+		}
+		targetPrinter := printers[req.PrinterSeq-1]
+
+		// 4. Загружаем коды в базу
+		err = store.AppendTaskCodes(req.TaskID, targetPrinter.ID, req.Codes)
+		if err != nil {
+			slog.Error("Append: Ошибка вставки кодов", "err", err)
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
+			return
+		}
+
+		slog.Info("Append: Коды успешно приняты",
+			"task", req.TaskID,
+			"line", lineID,
+			"printer", targetPrinter.Name,
+			"count", len(req.Codes))
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "received",
+			"task_id": req.TaskID,
+			"printer": targetPrinter.Name,
+			"added":   len(req.Codes),
+		})
+	})
+
+	// Метод Graceful Stop: корректное завершение печати и сверка остатков
+	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
+		// 1. Получаем ID задачи из запроса
+		taskIDStr := r.URL.Query().Get("id")
+		taskID, err := strconv.Atoi(taskIDStr)
+		if err != nil {
+			http.Error(w, "Invalid Task ID", http.StatusBadRequest)
+			return
+		}
+
+		// 2. Нам нужно знать, на какой линии работала задача, чтобы найти принтеры
+		// (Для этого можно либо передать line_id в запросе, либо быстро дернуть из БД)
+		lineIDStr := r.URL.Query().Get("line_id")
+		lineID, _ := strconv.Atoi(lineIDStr)
+
+		log.Printf("[STOP] Инициирована остановка задачи ID:%d на линии %d", taskID, lineID)
+
+		// 3. Опрашиваем принтеры на линии для финальной сверки
+		printers, _ := store.GetPrintersByLine(lineID)
 		report := make(map[string]interface{})
 
 		for _, pCfg := range printers {
@@ -603,40 +580,36 @@ func main() {
 				continue
 			}
 
+			// А) Получаем последний реально напечатанный индекс (Команда SGP в Zipher)
 			lastIdx, err := p.GetLastPrintedIndex()
 			if err != nil {
-				slog.Error("Ошибка индекса", "printer", pCfg.Name, "err", err)
+				log.Printf("Ошибка получения индекса с принтера %d: %v", pCfg.ID, err)
 				continue
 			}
 
-			confirmed, _ := store.MarkAsPrinted(taskID, pCfg.ID, lastIdx)
+			// Б) Синхронизируем БД: всё, что принтер подтвердил, помечаем как 'printed'
+			// Всё, что было в буфере, но не напечатано, останется в статусе 'in_buffer' или вернется в 'pending'
+			affected, _ := store.MarkAsPrinted(taskID, lastIdx)
+
+			// В) Очищаем физическую очередь принтера (Команда CQI), чтобы не допечатывать лишнее
 			p.ClearQueue()
 
-			report[pCfg.Name] = map[string]int{
-				"last_index": lastIdx,
-				"confirmed":  int(confirmed),
+			report[pCfg.Name] = map[string]interface{}{
+				"last_printed_index": lastIdx,
+				"confirmed_codes":    affected,
+				"status":             "cleared",
 			}
 		}
 
-		// 3. Закрываем задачу в БД
-		if err := store.StopTask(taskID); err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка при закрытии задачи")
-			return
-		}
+		// 4. Меняем статус задачи в БД на завершенную
+		store.SetTaskStatus(taskID, "stopped")
 
-		// ИСПОЛЬЗУЕМ ПЕРЕМЕННУЮ ЗДЕСЬ:
-		slog.Info("Задача остановлена",
-			"task_id", taskID,
-			"template", activeTemplate, // Теперь Go доволен
-			"line", req.LineID,
-		)
-
+		// 5. Отправляем отчет в 1С/MES
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "stopped",
-			"task_id":  taskID,
-			"template": activeTemplate,
-			"results":  report,
+			"task_id": taskID,
+			"status":  "stopped",
+			"report":  report,
 		})
 	})
 
@@ -652,9 +625,4 @@ func main() {
 		slog.Error("Критическая ошибка сервера", "err", err)
 		os.Exit(1)
 	}
-}
-
-func sendJSONError(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
