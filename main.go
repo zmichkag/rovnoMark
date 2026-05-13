@@ -311,7 +311,7 @@ func main() {
 		var req struct {
 			LineID           int               `json:"line_id"`
 			TemplateName     string            `json:"template_name"`
-			DynamicFieldName string            `json:"dynamic_field"`
+			DynamicFieldName string            `json:"dynamic_field_name"`
 			StaticFields     map[string]string `json:"static_fields"`
 		}
 
