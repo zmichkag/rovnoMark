@@ -14,11 +14,23 @@ type Store struct {
 }
 
 // UpdateCodeStatus переводит код из 'pending' в 'in_buffer' и присваивает ему индекс принтера
-func (s *Store) UpdateCodeStatus(codeID int, status string, printerIndex int) error {
-	_, err := s.db.Exec(`
+func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit int) error {
+	// Мы обновляем статус только для конкретной задачи и конкретного принтера,
+	// строго соблюдая порядок индексов (printer_index).
+	query := `
 		UPDATE task_codes 
-		SET status = ?, printer_index = ? 
-		WHERE id = ?`, status, printerIndex, codeID)
+		SET status = ? 
+		WHERE id IN (
+			SELECT id FROM task_codes 
+			WHERE task_id = ? AND printer_id = ? AND status = 'pending' 
+			ORDER BY printer_index ASC 
+			LIMIT ?
+		)`
+
+	_, err := s.db.Exec(query, status, taskID, printerID, limit)
+	if err != nil {
+		slog.Error("SQL: Ошибка обновления статуса кодов", "err", err, "task", taskID, "printer", printerID)
+	}
 	return err
 }
 
