@@ -435,7 +435,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
 			"count":          len(req.Codes),
-			"pumper_started": activated, // Можно вернуть флаг для отладки
+			"pumper_started": activated, // <--- Если тут false, значит проблема №1
 		})
 	})
 
