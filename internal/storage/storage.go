@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"log/slog"
 	"rovnoMark/internal/models"
 
 	_ "modernc.org/sqlite"
