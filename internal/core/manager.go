@@ -47,6 +47,7 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		slog.Error("Накачка отменена: не найдено динамическое поле", "task_id", taskID)
 		return
 	}
+	slog.Info("Начинаем шоу")
 
 	go func() {
 		for {
@@ -63,6 +64,7 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				time.Sleep(2 * time.Second)
 				continue
 			}
+			slog.Debug("Принтер")
 
 			for _, pCfg := range printers {
 				p := tp.Manager.GetPrinter(pCfg.ID)
@@ -72,8 +74,18 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 				// 3. Узнаем, сколько кодов готов проглотить этот конкретный принтер
 				freeSpace, err := p.GetBufferFreeSpace()
+				// Выводим лог с результатом запроса
+				slog.Info("Pumper: проверка буфера",
+					"printer", pCfg.Name,
+					"free_slots", freeSpace,
+					"error", err)
+
 				if err != nil || freeSpace < 10 {
-					continue // Буфер забит или принтер оффлайн
+
+					if err == nil && freeSpace < 10 {
+						slog.Warn("Pumper: буфер принтера заполнен", "printer", pCfg.Name, "free", freeSpace)
+					}
+					continue
 				}
 
 				// Держим очередь короткой (макс 100 шт) для быстрого маневра
