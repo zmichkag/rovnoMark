@@ -38,13 +38,11 @@ func main() {
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
 	flag.Parse()
 
-	// 2. Настраиваем уровень логирования
-	logLevel := new(slog.LevelVar) // по умолчанию INFO
+	logLevel := new(slog.LevelVar)
 	if *debugMode {
 		logLevel.Set(slog.LevelDebug)
 	}
 
-	// Создаем логгер (текстовый для разработки или JSON для прода)
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
@@ -58,7 +56,6 @@ func main() {
 		Manager: manager,
 	}
 
-	// 1. Загружаем все принтеры из базы в работу
 	savedPrinters, _ := store.GetAllPrinters()
 	for _, cfg := range savedPrinters {
 		if cfg.DriverType == "savema" {
@@ -69,7 +66,6 @@ func main() {
 	}
 
 	go manager.BackgroundPoller()
-
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
 	// 2. API для добавления нового принтера
@@ -389,9 +385,8 @@ func main() {
 
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TaskID     int      `json:"task_id"`
-			PrinterSeq int      `json:"printer_seq"`
-			Codes      []string `json:"codes"`
+			TaskID int      `json:"task_id"`
+			Codes  []string `json:"codes"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -400,39 +395,21 @@ func main() {
 			return
 		}
 
-		// 1. Просто кладем коды в базу (в статусе 'pending')
-		err = store.AppendTaskCodes(req.TaskID, targetPrinter.ID, req.Codes)
+		// Просто складываем коды в базу. Насос (StartPumping),
+		// запущенный при create, сам их заберет и распределит.
+		err := store.AppendTaskCodes(req.TaskID, req.Codes)
 		if err != nil {
 			slog.Error("Append: Ошибка записи в БД", "task_id", req.TaskID, "err", err)
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 			return
 		}
 
-		// 2. Пытаемся активировать задачу
-		activated, err := store.TryActivateTask(req.TaskID)
-		if err != nil {
-			slog.Error("Append: ошибка активации", "task_id", req.TaskID, "err", err)
-		}
-
-		if activated {
-			// Достаем lineID для запуска насоса
-			lineID, _ := store.GetLineIDByTask(req.TaskID)
-
-			// ЗАПУСКАЕМ НАСОС (Pumper)
-			// Он сразу увидит те коды, которые мы только что положили
-			taskProcessor.StartPumping(lineID, req.TaskID)
-
-			slog.Info("ПЕРВАЯ ПАЧКА ПРИНЯТА: печать запущена автоматически",
-				"task_id", req.TaskID, "count", len(req.Codes))
-		} else {
-			slog.Debug("Коды добавлены в активную задачу",
-				"task_id", req.TaskID, "count", len(req.Codes))
-		}
+		slog.Info("Коды добавлены в задачу", "task_id", req.TaskID, "count", len(req.Codes))
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "received",
-			"started": activated,
+			"status": "received",
+			"count":  len(req.Codes),
 		})
 	})
 

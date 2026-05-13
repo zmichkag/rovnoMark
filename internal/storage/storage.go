@@ -40,6 +40,20 @@ func (s *Store) SetTaskStatus(taskID int, status string) error {
 	return err
 }
 
+// GetTaskStatus возвращает текущий статус задачи для контроля остановки накачки
+func (s *Store) GetTaskStatus(taskID int) (string, error) {
+	var status string
+	err := s.db.QueryRow("SELECT status FROM tasks WHERE id = ?", taskID).Scan(&status)
+	return status, err
+}
+
+// GetTaskDynamicField возвращает имя динамического поля для сериализации
+func (s *Store) GetTaskDynamicField(taskID int) (string, error) {
+	var field string
+	err := s.db.QueryRow("SELECT dynamic_field_name FROM tasks WHERE id = ?", taskID).Scan(&field)
+	return field, err
+}
+
 // CreateTask Создание задачи с поддержкой динамических полей и статики
 func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string) (int64, error) {
 	res, err := s.db.Exec(`
@@ -52,7 +66,7 @@ func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string
 	return res.LastInsertId()
 }
 
-// А лучше добавьте сразу метод проверки задачи, чтобы не мучить main.go запросами
+// GetLineIDByTask потом добавтиь метод проверки задачи, чтобы не мучить main запросами
 func (s *Store) GetLineIDByTask(taskID int) (int, error) {
 	var lineID int
 	err := s.db.QueryRow("SELECT line_id FROM tasks WHERE id = ?", taskID).Scan(&lineID)
@@ -73,7 +87,7 @@ func (s *Store) TryActivateTask(taskID int) (bool, error) {
 	return affected > 0, nil
 }
 
-// AppendTaskCodes вставляет пачку кодов, автоматически вычисляя индексы для конкретного принтера
+// AppendTaskCodes вставляет пачку кодов в статусе 'pending' без привязки к принтеру
 func (s *Store) AppendTaskCodes(taskID int, codes []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -83,7 +97,7 @@ func (s *Store) AppendTaskCodes(taskID int, codes []string) error {
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO task_codes (task_id, code, status, printer_id, printer_index) 
-		VALUES (?, ?, 'pending', NULL, NULL)`) // printer_id пока не знаем
+		VALUES (?, ?, 'pending', NULL, NULL)`)
 	if err != nil {
 		return err
 	}
@@ -97,6 +111,7 @@ func (s *Store) AppendTaskCodes(taskID int, codes []string) error {
 	return tx.Commit()
 }
 
+// FetchAndAssignCodes атомарно забирает коды, назначает им ID принтера, порядковый индекс и ставит статус 'in_buffer'
 func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]models.TaskCode, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -109,7 +124,7 @@ func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]mod
 	tx.QueryRow(`SELECT COALESCE(MAX(printer_index), -1) FROM task_codes 
 	             WHERE task_id = ? AND printer_id = ?`, taskID, printerID).Scan(&lastIndex)
 
-	// 2. Выбираем свободные коды, у которых еще нет принтера
+	// 2. Выбираем свободные коды
 	rows, err := tx.Query(`
 		SELECT id, code FROM task_codes 
 		WHERE task_id = ? AND status = 'pending' AND printer_id IS NULL 
@@ -120,24 +135,22 @@ func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]mod
 	defer rows.Close()
 
 	var list []models.TaskCode
-	var ids []interface{}
 	for rows.Next() {
 		var tc models.TaskCode
 		rows.Scan(&tc.ID, &tc.Code)
 		list = append(list, tc)
-		ids = append(ids, tc.ID)
 	}
 
 	if len(list) == 0 {
 		return nil, nil
 	}
 
-	// 3. ПОМЕЧАЕМ: Присваиваем этим кодам ID принтера и порядковые индексы
+	// 3. Присваиваем этим кодам ID принтера и индексы
 	for i, tc := range list {
 		nextIdx := lastIndex + 1 + i
 		tx.Exec(`UPDATE task_codes SET printer_id = ?, printer_index = ?, status = 'in_buffer' 
 		         WHERE id = ?`, printerID, nextIdx, tc.ID)
-		list[i].PrinterIndex = nextIdx // Обновляем в памяти для отправки
+		list[i].PrinterIndex = nextIdx
 	}
 
 	return list, tx.Commit()
@@ -157,7 +170,7 @@ func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
 }
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
-func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) { // Замена core -> models
+func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
 	if err != nil {
 		return nil, err
