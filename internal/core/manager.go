@@ -64,7 +64,6 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				time.Sleep(2 * time.Second)
 				continue
 			}
-			slog.Debug("Принтер")
 
 			for _, pCfg := range printers {
 				p := tp.Manager.GetPrinter(pCfg.ID)
@@ -96,8 +95,16 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 				// 4. Забираем коды из базы с автоматической привязкой и сменой статуса
 				pending, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
-				if err != nil || len(pending) == 0 {
-					continue // Нет новых кодов
+				if err != nil {
+					slog.Error("Pumper: Критическая ошибка БД при захвате кодов", "task_id", taskID, "err", err)
+					time.Sleep(2 * time.Second) // Чтобы не заспамить логи
+					continue
+				}
+
+				if len(pending) == 0 {
+					// Временно включим лог, чтобы видеть, какой именно task_id ищет насос
+					slog.Debug("Pumper: Кодов для этой задачи пока нет", "task_id", taskID)
+					continue
 				}
 
 				var codesOnly []string
