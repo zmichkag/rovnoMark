@@ -383,7 +383,7 @@ func main() {
 			manager.UpdatePrinterDeltaState(pCfg.ID, req.TemplateName, fmt.Sprintf("%v", req.StaticFields))
 		}
 
-		// 3. Сохраняем и запускаем
+		// 3. Сохраняем задачу
 		staticBytes, _ := json.Marshal(req.StaticFields)
 		taskID, err := store.CreateTask(req.LineID, req.TemplateName, req.DynamicFieldName, string(staticBytes))
 		if err != nil {
@@ -391,13 +391,9 @@ func main() {
 			return
 		}
 
-		// Запускаем фоновый насос только для маркировки
-		if req.DynamicFieldName != "" {
-			taskProcessor.StartPumping(req.LineID, int(taskID))
-		}
-
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "active", "task_id": taskID})
+		// Отвечаем 1С, что задача ГОТОВА к приему кодов
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ready", "task_id": taskID})
 	})
 
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
@@ -421,12 +417,25 @@ func main() {
 			return
 		}
 
-		slog.Info("Коды добавлены в задачу", "task_id", req.TaskID, "count", len(req.Codes))
+		// 2. ПЫТАЕМСЯ АКТИВИРОВАТЬ ЗАДАЧУ И ЗАПУСТИТЬ НАСОС
+		// TryActivateTask вернет true только если статус был 'ready' и стал 'active'
+		activated, _ := store.TryActivateTask(req.TaskID)
+		if activated {
+			// Нам нужен ID линии, чтобы передать его насосу
+			lineID, err := store.GetLineIDByTask(req.TaskID)
+			if err == nil {
+				taskProcessor.StartPumping(lineID, req.TaskID)
+				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос запущен", "task_id", req.TaskID)
+			}
+		}
+
+		slog.Debug("Коды добавлены в задачу", "task_id", req.TaskID, "count", len(req.Codes))
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "received",
-			"count":  len(req.Codes),
+			"status":         "received",
+			"count":          len(req.Codes),
+			"pumper_started": activated, // Можно вернуть флаг для отладки
 		})
 	})
 

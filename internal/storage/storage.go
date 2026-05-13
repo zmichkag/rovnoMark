@@ -17,7 +17,7 @@ type Store struct {
 func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string) (int64, error) {
 	res, err := s.db.Exec(`
         INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, status) 
-        VALUES (?, ?, ?, ?, 'active')`,
+        VALUES (?, ?, ?, ?, 'ready')`,
 		lineID, template, dynamicField, staticJSON)
 	if err != nil {
 		return 0, err
