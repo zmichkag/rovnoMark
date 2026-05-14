@@ -499,6 +499,23 @@ func main() {
 		})
 	})
 
+	// Получение списка активных задач
+	http.HandleFunc("/api/tasks/active", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only GET allowed")
+			return
+		}
+
+		tasks, err := store.GetActiveTasks()
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка получения списка задач: "+err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tasks)
+	})
+
 	// 5. Раздача UI (Frontend)
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))

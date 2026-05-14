@@ -158,6 +158,65 @@ func (s *Store) GetLineIDByTask(taskID int) (int, error) {
 	return lineID, err
 }
 
+// GetActiveTasks возвращает список активных и готовых к работе задач со статистикой
+func (s *Store) GetActiveTasks() ([]map[string]interface{}, error) {
+	query := `
+		SELECT 
+			t.id, 
+			t.line_id, 
+			COALESCE(l.name, 'Неизвестная линия') as line_name, 
+			t.template_name, 
+			COALESCE(t.dynamic_field_name, '') as dynamic_field_name, 
+			t.status, 
+			t.created_at,
+			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id) as total_codes,
+			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes,
+			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'in_buffer') as buffered_codes
+		FROM tasks t
+		LEFT JOIN lines l ON t.line_id = l.id
+		WHERE t.status IN ('active', 'ready')
+		ORDER BY t.id DESC
+	`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, lineID, total, printed, buffered int
+		var lineName, templateName, dynamicField, status, createdAt string
+
+		if err := rows.Scan(&id, &lineID, &lineName, &templateName, &dynamicField, &status, &createdAt, &total, &printed, &buffered); err != nil {
+			continue
+		}
+
+		result = append(result, map[string]interface{}{
+			"task_id":            id,
+			"line_id":            lineID,
+			"line_name":          lineName,
+			"template_name":      templateName,
+			"dynamic_field_name": dynamicField,
+			"status":             status,
+			"created_at":         createdAt,
+			"stats": map[string]int{
+				"total":    total,
+				"printed":  printed,
+				"buffered": buffered,
+			},
+		})
+	}
+
+	// Чтобы API не возвращало null, если задач нет
+	if result == nil {
+		result = make([]map[string]interface{}, 0)
+	}
+
+	return result, nil
+}
+
 // TryActivateTask проверяет, находится ли задача в статусе 'ready',
 // и если да — переводит её в 'active'. Возвращает true, если активация произошла.
 func (s *Store) TryActivateTask(taskID int) (bool, error) {
