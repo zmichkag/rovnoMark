@@ -408,7 +408,6 @@ func (d *Driver) GetTemplates() ([]string, error) {
 }
 
 // PrintBatchIndexed загружает пачку кодов через SID (с индексами)
-// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	// Мьютекс не нужен, он уже есть внутри sendRaw
 	slog.Info("VIDEOJET Batch Start", "ip", d.Address, "field", fieldName, "count", len(codes), "start_idx", startIndex)
@@ -433,7 +432,6 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	return successCount, nil
 }
 
-// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
 func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
