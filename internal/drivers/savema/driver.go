@@ -2,7 +2,7 @@ package savema
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -15,6 +15,33 @@ type Driver struct {
 	Port    int
 	Timeout time.Duration
 	mu      sync.Mutex
+}
+
+func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
+	// Пока здесь остается заглушка для будущего протокола Savema,
+	// но сигнатура теперь соответствует интерфейсу Printer
+	slog.Debug("SAVEMA: Выбор шаблона (заглушка)", "template", template, "fields_count", len(fields))
+	return nil
+}
+
+func (d *Driver) InitSession(fieldName string, maxQueue int) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *Driver) UpdateStaticFields(fields map[string]string) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *Driver) ClearQueue() error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (d *Driver) GetBufferFreeSpace() (int, error) {
+	//TODO implement me
+	panic("implement me")
 }
 
 func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
@@ -68,7 +95,11 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[SAVEMA %s] SEND: %s, REPLY: %s", d.Address, cmd, string(reader[:reply]))
+	slog.Debug("SAVEMA IO",
+		"ip", d.Address,
+		"send", cmd,
+		"reply", string(reader[:reply]),
+	)
 	return string(reader[:reply]), nil
 }
 
