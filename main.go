@@ -500,7 +500,7 @@ func main() {
 	})
 
 	// Получение списка активных задач
-	http.HandleFunc("/api/tasks/active", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/task/active", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			sendJSONError(w, http.StatusMethodNotAllowed, "Only GET allowed")
 			return
