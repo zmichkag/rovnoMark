@@ -70,42 +70,49 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 					continue
 				}
 
-				// 3. Узнаем, сколько кодов готов проглотить этот конкретный принтер
+				// 1. Устанавливаем желаемую планку буфера
+				maxBuffer := 10
+
+				// 2. Узнаем, сколько свободных слотов осталось до лимита
+				// (Драйвер возвращает SGM - SRC, т.е. сколько еще влезет)
 				freeSpace, err := p.GetBufferFreeSpace()
-				// Выводим лог с результатом запроса
-				slog.Info("Pumper: проверка буфера",
-					"printer", pCfg.Name,
-					"free_slots", freeSpace,
-					"error", err)
-
-				if err != nil || freeSpace < 10 {
-
-					if err == nil && freeSpace < 10 {
-						slog.Warn("Pumper: буфер принтера заполнен", "printer", pCfg.Name, "free", freeSpace)
-					}
+				if err != nil {
 					continue
 				}
 
-				// Держим очередь короткой (макс 100 шт) для быстрого маневра
+				// Считаем, сколько кодов сейчас в принтере
+				// ВАЖНО: Это сработает корректно, если в InitSession (main.go) вы указали лимит 10.
+				// Если там лимит 2000, то freeSpace будет ~1990.
+				// Поэтому для логики "держать 10" мы берем freeSpace, но не даем ему превысить наш макс.
+
 				targetLoad := freeSpace
-				if targetLoad > 100 {
-					targetLoad = 100
+				if targetLoad > maxBuffer {
+					// Если в принтере пусто, не заливаем больше 10 за раз
+					targetLoad = maxBuffer
 				}
 
-				// 4. Забираем коды из базы с автоматической привязкой и сменой статуса
+				// Выводим лог для контроля "наполненности"
+				slog.Info("Pumper: состояние буфера",
+					"printer", pCfg.Name,
+					"in_printer", maxBuffer-freeSpace, // Сколько примерно занято
+					"adding", targetLoad)
+
+				// 3. Если место есть — забираем коды из базы
+				if targetLoad <= 0 {
+					continue // Буфер полон
+				}
+
 				pending, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
 				if err != nil {
-					slog.Error("Pumper: Критическая ошибка БД при захвате кодов", "task_id", taskID, "err", err)
-					time.Sleep(2 * time.Second) // Чтобы не заспамить логи
+					slog.Error("Pumper: Ошибка БД", "task_id", taskID, "err", err)
 					continue
 				}
 
 				if len(pending) == 0 {
-					// Временно включим лог, чтобы видеть, какой именно task_id ищет насос
-					slog.Debug("Pumper: Кодов для этой задачи пока нет", "task_id", taskID)
-					continue
+					continue // Коды в базе кончились
 				}
 
+				// 4. Подготовка пачки
 				var codesOnly []string
 				for _, item := range pending {
 					codesOnly = append(codesOnly, item.Code)
@@ -113,16 +120,17 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 				startIndex := pending[0].PrinterIndex
 
-				// 5. Загружаем коды в железо с нужным DynamicField
+				// 5. Отправка в принтер
 				loaded, err := p.PrintBatchIndexed(dynamicField, startIndex, codesOnly)
 
 				if err == nil && loaded > 0 {
-					slog.Debug("Загружена пачка кодов", "printer", pCfg.Name, "count", loaded, "start_idx", startIndex)
+					slog.Debug("Pumper: дозагрузка выполнена", "printer", pCfg.Name, "count", loaded)
 				} else if err != nil {
-					slog.Warn("Ошибка отправки в принтер", "printer", pCfg.Name, "err", err)
+					slog.Warn("Pumper: ошибка SID", "printer", pCfg.Name, "err", err)
 				}
 			}
-			time.Sleep(1 * time.Second)
+
+			time.Sleep(5 * time.Second)
 		}
 	}()
 }

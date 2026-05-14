@@ -454,7 +454,7 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	log.Printf("[VIDEOJET %s] raw >: %s, %s", d.Address, conn.RemoteAddr(), strings.Join(codes, "|"))
 
 	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
-	fmt.Fprintf(conn, "SMR|%d|\r", 2000)
+	fmt.Fprintf(conn, "SMR|%d|\r", 10)
 	reader.ReadString('\r')
 
 	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
