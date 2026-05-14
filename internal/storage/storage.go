@@ -69,10 +69,15 @@ func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	return list, nil
 }
 
-// GetAssignments возвращает список всех привязок линий к принтерам с их ролями
+// GetAssignments возвращает список всех привязок линий к принтерам с их ролями и ID
 func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
 	query := `
-		SELECT l.name as line_name, p.name as printer_name, lp.role 
+		SELECT 
+			l.id as line_id, 
+			l.name as line_name, 
+			p.id as printer_id, 
+			p.name as printer_name, 
+			lp.role 
 		FROM line_printers lp
 		JOIN lines l ON lp.line_id = l.id
 		JOIN printers p ON lp.printer_id = p.id
@@ -85,13 +90,22 @@ func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
 
 	var result []map[string]interface{}
 	for rows.Next() {
+		var lineID, printerID int
 		var lName, pName, role string
 
-		if err := rows.Scan(&lName, &pName, &role); err != nil {
+		// Сканируем 5 полей в том же порядке, что и в SELECT
+		if err := rows.Scan(&lineID, &lName, &printerID, &pName, &role); err != nil {
 			log.Printf("ОШИБКА SCAN В ПРИВЯЗКАХ: %v", err)
 			continue
 		}
-		result = append(result, map[string]interface{}{"line_name": lName, "printer_name": pName, "role": role})
+
+		result = append(result, map[string]interface{}{
+			"line_id":      lineID,
+			"line_name":    lName,
+			"printer_id":   printerID,
+			"printer_name": pName,
+			"role":         role,
+		})
 	}
 	return result, nil
 }
