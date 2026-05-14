@@ -422,6 +422,19 @@ func New(path string) *Store {
 	if err != nil {
 		log.Fatal("Ошибка открытия БД:", err)
 	}
+	// --- АНТИ-БЛОКИРОВОЧНАЯ МАГИЯ SQLITE ---
+
+	// 1. Ограничиваем пул (все запросы идут через одно соединение, строго в очередь)
+	db.SetMaxOpenConns(1)
+
+	// 2. Включаем WAL (Write-Ahead Logging) для быстрой работы
+	db.Exec("PRAGMA journal_mode = WAL;")
+
+	// 3. Если база заблокирована на долю секунды, ждем до 5 секунд вместо ошибки 500
+	db.Exec("PRAGMA busy_timeout = 5000;")
+
+	// 4. Оптимизация записи на диск (в связке с WAL дает прирост скорости)
+	db.Exec("PRAGMA synchronous = NORMAL;")
 
 	// Включаем внешние ключи
 	db.Exec("PRAGMA foreign_keys = ON;")
