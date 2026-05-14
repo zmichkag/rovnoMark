@@ -376,7 +376,7 @@ func main() {
 					return
 				}
 				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка SCF: "+err.Error())
+					sendJSONError(w, http.StatusInternalServerError, "Ошибка обновления статических полей (SCF): "+err.Error())
 					return
 				}
 			}
