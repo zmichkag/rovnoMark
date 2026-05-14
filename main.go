@@ -500,15 +500,21 @@ func main() {
 	})
 
 	// Получение списка активных задач
-	http.HandleFunc("/api/task/active", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/tasks/active", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			sendJSONError(w, http.StatusMethodNotAllowed, "Only GET allowed")
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only GET")
 			return
 		}
 
-		tasks, err := store.GetActiveTasks()
+		// Читаем параметры из запроса
+		query := r.URL.Query()
+		lineID, _ := strconv.Atoi(query.Get("line_id"))
+		printerID, _ := strconv.Atoi(query.Get("printer_id"))
+
+		// Передаем фильтры в метод БД
+		tasks, err := store.GetActiveTasks(lineID, printerID)
 		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка получения списка задач: "+err.Error())
+			sendJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 

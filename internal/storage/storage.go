@@ -158,27 +158,36 @@ func (s *Store) GetLineIDByTask(taskID int) (int, error) {
 	return lineID, err
 }
 
-// GetActiveTasks возвращает список активных и готовых к работе задач со статистикой
-func (s *Store) GetActiveTasks() ([]map[string]interface{}, error) {
+// GetActiveTasks возвращает список задач с фильтрацией по линии или принтеру
+func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{}, error) {
+	// Базовая часть запроса
 	query := `
 		SELECT 
-			t.id, 
-			t.line_id, 
-			COALESCE(l.name, 'Неизвестная линия') as line_name, 
-			t.template_name, 
-			COALESCE(t.dynamic_field_name, '') as dynamic_field_name, 
-			t.status, 
-			t.created_at,
+			t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия') as line_name, 
+			t.template_name, t.status, t.created_at,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id) as total_codes,
-			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes,
-			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'in_buffer') as buffered_codes
+			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes
 		FROM tasks t
 		LEFT JOIN lines l ON t.line_id = l.id
-		WHERE t.status IN ('active', 'ready')
-		ORDER BY t.id DESC
-	`
+		WHERE t.status IN ('active', 'ready')`
 
-	rows, err := s.db.Query(query)
+	var args []interface{}
+
+	// Фильтр по линии
+	if lineID > 0 {
+		query += " AND t.line_id = ?"
+		args = append(args, lineID)
+	}
+
+	// Фильтр по принтеру (ищем задачи на тех линиях, где стоит этот принтер)
+	if printerID > 0 {
+		query += " AND t.line_id IN (SELECT line_id FROM line_printers WHERE printer_id = ?)"
+		args = append(args, printerID)
+	}
+
+	query += " ORDER BY t.id DESC"
+
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -186,34 +195,16 @@ func (s *Store) GetActiveTasks() ([]map[string]interface{}, error) {
 
 	var result []map[string]interface{}
 	for rows.Next() {
-		var id, lineID, total, printed, buffered int
-		var lineName, templateName, dynamicField, status, createdAt string
-
-		if err := rows.Scan(&id, &lineID, &lineName, &templateName, &dynamicField, &status, &createdAt, &total, &printed, &buffered); err != nil {
+		var id, lID, total, printed int
+		var lName, temp, stat, created string
+		if err := rows.Scan(&id, &lID, &lName, &temp, &stat, &created, &total, &printed); err != nil {
 			continue
 		}
-
 		result = append(result, map[string]interface{}{
-			"task_id":            id,
-			"line_id":            lineID,
-			"line_name":          lineName,
-			"template_name":      templateName,
-			"dynamic_field_name": dynamicField,
-			"status":             status,
-			"created_at":         createdAt,
-			"stats": map[string]int{
-				"total":    total,
-				"printed":  printed,
-				"buffered": buffered,
-			},
+			"task_id": id, "line_id": lID, "line_name": lName, "status": stat,
+			"stats": map[string]int{"total": total, "printed": printed},
 		})
 	}
-
-	// Чтобы API не возвращало null, если задач нет
-	if result == nil {
-		result = make([]map[string]interface{}, 0)
-	}
-
 	return result, nil
 }
 
