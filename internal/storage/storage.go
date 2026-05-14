@@ -158,29 +158,35 @@ func (s *Store) GetLineIDByTask(taskID int) (int, error) {
 	return lineID, err
 }
 
-// GetActiveTasks возвращает список задач с фильтрацией по линии или принтеру
+// GetActiveTasks возвращает расширенный список задач с фильтрацией и полной статистикой
 func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{}, error) {
-	// Базовая часть запроса
+	// Базовый запрос со всеми полями и подзапросами для счетчиков
 	query := `
 		SELECT 
-			t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия') as line_name, 
-			t.template_name, t.status, t.created_at,
+			t.id, 
+			t.line_id, 
+			COALESCE(l.name, 'Неизвестная линия') as line_name, 
+			t.template_name, 
+			COALESCE(t.dynamic_field_name, '') as dynamic_field_name, 
+			t.status, 
+			t.created_at,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id) as total_codes,
-			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes
+			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes,
+			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'in_buffer') as buffered_codes
 		FROM tasks t
 		LEFT JOIN lines l ON t.line_id = l.id
 		WHERE t.status IN ('active', 'ready')`
 
 	var args []interface{}
 
-	// Фильтр по линии
+	// Добавляем фильтры динамически
 	if lineID > 0 {
 		query += " AND t.line_id = ?"
 		args = append(args, lineID)
 	}
 
-	// Фильтр по принтеру (ищем задачи на тех линиях, где стоит этот принтер)
 	if printerID > 0 {
+		// Ищем задачи на линии, к которой привязан данный принтер
 		query += " AND t.line_id IN (SELECT line_id FROM line_printers WHERE printer_id = ?)"
 		args = append(args, printerID)
 	}
@@ -195,16 +201,34 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 
 	var result []map[string]interface{}
 	for rows.Next() {
-		var id, lID, total, printed int
-		var lName, temp, stat, created string
-		if err := rows.Scan(&id, &lID, &lName, &temp, &stat, &created, &total, &printed); err != nil {
+		var id, lID, total, printed, buffered int
+		var lName, template, dynamic, status, created string
+
+		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &total, &printed, &buffered); err != nil {
 			continue
 		}
+
+		// Собираем полный JSON-объект обратно
 		result = append(result, map[string]interface{}{
-			"task_id": id, "line_id": lID, "line_name": lName, "status": stat,
-			"stats": map[string]int{"total": total, "printed": printed},
+			"task_id":            id,
+			"line_id":            lID,
+			"line_name":          lName,
+			"template_name":      template,
+			"dynamic_field_name": dynamic,
+			"status":             status,
+			"created_at":         created,
+			"stats": map[string]int{
+				"total":    total,
+				"printed":  printed,
+				"buffered": buffered, // Тот самый параметр, который важен для контроля "насоса"
+			},
 		})
 	}
+
+	if result == nil {
+		result = make([]map[string]interface{}, 0)
+	}
+
 	return result, nil
 }
 
