@@ -33,13 +33,12 @@ type Printer interface {
 	SelectTemplate(template string, fields map[string]string) error
 }
 
-// Добавляем возможность управления задачами
+// TaskProcessor Добавляем возможность управления задачами
 type TaskProcessor struct {
 	Store   *storage.Store
 	Manager *PrinterManager
 }
 
-// StartPumping
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	// Достаем имя динамического поля для этой задачи ИЗ БАЗЫ
 	dynamicField, err := tp.Store.GetTaskDynamicField(taskID)
