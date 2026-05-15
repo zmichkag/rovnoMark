@@ -1,0 +1,7 @@
+FROM mcr.microsoft.com/devcontainers/go:1.22-bookworm
+
+# Устанавливаем air для hot-reload (очень советую для Go)
+RUN go install github.com/air-verse/air@latest
+
+# Устанавливаем sqlite3 для ручной проверки базы rovnoMark.db
+RUN apt-get update && apt-get install -y sqlite3

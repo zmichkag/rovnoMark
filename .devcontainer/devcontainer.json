@@ -1,0 +1,26 @@
+{
+  "name": "RovnoMark Dev",
+  "build": {
+    "dockerfile": "Dockerfile.dev"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",              // Поддержка языка
+        "ms-vscode.go",           // Плагин для тестов и отладки
+        "766b.go-outliner"        // Для удобной навигации по методам
+      ],
+      "settings": {
+        "go.lintTool": "golangci-lint",
+        "go.formatTool": "gofmt",
+        "go.useLanguageServer": true
+      }
+    }
+  },
+  "remoteUser": "vscode",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:1": {
+      "configureZshAsDefaultShell": true
+    }
+  }
+}

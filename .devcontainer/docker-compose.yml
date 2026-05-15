@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/go:1.22-bookworm
+    volumes:
+      - ..:/workspace:cached
+    # Пробрасываем 8081 локально на 8080 внутри контейнера
+    ports:
+      - "8081:8080"
+    # Твой софт использует SQLite (rovnoMark.db)
+    # На деве лучше держать базу в отдельном вольюме, чтобы не затереть случайно
+    environment:
+      - TZ=Europe/Moscow
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
