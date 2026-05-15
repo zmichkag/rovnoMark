@@ -371,7 +371,7 @@ func main() {
 					sendJSONError(w, http.StatusInternalServerError, "Ошибка макета: "+err.Error())
 					return
 				}
-				if err := p.InitSession(req.DynamicFieldName, 2000); err != nil {
+				if err := p.InitSession(req.DynamicFieldName, 10); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, "Ошибка SHO: "+err.Error())
 					return
 				}
