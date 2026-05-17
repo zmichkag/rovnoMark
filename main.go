@@ -139,11 +139,14 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"lines":        responseLines,
 			"all_printers": allForUI,
 			"logs":         logs,
 		})
+		if err != nil {
+			return
+		}
 	})
 
 	// Получение и создание линий
@@ -152,7 +155,10 @@ func main() {
 		if r.Method == http.MethodGet {
 			lines, _ := store.GetAllLines()
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(lines)
+			err := json.NewEncoder(w).Encode(lines)
+			if err != nil {
+				return
+			}
 			return
 		}
 
