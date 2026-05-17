@@ -19,16 +19,6 @@ import (
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-)
-
-var (
-	printsTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "rovno_printer_prints_total",
-		Help: "Общее количество напечатанных кодов",
-	})
 )
 
 //go:embed ui/*
@@ -80,8 +70,6 @@ func main() {
 
 	go manager.BackgroundPoller()
 	manager.StartTelemetryCollector(store, 5*time.Minute)
-
-	http.Handle("/metrics", promhttp.Handler())
 
 	// 2. API для добавления нового принтера
 	http.HandleFunc("/api/printers/add", func(w http.ResponseWriter, r *http.Request) {
