@@ -1,6 +1,6 @@
 module rovnoMark
 
-go 1.23.0
+go 1.22
 
 require modernc.org/sqlite v1.26.0
 
@@ -25,3 +25,5 @@ require (
 	modernc.org/strutil v1.1.3 // indirect
 	modernc.org/token v1.0.1 // indirect
 )
+
+replace golang.org/x/sys => golang.org/x/sys v0.24.0
