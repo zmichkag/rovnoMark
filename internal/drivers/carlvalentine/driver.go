@@ -1,4 +1,4 @@
-package carlvalentin
+package carlvalentine
 
 import (
 	"bufio"
@@ -114,21 +114,50 @@ func (d *Driver) sendRealTimeCommand(cmd byte) (string, error) {
 }
 
 // GetStatus запрашивает статус устройства командами реального времени
+// GetStatus запрашивает статус устройства и разбирает битовую маску
 func (d *Driver) GetStatus() (string, error) {
-	// В Valentin 'S' после ESC запрашивает текущий байт состояния
-	raw, err := d.sendRealTimeCommand('S')
+	// Отправляем правильный фрейм [SOH] S [ETB]
+	raw, err := d.sendBlock("S")
 	if err != nil {
 		return "ОФФЛАЙН", err
 	}
 
-	// Пример разбора классического байта ответа Valentin:
-	// Если строка содержит предупреждения об окончании ленты или ошибках головки
-	if strings.Contains(raw, "ERROR") || strings.Contains(raw, "M_ERR") {
-		return "НЕ ГОТОВ", nil
+	// raw придет к нам в виде очищенной строки: "P\x0099999" (или что-то подобное)
+	if len(raw) < 2 {
+		return "НЕИЗВЕСТНО", nil
 	}
-	if strings.Contains(raw, "PRNT") {
-		return "ПЕЧАТЬ", nil
+
+	// Берем первый байт статуса (например, 'P' -> 0x50)
+	statusByte := raw[0]
+
+	// Побитовый анализ (Bitwise operations)
+	// Бит 0: Конец ленты (Риббон)
+	if statusByte&(1<<0) != 0 {
+		return "ОШИБКА: РИББОН", nil
 	}
+	// Бит 1: Конец этикеток (Бумага)
+	if statusByte&(1<<1) != 0 {
+		return "ОШИБКА: БУМАГА", nil
+	}
+	// Бит 2: Поднята/ошибка термоголовки
+	if statusByte&(1<<2) != 0 {
+		return "ОШИБКА: ТЕРМОГОЛОВКА", nil
+	}
+	// Бит 3: Ошибка ножа/аппликатора
+	if statusByte&(1<<3) != 0 {
+		return "ОШИБКА: АППЛИКАТОР", nil
+	}
+	// Бит 5: Режим паузы
+	if statusByte&(1<<5) != 0 {
+		return "ПАУЗА", nil
+	}
+
+	// Бит 4: Печать / Ожидание датчика продукта (У нас как раз этот случай!)
+	if statusByte&(1<<4) != 0 {
+		return "ГОТОВ", nil // Можно написать "ОЖИДАНИЕ ДАТЧИКА", если нужно
+	}
+
+	// Если ошибок нет, просто возвращаем готовность
 	return "ГОТОВ", nil
 }
 
@@ -311,7 +340,22 @@ func (d *Driver) GetPrintSpeed() (string, error) {
 	return "200 mm/s", nil
 }
 
+// GetCurrentPrintCount возвращает количество напечатанных этикеток
 func (d *Driver) GetCurrentPrintCount() (string, error) {
+	raw, err := d.sendBlock("FBBC--wpppppppp")
+	if err != nil {
+		return "0", err
+	}
+
+	// Ожидаем ответ типа "A00000---pppppppp"
+	if len(raw) >= 6 && strings.HasPrefix(raw, "A") {
+		// Берем срез с индекса 1 по 6 (строго 5 символов счетчика)
+		countStr := raw[1:6]
+		count, err := strconv.Atoi(strings.TrimSpace(countStr))
+		if err == nil {
+			return strconv.Itoa(count), nil
+		}
+	}
 	return "0", nil
 }
 

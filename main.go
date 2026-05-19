@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"rovnoMark/internal/drivers/carlvalentine"
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
@@ -65,6 +66,8 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "videojet" {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		} else if cfg.DriverType == "carlvalentine" {
+			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
 		}
 	}
 
@@ -442,7 +445,7 @@ func main() {
 	// Метод Graceful Stop: корректное завершение печати и сверка остатков
 	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
 		// 1. Получаем ID задачи из запроса
-		taskIDStr := r.URL.Query().Get("id")
+		taskIDStr := r.URL.Query().Get("id") //task_id
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil {
 			http.Error(w, "Invalid Task ID", http.StatusBadRequest)
@@ -505,6 +508,16 @@ func main() {
 			sendJSONError(w, http.StatusMethodNotAllowed, "Only GET")
 			return
 		}
+
+		// TODO строка с уникальным кодом таски
+		//[‎19.‎05.‎2026 17:31]  Бежанян Ваге Жораевич:
+		//1. create
+		//1.1 1С отправляет [произвольный параметр]
+		//1.2 Сервис принимает [произвольный параметр], связывает с task_id и сохраняет - возвращает task_id
+		//
+		//[‎19.‎05.‎2026 17:32]  Кузнецов Александр Константинович:
+		//rnd_text
+		//
 
 		// Читаем параметры из запроса
 		query := r.URL.Query()
