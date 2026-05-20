@@ -14,11 +14,11 @@ type Store struct {
 }
 
 // CreateTask Создание задачи с поддержкой динамических полей и статики
-func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string) (int64, error) {
+func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string, rndText string) (int64, error) {
 	res, err := s.db.Exec(`
-        INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, status) 
-        VALUES (?, ?, ?, ?, 'ready')`,
-		lineID, template, dynamicField, staticJSON)
+        INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, rnd_text, status) 
+        VALUES (?, ?, ?, ?, ?, 'ready')`,
+		lineID, template, dynamicField, staticJSON, rndText)
 	if err != nil {
 		return 0, err
 	}
@@ -184,6 +184,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 			COALESCE(t.dynamic_field_name, '') as dynamic_field_name, 
 			t.status, 
 			t.created_at,
+			COALESCE(t.rnd_text, '') as rnd_text, -- Выбираем новое поле
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id) as total_codes,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'in_buffer') as buffered_codes
@@ -216,9 +217,9 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, lID, total, printed, buffered int
-		var lName, template, dynamic, status, created string
+		var lName, template, dynamic, status, created, rndText string // Добавлена переменная rndText
 
-		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &total, &printed, &buffered); err != nil {
+		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText, &total, &printed, &buffered); err != nil {
 			continue
 		}
 
@@ -231,10 +232,11 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 			"dynamic_field_name": dynamic,
 			"status":             status,
 			"created_at":         created,
+			"rnd_text":           rndText, // Отдаем в JSON
 			"stats": map[string]int{
 				"total":    total,
 				"printed":  printed,
-				"buffered": buffered, // Тот самый параметр, который важен для контроля "насоса"
+				"buffered": buffered,
 			},
 		})
 	}
@@ -466,6 +468,8 @@ func New(path string) *Store {
 		db.Exec("ALTER TABLE printers RENAME TO printers_v1_backup;")
 	}
 
+	db.Exec("ALTER TABLE tasks ADD COLUMN rnd_text TEXT DEFAULT '';")
+
 	// --- 2. СОЗДАНИЕ НОВОЙ СТРУКТУРЫ ---
 	createTables(db)
 
@@ -541,9 +545,11 @@ func createTables(db *sql.DB) {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         line_id INTEGER,
         template_name TEXT,
-        dynamic_field_name TEXT, -- Добавлено
+        dynamic_field_name TEXT,
+        rnd_text TEXT, 
         status TEXT DEFAULT 'active', -- 'active', 'completed', 'stopped'
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        static_fields_json TEXT, 
         FOREIGN KEY(line_id) REFERENCES lines(id)
     );`)
 

@@ -319,6 +319,7 @@ func main() {
 			TemplateName     string            `json:"template_name"`
 			DynamicFieldName string            `json:"dynamic_field_name"`
 			StaticFields     map[string]string `json:"static_fields"`
+			RndText          string            `json:"rnd_text"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -385,7 +386,9 @@ func main() {
 
 		// 3. Сохраняем задачу
 		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(req.LineID, req.TemplateName, req.DynamicFieldName, string(staticBytes))
+
+		// Передаем req.RndText пятым аргументом
+		taskID, err := store.CreateTask(req.LineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
 			return
@@ -442,7 +445,7 @@ func main() {
 	// Метод Graceful Stop: корректное завершение печати и сверка остатков
 	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
 		// 1. Получаем ID задачи из запроса
-		taskIDStr := r.URL.Query().Get("id")
+		taskIDStr := r.URL.Query().Get("task_id")
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil {
 			http.Error(w, "Invalid Task ID", http.StatusBadRequest)
