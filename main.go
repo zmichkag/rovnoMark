@@ -308,43 +308,40 @@ func main() {
 		json.NewEncoder(w).Encode(fields)
 	})
 
+	// ЭНДПОИНТ СОЗДАНИЯ ЗАДАЧИС ПАРАМЕТРОМ line_id В URL
 	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
 			return
 		}
 
+		// 1. Читаем line_id из Query-параметров URL, как просил Ваге
+		lineIDStr := r.URL.Query().Get("line_id")
+		lineID, err := strconv.Atoi(lineIDStr)
+		if err != nil || lineID <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "Missing or invalid line_id parameter in URL")
+			return
+		}
+
+		// 2. В структуре тела запроса line_id больше нет — оно стало чище
 		var req struct {
-			LineID           int               `json:"line_id"`
 			TemplateName     string            `json:"template_name"`
-			DynamicFieldName string            `json:"dynamic_field_name"`
+			DynamicFieldName string            `json:"dynamic_field"`
 			StaticFields     map[string]string `json:"static_fields"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
+			sendJSONError(w, http.StatusBadRequest, "Invalid JSON body")
 			return
 		}
 
-		// 0. Проверяем, не занята ли линия другой задачей
-		activeID, err := store.GetActiveTaskByLine(req.LineID)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
-			return
-		}
-		if activeID != 0 {
-			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", req.LineID, activeID))
-			return
-		}
-
-		// 1. Проверяем принтеры
-		printersInLine, err := store.GetPrintersByLine(req.LineID)
+		// Находим принтеры на линии (используем нашу переменную lineID)
+		printersInLine, err := store.GetPrintersByLine(lineID)
 		if err != nil || len(printersInLine) == 0 {
 			sendJSONError(w, http.StatusNotFound, "Линия пуста или не найдена")
 			return
 		}
 
-		// 2. Выполняем Handshake
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
@@ -352,48 +349,49 @@ func main() {
 			}
 
 			status, _ := p.GetStatus()
-			// Принтер должен быть готов (или уже печатать, если мы просто подливаем статику)
 			if status == "ОШИБКА" || strings.Contains(status, "ОФФЛАЙН") {
 				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s не в сети", pCfg.Name))
 				return
 			}
 
 			if req.DynamicFieldName == "" {
-				// Если динамические поля не заданы
 				p.ClearQueue()
 				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, "Ошибка SLA: "+err.Error())
 					return
 				}
 			} else {
-				// нормальная работа с Чз
 				if err := p.SelectTemplate(req.TemplateName, nil); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, "Ошибка макета: "+err.Error())
 					return
 				}
-				if err := p.InitSession(req.DynamicFieldName, 10); err != nil {
+				if err := p.InitSession(req.DynamicFieldName, 2000); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, "Ошибка SHO: "+err.Error())
 					return
 				}
 				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка обновления статических полей (SCF): "+err.Error())
+					sendJSONError(w, http.StatusInternalServerError, "Ошибка SCF: "+err.Error())
 					return
 				}
 			}
 			manager.UpdatePrinterDeltaState(pCfg.ID, req.TemplateName, fmt.Sprintf("%v", req.StaticFields))
 		}
 
-		// 3. Сохраняем задачу
 		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(req.LineID, req.TemplateName, req.DynamicFieldName, string(staticBytes))
+		// Передаем lineID в создание задачи в БД
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes))
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
 			return
 		}
 
+		if req.DynamicFieldName != "" {
+			// Запускаем насос для считанной линии
+			taskProcessor.StartPumping(lineID, int(taskID))
+		}
+
 		w.WriteHeader(http.StatusCreated)
-		// Отвечаем 1С, что задача ГОТОВА к приему кодов
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ready", "task_id": taskID})
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "active", "task_id": taskID})
 	})
 
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
