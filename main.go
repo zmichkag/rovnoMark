@@ -322,9 +322,7 @@ func main() {
 			return
 		}
 
-		// 2. В структуре тела запроса line_id больше нет — оно стало чище
 		var req struct {
-			LineID           int               `json:"line_id"`
 			TemplateName     string            `json:"template_name"`
 			DynamicFieldName string            `json:"dynamic_field_name"`
 			StaticFields     map[string]string `json:"static_fields"`
@@ -337,18 +335,18 @@ func main() {
 		}
 
 		// 0. Проверяем, не занята ли линия другой задачей
-		activeID, err := store.GetActiveTaskByLine(req.LineID)
+		activeID, err := store.GetActiveTaskByLine(lineID)
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
 			return
 		}
 		if activeID != 0 {
-			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", req.LineID, activeID))
+			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", lineID, activeID))
 			return
 		}
 
 		// 1. Проверяем принтеры
-		printersInLine, err := store.GetPrintersByLine(req.LineID)
+		printersInLine, err := store.GetPrintersByLine(lineID)
 		if err != nil || len(printersInLine) == 0 {
 			sendJSONError(w, http.StatusNotFound, "Линия пуста или не найдена")
 			return
@@ -395,7 +393,7 @@ func main() {
 
 		// 3. Сохраняем задачу
 		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(req.LineID, req.TemplateName, req.DynamicFieldName, string(staticBytes))
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, req.RndText, string(staticBytes))
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
 			return
