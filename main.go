@@ -317,11 +317,19 @@ func main() {
 			return
 		}
 
+		// 1. Читаем line_id из Query-параметров URL, как просил Ваге
+		lineIDStr := r.URL.Query().Get("line_id")
+		lineID, err := strconv.Atoi(lineIDStr)
+		if err != nil || lineID <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "Missing or invalid line_id parameter in URL")
+			return
+		}
+
 		var req struct {
-			LineID           int               `json:"line_id"`
 			TemplateName     string            `json:"template_name"`
 			DynamicFieldName string            `json:"dynamic_field_name"`
 			StaticFields     map[string]string `json:"static_fields"`
+			RndText          string            `json:"rnd_text"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -330,18 +338,18 @@ func main() {
 		}
 
 		// 0. Проверяем, не занята ли линия другой задачей
-		activeID, err := store.GetActiveTaskByLine(req.LineID)
+		activeID, err := store.GetActiveTaskByLine(lineID)
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
 			return
 		}
 		if activeID != 0 {
-			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", req.LineID, activeID))
+			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", lineID, activeID))
 			return
 		}
 
 		// 1. Проверяем принтеры
-		printersInLine, err := store.GetPrintersByLine(req.LineID)
+		printersInLine, err := store.GetPrintersByLine(lineID)
 		if err != nil || len(printersInLine) == 0 {
 			sendJSONError(w, http.StatusNotFound, "Линия пуста или не найдена")
 			return
@@ -388,7 +396,7 @@ func main() {
 
 		// 3. Сохраняем задачу
 		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(req.LineID, req.TemplateName, req.DynamicFieldName, string(staticBytes))
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, req.RndText, string(staticBytes))
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
 			return
