@@ -399,12 +399,15 @@ func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
 
 // Сохранить или обновить линию
 func (s *Store) SaveLine(l models.LineConfig) error {
-	query := `INSERT OR REPLACE INTO lines (id, name, description, is_active) VALUES (?, ?, ?, ?)`
-	var id interface{} = l.ID
 	if l.ID == 0 {
-		id = nil
+		// Для создания новой линии исключаем id из запроса, чтобы сработал AUTOINCREMENT
+		query := `INSERT INTO lines (name, description, is_active, is_deleted) VALUES (?, ?, ?, 0)`
+		_, err := s.db.Exec(query, l.Name, l.Description, l.IsActive)
+		return err
 	}
-	_, err := s.db.Exec(query, id, l.Name, l.Description, l.IsActive)
+	// Для обновления существующей
+	query := `UPDATE lines SET name = ?, description = ?, is_active = ? WHERE id = ?`
+	_, err := s.db.Exec(query, l.Name, l.Description, l.IsActive, l.ID)
 	return err
 }
 
