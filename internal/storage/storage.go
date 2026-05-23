@@ -435,7 +435,6 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	return err
 }
 
-// New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
 func New(path string) *Store {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -449,13 +448,11 @@ func New(path string) *Store {
 	// 2. Включаем WAL (Write-Ahead Logging) для быстрой работы
 	db.Exec("PRAGMA journal_mode = WAL;")
 
-	// 3. Если база заблокирована на долю секунды, ждем до 5 секунд вместо ошибки 500
+	// 3. Если база заблокирована на долю секунды, ждем до 5 секунд
 	db.Exec("PRAGMA busy_timeout = 5000;")
 
-	// 4. Оптимизация записи на диск (в связке с WAL дает прирост скорости)
+	// 4. Оптимизация записи на диск
 	db.Exec("PRAGMA synchronous = NORMAL;")
-
-	// Включаем внешние ключи
 	db.Exec("PRAGMA foreign_keys = ON;")
 
 	// --- 1. ПРОВЕРКА НА МИГРАЦИЮ СО СТАРОЙ ВЕРСИИ ---
@@ -471,7 +468,14 @@ func New(path string) *Store {
 		db.Exec("ALTER TABLE printers RENAME TO printers_v1_backup;")
 	}
 
+	// ====================================================================
+	// БЕЗОПАСНОЕ ОБНОВЛЕНИЕ СХЕМЫ (Авто-добавление недостающих колонок)
+	// Если колонки уже есть, SQLite просто проигнорирует эти команды.
+	// ====================================================================
 	db.Exec("ALTER TABLE tasks ADD COLUMN rnd_text TEXT DEFAULT '';")
+	db.Exec("ALTER TABLE tasks ADD COLUMN static_fields_json TEXT DEFAULT '';")
+	db.Exec("ALTER TABLE lines ADD COLUMN is_deleted BOOLEAN DEFAULT 0;")
+	db.Exec("ALTER TABLE printers ADD COLUMN is_deleted BOOLEAN DEFAULT 0;")
 
 	// --- 2. СОЗДАНИЕ НОВОЙ СТРУКТУРЫ ---
 	createTables(db)
