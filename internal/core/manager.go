@@ -10,8 +10,54 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
-_
+
+var (
+	// Метрики оборудования
+	printerRibbon = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rovno_printer_ribbon_remaining",
+		Help: "Остаток риббона в принтере (числовое значение)",
+	}, []string{"printer_id", "printer_name"})
+
+	printerSpeed = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rovno_printer_speed_ppm",
+		Help: "Текущая скорость печати принтера кодов/мин",
+	}, []string{"printer_id", "printer_name"})
+
+	// Метрики конкретного задания (растут от 0 до максимума)
+	taskTotalCodes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rovno_task_total_codes",
+		Help: "Общее количество кодов, присланных 1С в рамках текущего задания",
+	}, []string{"task_id", "line_name"})
+
+	taskPrintedCodes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rovno_task_printed_codes",
+		Help: "Сколько кодов уже успешно отпечатано внутри этого задания",
+	}, []string{"task_id", "line_name"})
+)
+
+// Вспомогательный парсер: очищает строки типа "75%", "N/A", "120.5" до чистого float64
+func parseNumeric(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "N/A" || s == "?" {
+		return 0
+	}
+	var sb strings.Builder
+	for _, ch := range s {
+		if (ch >= '0' && ch <= '9') || ch == '.' {
+			sb.WriteRune(ch)
+		}
+	}
+	val, err := strconv.ParseFloat(sb.String(), 64)
+	if err != nil {
+		return 0
+	}
+	return val
+}
+
 // Printer - расширенный контракт для железа
 type Printer interface {
 	GetStatus() (string, error)
@@ -228,10 +274,13 @@ func (pm *PrinterManager) BackgroundPoller() {
 			status, err := p.GetStatus()
 			var ribbon, queue, speed, curCount, curTemplate string
 
+			// 1. Сразу объявляем ID строкой, так как он понадобится и для логов, и для метрик
+			printerIDStr := strconv.Itoa(id)
+
 			if err == nil {
+				// 2. СНАЧАЛА получаем реальные значения от принтера
 				ribbon, _ = p.GetRemainingRibbon()
 
-				// ИСПРАВЛЕНИЕ: Безопасное получение очереди без хардкода поля
 				free, errSpace := p.GetBufferFreeSpace()
 				if errSpace == nil {
 					queue = strconv.Itoa(free)
@@ -242,6 +291,10 @@ func (pm *PrinterManager) BackgroundPoller() {
 				speed, _ = p.GetPrintSpeed()
 				curCount, _ = p.GetCurrentPrintCount()
 				curTemplate, _ = p.GetCurrentTemplate()
+
+				// 3. ПОСЛЕ ТОГО как получили, записываем их в метрики Prometheus
+				printerRibbon.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(ribbon))
+				printerSpeed.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(speed))
 			}
 
 			pm.mu.Lock()
@@ -250,6 +303,7 @@ func (pm *PrinterManager) BackgroundPoller() {
 			if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
 				pm.addLogNoLock(strconv.Itoa(id), fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
 			}
+
 			newState := models.PrinterState{
 				LastTemplate:   oldState.LastTemplate,
 				LastStaticHash: oldState.LastStaticHash,
@@ -257,8 +311,6 @@ func (pm *PrinterManager) BackgroundPoller() {
 
 			isOfflineNow := err != nil
 			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
-
-			printerIDStr := strconv.Itoa(id)
 
 			if isOfflineNow && !wasOffline {
 				pm.addLogNoLock(printerIDStr, fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))

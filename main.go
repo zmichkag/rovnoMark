@@ -20,6 +20,8 @@ import (
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 //go:embed ui/*
@@ -515,6 +517,8 @@ func main() {
 			"report":  report,
 		})
 	})
+
+	http.Handle("/metrics", promhttp.Handler())
 
 	// Получение списка активных задач
 	http.HandleFunc("/api/task/active", func(w http.ResponseWriter, r *http.Request) {
