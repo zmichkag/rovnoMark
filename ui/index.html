@@ -68,7 +68,6 @@
 
 <div id="control" class="tab-content">
     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-        <!-- Одиночная печать (теперь тоже через Линию) -->
         <div style="flex: 1; min-width: 400px; background: var(--surface); padding: 20px; border-radius: 8px;">
             <h3>Одиночная печать (Статика)</h3>
             <div class="field"><label>Линия:</label><select id="print_line_target"></select></div>
@@ -84,17 +83,16 @@
             <button class="btn" style="background: var(--primary); width: 100%; margin-top: 15px;" onclick="sendPrintJob()">ОТПРАВИТЬ</button>
         </div>
 
-        <!-- Массовая печать (ЧЗ) -->
         <div style="flex: 1; min-width: 400px; background: var(--surface); padding: 20px; border-radius: 8px; border: 1px solid var(--primary);">
             <h3>Массовая загрузка (Честный ЗНАК)</h3>
             <div class="field"><label>Линия:</label><select id="batch_line_target"></select></div>
             <div class="field"><label>Шаблон:</label><input type="text" id="batch_template" readonly placeholder="Выберите во вкладке «Шаблоны»"></div>
             <div class="field"><label>Динамическое поле:</label><input type="text" id="batch_fieldname" readonly placeholder="Автоопределение (DM)"></div>
-            
+
             <div id="batch_static_fields_container" style="margin-top: 15px; border-top: 1px solid #333; padding-top: 15px;">
                 <p style="color: var(--text-muted); font-size: 0.8rem;">Выберите шаблон для настройки статических полей.</p>
             </div>
-            
+
             <div class="field" style="margin-top: 15px;"><label>Коды (по одному на строку):</label><textarea id="batch_codes" rows="6" placeholder="Вставьте коды здесь..."></textarea></div>
             <button class="btn" style="background: var(--primary); width: 100%;" onclick="sendBatchJobV2()">ЗАПУСТИТЬ ПЕЧАТЬ</button>
         </div>
@@ -149,6 +147,9 @@
 </div>
 
 <script>
+    // Глобальное хранилище данных о принтерах, чтобы безопасно вызывать их при редактировании
+    window.printersMap = {};
+
     function switchTab(tabId) {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -162,9 +163,9 @@
         try {
             const res = await fetch('/api/printers');
             if (!res.ok) return;
-            const data = await res.json();
+            const data = await res.json() || {};
             renderPrintersGrid(data);
-            renderLogs(data.logs);
+            renderLogs(data.logs || []);
             fetchActiveTasks();
         } catch (e) {
             console.error("Status fetch error:", e);
@@ -176,7 +177,7 @@
         try {
             const res = await fetch('/api/task/active');
             if (!res.ok) throw new Error(`Ошибка сервера: ${res.status}`);
-            const tasks = await res.json();
+            const tasks = await res.json() || [];
 
             if (!tasks || tasks.length === 0) {
                 container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Активных заданий нет</div>';
@@ -216,7 +217,6 @@
                 </div>`;
             }).join('');
         } catch (err) {
-            console.error("Task Fetch Error:", err);
             container.innerHTML = `<div style="color: var(--danger); padding: 10px;">⚠️ Ошибка связи: ${err.message}</div>`;
         }
     }
@@ -225,38 +225,56 @@
         if(!confirm('Остановить выполнение задачи?')) return;
         try {
             const res = await fetch(`/api/task/stop?id=${id}&line_id=${lineId}`);
-            if (res.ok) {
-                fetchActiveTasks();
-            } else {
-                alert('Ошибка при остановке задачи');
-            }
+            if (res.ok) fetchActiveTasks();
+            else alert('Ошибка при остановке задачи');
         } catch (e) {
             alert('Ошибка связи: ' + e.message);
         }
     }
 
+    function createPrinterCard(p) {
+        const status = p.status || 'НЕИЗВЕСТНО';
+        const cls = status.includes('ОФФЛАЙН') ? 'offline' : 'online';
+        return `
+            <div class="card ${cls}">
+                <div class="card-header">
+                    <h3 class="card-title">${p.name}</h3>
+                    <span class="status-badge">${status}</span>
+                </div>
+                <div style="font-size: 0.9rem;">
+                    <div>IP/Порт: <b>${p.ip}:${p.port}</b></div>
+                    <div>Драйвер: <b>${p.driver_type || '-'}</b></div>
+                    <div>Ribbon: <b>${p.ribbon || '-'}</b></div>
+                    <div>Queue: <b>${p.queue || '0'}</b></div>
+                    <div>Template: <b>${p.cur_template || '-'}</b></div>
+                    <div>Напечатано: <b>${p.cur_count || '0'}</b></div>
+                </div>
+            </div>`;
+    }
+
     function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
+        const assignedIds = new Set();
+
+        // 1. Рендерим принтеры, привязанные к линиям
         (data.lines || []).forEach(l => {
-            grid.innerHTML += `<div style="grid-column:1/-1; margin-top:10px;"><h2>Линия: ${l.name}</h2></div>`;
-            (l.printers || []).forEach(p => {
-                const status = p.status || 'НЕИЗВЕСТНО';
-                const cls = status.includes('ОФФЛАЙН') ? 'offline' : 'online';
-                grid.innerHTML += `
-                    <div class="card ${cls}">
-                        <div class="card-header">
-                            <h3 class="card-title">${p.name}</h3>
-                            <span class="status-badge">${status}</span>
-                        </div>
-                        <div style="font-size: 0.9rem;">
-                            <div>Ribbon: <b>${p.ribbon || '-'}</b></div>
-                            <div>Queue: <b>${p.queue || '0'}</b></div>
-                            <div>Template: <b>${p.cur_template || '-'}</b></div>
-                        </div>
-                    </div>`;
+            if (!l.printers || l.printers.length === 0) return;
+            grid.innerHTML += `<div style="grid-column:1/-1; margin-top:10px; border-bottom:1px solid #333; padding-bottom:5px;"><h2>Линия: ${l.name}</h2></div>`;
+            l.printers.forEach(p => {
+                assignedIds.add(p.id);
+                grid.innerHTML += createPrinterCard(p);
             });
         });
+
+        // 2. Рендерим свободные (непривязанные) принтеры, чтобы их можно было отслеживать до привязки
+        const unassigned = (data.all_printers || []).filter(p => !assignedIds.has(p.id));
+        if (unassigned.length > 0) {
+            grid.innerHTML += `<div style="grid-column:1/-1; margin-top:10px; border-bottom:1px solid #333; padding-bottom:5px;"><h2 style="color:var(--warning);">Без линии (Свободные)</h2></div>`;
+            unassigned.forEach(p => {
+                grid.innerHTML += createPrinterCard(p);
+            });
+        }
     }
 
     function renderLogs(logs) {
@@ -266,11 +284,11 @@
     async function updateControlTargets() {
         try {
             const res = await fetch('/api/printers');
-            const data = await res.json();
+            const data = await res.json() || {};
             const lineOpts = (data.lines || []).map(l => `<option value="${l.id}">${l.name}</option>`).join('');
             document.getElementById('print_line_target').innerHTML = lineOpts;
             document.getElementById('batch_line_target').innerHTML = lineOpts;
-        } catch (e) {}
+        } catch (e) { console.error("Error updating targets", e); }
     }
 
     function addVarField() {
@@ -325,7 +343,6 @@
         document.querySelectorAll('.static-val').forEach(i => statics[i.dataset.key] = i.value);
 
         try {
-            // 1. Создаем задачу
             const createRes = await fetch('/api/task/create', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -344,7 +361,6 @@
 
             const { task_id } = await createRes.json();
 
-            // 2. Загружаем коды
             const appendRes = await fetch('/api/task/append', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -369,9 +385,9 @@
     async function updateTemplateTargets() {
         try {
             const res = await fetch('/api/printers');
-            const data = await res.json();
+            const data = await res.json() || {};
             document.getElementById('template_printer_select').innerHTML = (data.all_printers || []).map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-        } catch (e) {}
+        } catch (e) { console.error("Error updating template targets", e); }
     }
 
     async function fetchPrinterTemplates() {
@@ -380,7 +396,7 @@
         try {
             const res = await fetch(`/api/templates?printer_id=${pid}`);
             if (!res.ok) throw new Error(await res.text());
-            const tps = await res.json();
+            const tps = await res.json() || [];
             document.getElementById('templates_list').innerHTML = tps.map(t => `
                 <li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; padding:5px; background:#2a2a2a; border-radius:4px;">
                     ${t} <button class="btn" onclick="loadTemplateFields('${t}')">Выбрать</button>
@@ -395,16 +411,15 @@
         try {
             const res = await fetch(`/api/template/fields?printer_id=${pid}&template=${t}`);
             if (!res.ok) throw new Error(await res.text());
-            const fields = await res.json();
+            const fields = await res.json() || [];
 
             document.getElementById('batch_template').value = t;
             document.getElementById('batch_fieldname').value = ""; // Сброс
 
             const cont = document.getElementById('batch_static_fields_container');
             cont.innerHTML = '<h4>Статические поля</h4>';
-            
+
             fields.forEach(f => {
-                // Автоопределение динамического поля (обычно содержит DM или DataMatrix)
                 const lower = f.toLowerCase();
                 if (lower.includes('dm') || lower.includes('datamatrix') || lower.includes('gs1')) {
                     document.getElementById('batch_fieldname').value = f;
@@ -412,9 +427,9 @@
                     cont.innerHTML += `<div class="field"><label>${f}:</label><input class="static-val" data-key="${f}"></div>`;
                 }
             });
-            
+
             if (!document.getElementById('batch_fieldname').value && fields.length > 0) {
-                alert('Внимание: Динамическое поле не определено автоматически. Будет использоваться первое подходящее или пустое.');
+                alert('Внимание: Динамическое поле не определено автоматически.');
             }
 
             switchTab('control');
@@ -423,22 +438,31 @@
         }
     }
 
+    // ИСПРАВЛЕНИЕ: Безопасная загрузка таблиц с обработкой пустых ответов
     async function loadSettingsData() {
         try {
             const lRes = await fetch('/api/lines');
-            const lines = await lRes.json();
+            const lines = await lRes.json() || [];
             document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
-            document.getElementById('lines-list-table').innerHTML = lines.map(l => `<tr><td>${l.id}</td><td>${l.name}</td><td>${l.description}</td></tr>`).join('');
+            document.getElementById('lines-list-table').innerHTML = lines.map(l => `<tr><td>${l.id}</td><td>${l.name}</td><td>${l.description || '-'}</td></tr>`).join('');
 
             const pRes = await fetch('/api/printers');
-            const pData = await pRes.json();
-            document.getElementById('assign_printer').innerHTML = pData.all_printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-            document.getElementById('printers-list-table').innerHTML = pData.all_printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td><button class="btn" onclick='editPrinter(${JSON.stringify(p)})'>Edit</button></td></tr>`).join('');
+            const pData = await pRes.json() || {};
+            const printers = pData.all_printers || [];
+
+            // Сохраняем в глобальный объект для безопасной передачи в editPrinter
+            window.printersMap = {};
+            printers.forEach(p => window.printersMap[p.id] = p);
+
+            document.getElementById('assign_printer').innerHTML = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+            document.getElementById('printers-list-table').innerHTML = printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td></tr>`).join('');
 
             const aRes = await fetch('/api/assignments');
-            const as = await aRes.json();
+            const as = await aRes.json() || [];
             document.getElementById('assignments-table').innerHTML = as.map(a => `<tr><td>${a.line_name}</td><td>${a.printer_name}</td><td>${a.role}</td></tr>`).join('');
-        } catch (e) {}
+        } catch (e) {
+            console.error("Ошибка загрузки данных настроек:", e);
+        }
     }
 
     async function addPrinter() {
@@ -458,7 +482,8 @@
                 body: JSON.stringify(body)
             });
             if (res.ok) {
-                alert('Сохранено');
+                alert('Принтер сохранен');
+                clearPrinterForm();
                 loadSettingsData();
             } else {
                 alert('Ошибка сохранения');
@@ -468,13 +493,18 @@
         }
     }
 
-    function editPrinter(p) {
+    // ИСПРАВЛЕНИЕ: Вызов по ID вместо сложной передачи JSON-объекта в HTML-строку
+    function editPrinter(id) {
+        const p = window.printersMap[id];
+        if (!p) return;
+
         document.getElementById('p_id').value = p.id;
         document.getElementById('p_name').value = p.name;
         document.getElementById('p_ip').value = p.ip;
         document.getElementById('p_port').value = p.port;
         document.getElementById('p_driver').value = p.driver_type;
         document.getElementById('p_active').checked = p.is_active;
+        window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function clearPrinterForm() {
@@ -497,9 +527,13 @@
             });
             if (res.ok) {
                 alert('Линия создана');
+                document.getElementById('l_name').value = '';
+                document.getElementById('l_desc').value = '';
                 loadSettingsData();
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error(e);
+        }
     }
 
     async function assignPrinter() {
@@ -517,7 +551,9 @@
                 alert('Привязка выполнена');
                 loadSettingsData();
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error(e);
+        }
     }
 
     setInterval(fetchPrintersStatus, 5000);
