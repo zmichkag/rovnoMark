@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 )
-
+_
 // Printer - расширенный контракт для железа
 type Printer interface {
 	GetStatus() (string, error)
