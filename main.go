@@ -71,6 +71,7 @@ func main() {
 		} else if cfg.DriverType == "carlvalentine" {
 			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
 		}
+
 	}
 
 	go manager.BackgroundPoller()
@@ -98,6 +99,8 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		case "videojet":
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		case "carlvalentine":
+			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
