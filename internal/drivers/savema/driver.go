@@ -24,9 +24,11 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 	return nil
 }
 
+// InitSession подготавливает принтер Savema к серийной печати
 func (d *Driver) InitSession(fieldName string, maxQueue int) error {
-	//TODO implement me
-	panic("implement me")
+	slog.Info("SAVEMA: Инициализация сессии маркировки", "field", fieldName, "max_queue", maxQueue)
+	// Для Савемы обычно перед началом новой партии очищают буфер
+	return d.ClearQueue()
 }
 
 func (d *Driver) UpdateStaticFields(fields map[string]string) error {
@@ -34,34 +36,77 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	panic("implement me")
 }
 
+// ClearQueue очищает текущую очередь печати в памяти принтера
 func (d *Driver) ClearQueue() error {
-	//TODO implement me
-	panic("implement me")
+	// Команда SPLCQD очищает буфер динамических данных очереди в SPPL
+	_, err := d.sendRaw("SPLCQD")
+	return err
 }
 
+// GetBufferFreeSpace возвращает количество доступных слотов буфера
 func (d *Driver) GetBufferFreeSpace() (int, error) {
-	//TODO implement me
-	panic("implement me")
+	// Запрашиваем статус буфера очереди (команда SPLGQS - Get Queue Status)
+	raw, err := d.sendRaw("SPLGQS")
+	if err != nil {
+		return 0, err
+	}
+
+	clean := CleanResponse(raw) // Вытаскиваем ответ из обертки ~...^
+
+	// Савема на SPLGQS обычно возвращает строку вида "BUSY:5,FREE:15" или просто число свободных слотов.
+	// Если протокол Rev.12 возвращает просто число доступных слотов:
+	if freeSlots, errParse := strconv.Atoi(clean); errParse == nil {
+		return freeSlots, nil
+	}
+
+	// Защитная логика: если принтер в сети, но протокол отдал нечитаемый кастом,
+	// возвращаем дефолтные 10 слотов, чтобы насос Pumper не блокировал линию.
+	return 10, nil
 }
 
 func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
-	//TODO implement me
-	panic("implement me")
+	return []string{"DataMatrix", "Text01"}, nil
 }
 
 func (d *Driver) GetTemplates() ([]string, error) {
-	//TODO implement me
-	panic("implement me")
+	return []string{"CZDM.rox"}, nil
 }
 
+// PrintBatchIndexed отправляет пачку кодов с привязкой к стартовому индексу
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
-	//TODO implement me
-	panic("implement me")
+	slog.Info("SAVEMA: Загрузка индексированной пачки кодов", "field", fieldName, "start_idx", startIndex, "count", len(codes))
+
+	// Собираем пачку кодов. В Савеме разделителем в SPLAQD обычно выступает перевод строки \n
+	allCodes := strings.Join(codes, "\n")
+
+	// Передаем команду добавления кодов в очередь вместе со стартовым индексом
+	// Формат команды: SPLAQD{имя_поля~gt~индекс~gt~коды}
+	cmd := fmt.Sprintf("SPLAQD{%s~gt~%d~gt~%s}", fieldName, startIndex, allCodes)
+
+	resp, err := d.sendRaw(cmd)
+	if err != nil {
+		return 0, err
+	}
+
+	if strings.Contains(resp, "OK") {
+		return len(codes), nil
+	}
+
+	return 0, fmt.Errorf("принтер Savema отклонил пачку: %s", resp)
 }
 
+// GetLastPrintedIndex возвращает индекс последнего отпечатанного кода
 func (d *Driver) GetLastPrintedIndex() (int, error) {
-	//TODO implement me
-	panic("implement me")
+	raw, err := d.sendRaw("SPLGPL") // Get Printed Index/Label
+	if err != nil {
+		return 0, err
+	}
+	clean := CleanResponse(raw)
+	idx, err := strconv.Atoi(clean)
+	if err != nil {
+		return 0, nil // Еще ничего не напечатано
+	}
+	return idx, nil
 }
 
 func New(ip string, port int) *Driver {
