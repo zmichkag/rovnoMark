@@ -40,7 +40,7 @@ var (
 
 	printerPrintsTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rovno_printer_prints_total",
-		Help: "Общий счетчик отпечатанных кодов принтером (Gauge)",
+		Help: "Текущее абсолютное значение счетчика отпечатков принтера (Gauge)",
 	}, []string{"printer_id", "printer_name"})
 )
 
@@ -276,40 +276,10 @@ func (pm *PrinterManager) BackgroundPoller() {
 				curCount, _ = p.GetCurrentPrintCount()
 				curTemplate, _ = p.GetCurrentTemplate()
 
-				// Обновление Gauge (Риббон и Скорость)
+				// Запись метрик в Prometheus — чистый, атомарный Set
 				printerRibbon.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(ribbon))
 				printerSpeed.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(speed))
-
-				// БЕЗОПАСНОЕ НАКОПЛЕНИЕ ДЕЛЬТЫ ДЛЯ COUNTER (ЗАЩИТА ОТ ПЕРВОГО СТАРТА)
-				currentCountValue := parseNumeric(curCount)
-				pm.mu.Lock()
-
-				// Проверяем, был ли этот принтер уже опрошен ранее
-				lastCountValue, exists := pm.lastCounts[id]
-
-				if !exists {
-					// Если принтер опрошен ПЕРВЫЙ РАЗ с момента запуска шлюза:
-					// Мы просто сохраняем его текущую точку отсчета и ничего не добавляем в Prometheus
-					slog.Info("Первый опрос принтера, фиксация базового счетчика", "id", id, "base", currentCountValue)
-				} else if currentCountValue >= lastCountValue {
-					diff := currentCountValue - lastCountValue
-					// Защита от аномальных скачков (например, если принтер вернул мусор по сети)
-					// 100 кодов за 5 секунд — это 1200 PPM (физический лимит для термотрансферников)
-					if diff > 0 && diff < 100 {
-						printerPrintsTotal.WithLabelValues(printerIDStr, cfg.Name).Add(diff)
-					} else if diff >= 100 {
-						slog.Warn("Игнорируем аномальный скачок счетчика (сетевой лаг или глюк)", "id", id, "diff", diff)
-					}
-				} else {
-					// Если текущий счетчик МЕНЬШЕ предыдущего — значит, на принтере сбросили счетчики вручную
-					// или перезагрузили его. Мы не добавляем значение, чтобы избежать ложного пика скорости.
-					slog.Info("Счетчик принтера сбросился или перезагрузился", "id", id, "old", lastCountValue, "new", currentCountValue)
-					// Добавляем только то, что напечаталось с нуля
-					printerPrintsTotal.WithLabelValues(printerIDStr, cfg.Name).Add(currentCountValue)
-				}
-
-				pm.lastCounts[id] = currentCountValue
-				pm.mu.Unlock()
+				printerPrintsTotal.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(curCount))
 			}
 
 			pm.mu.Lock()
