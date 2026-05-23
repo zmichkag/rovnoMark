@@ -5,14 +5,13 @@ services:
   rovno-app-test:
     build: .
     container_name: rovno-app-test
-    command: ["/bin/marking-service", "--debug", "--port", "8080"]
+    command: [ "/bin/marking-service", "--debug", "--port", "8080" ]
     ports:
-      - "8081:8080" # Снаружи стучимся на 8081, внутри приложение слушает 8080
+      - "8081:8080"
     environment:
       - TZ=Europe/Moscow
     volumes:
-      # Изолированная тестовая база данных прямо в дев-папке
-      - ./rovnoMark_test.db:/app/data/rovnoMark.db
+      - ./data:/app/data
     restart: unless-stopped
     networks:
       - rovno-analytics-net
