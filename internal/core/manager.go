@@ -37,9 +37,15 @@ var (
 		Name: "rovno_task_printed_codes",
 		Help: "Сколько кодов уже успешно отпечатано внутри этого задания",
 	}, []string{"task_id", "line_name"})
+
+	// Честный Counter для обработки функции irate() в Grafana
+	printerPrintsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "rovno_printer_prints_total",
+		Help: "Общий счетчик отпечатанных кодов принтером (инкрементальный counter)",
+	}, []string{"printer_id", "printer_name"})
 )
 
-// Вспомогательный парсер: очищает строки типа "75%", "N/A", "120.5" до чистого float64
+// Вспомогательный парсер
 func parseNumeric(s string) float64 {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "N/A" || s == "?" {
@@ -58,7 +64,6 @@ func parseNumeric(s string) float64 {
 	return val
 }
 
-// Printer - расширенный контракт для железа
 type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
@@ -72,21 +77,19 @@ type Printer interface {
 	GetPrintSpeed() (string, error)
 	GetCurrentPrintCount() (string, error)
 	GetCurrentTemplate() (string, error)
-	ClearQueue() error                // Очистка очереди (команда CQI)
-	GetBufferFreeSpace() (int, error) // Сколько кодов еще можно дослать
+	ClearQueue() error
+	GetBufferFreeSpace() (int, error)
 	UpdateStaticFields(fields map[string]string) error
 	InitSession(fieldName string, maxQueue int) error
 	SelectTemplate(template string, fields map[string]string) error
 }
 
-// TaskProcessor Добавляем возможность управления задачами
 type TaskProcessor struct {
 	Store   *storage.Store
 	Manager *PrinterManager
 }
 
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
-	// Достаем имя динамического поля для этой задачи ИЗ БАЗЫ
 	dynamicField, err := tp.Store.GetTaskDynamicField(taskID)
 	if err != nil || dynamicField == "" {
 		slog.Error("Накачка отменена: не найдено динамическое поле", "task_id", taskID)
@@ -96,14 +99,12 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 	go func() {
 		for {
-			// 1. Проверяем, не остановлена ли задача (Graceful exit из горутины)
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status != "active" {
 				slog.Info("Задача завершена, останавливаем насос", "task_id", taskID)
 				return
 			}
 
-			// 2. Получаем активные принтеры на линии
 			printers, err := tp.Store.GetPrintersByLine(lineID)
 			if err != nil {
 				time.Sleep(2 * time.Second)
@@ -116,36 +117,24 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 					continue
 				}
 
-				// 1. Устанавливаем желаемую планку буфера
 				maxBuffer := 10
-
-				// 2. Узнаем, сколько свободных слотов осталось до лимита
-				// (Драйвер возвращает SGM - SRC, т.е. сколько еще влезет)
 				freeSpace, err := p.GetBufferFreeSpace()
 				if err != nil {
 					continue
 				}
 
-				// Считаем, сколько кодов сейчас в принтере
-				// ВАЖНО: Это сработает корректно, если в InitSession (main.go) вы указали лимит 10.
-				// Если там лимит 2000, то freeSpace будет ~1990.
-				// Поэтому для логики "держать 10" мы берем freeSpace, но не даем ему превысить наш макс.
-
 				targetLoad := freeSpace
 				if targetLoad > maxBuffer {
-					// Если в принтере пусто, не заливаем больше 10 за раз
 					targetLoad = maxBuffer
 				}
 
-				// Выводим лог для контроля "наполненности"
 				slog.Info("Pumper: состояние буфера",
 					"printer", pCfg.Name,
-					"in_printer", maxBuffer-freeSpace, // Сколько примерно занято
+					"in_printer", maxBuffer-freeSpace,
 					"adding", targetLoad)
 
-				// 3. Если место есть — забираем коды из базы
 				if targetLoad <= 0 {
-					continue // Буфер полон
+					continue
 				}
 
 				pending, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
@@ -155,18 +144,15 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				}
 
 				if len(pending) == 0 {
-					continue // Коды в базе кончились
+					continue
 				}
 
-				// 4. Подготовка пачки
 				var codesOnly []string
 				for _, item := range pending {
 					codesOnly = append(codesOnly, item.Code)
 				}
 
 				startIndex := pending[0].PrinterIndex
-
-				// 5. Отправка в принтер
 				loaded, err := p.PrintBatchIndexed(dynamicField, startIndex, codesOnly)
 
 				if err == nil && loaded > 0 {
@@ -182,19 +168,21 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 }
 
 type PrinterManager struct {
-	mu       sync.RWMutex
-	printers map[int]Printer
-	configs  map[int]models.PrinterConfig
-	states   map[int]models.PrinterState
-	logs     []models.LogEntry
+	mu         sync.RWMutex
+	printers   map[int]Printer
+	configs    map[int]models.PrinterConfig
+	states     map[int]models.PrinterState
+	logs       []models.LogEntry
+	lastCounts map[int]float64 // Хранилище для вычисления дельты счетчиков
 }
 
 func NewPrinterManager() *PrinterManager {
 	return &PrinterManager{
-		printers: make(map[int]Printer),
-		configs:  make(map[int]models.PrinterConfig),
-		states:   make(map[int]models.PrinterState),
-		logs:     make([]models.LogEntry, 0),
+		printers:   make(map[int]Printer),
+		configs:    make(map[int]models.PrinterConfig),
+		states:     make(map[int]models.PrinterState),
+		logs:       make([]models.LogEntry, 0),
+		lastCounts: make(map[int]float64), // Инициализация мапы
 	}
 }
 
@@ -229,7 +217,6 @@ func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []mod
 	return statesCopy, logsCopy
 }
 
-// StartTelemetryCollector запускает фоновый процесс сбора статистики
 func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -274,11 +261,9 @@ func (pm *PrinterManager) BackgroundPoller() {
 			status, err := p.GetStatus()
 			var ribbon, queue, speed, curCount, curTemplate string
 
-			// 1. Сразу объявляем ID строкой, так как он понадобится и для логов, и для метрик
 			printerIDStr := strconv.Itoa(id)
 
 			if err == nil {
-				// 2. СНАЧАЛА получаем реальные значения от принтера
 				ribbon, _ = p.GetRemainingRibbon()
 
 				free, errSpace := p.GetBufferFreeSpace()
@@ -292,9 +277,26 @@ func (pm *PrinterManager) BackgroundPoller() {
 				curCount, _ = p.GetCurrentPrintCount()
 				curTemplate, _ = p.GetCurrentTemplate()
 
-				// 3. ПОСЛЕ ТОГО как получили, записываем их в метрики Prometheus
+				// Обновление Gauge (Риббон и Скорость)
 				printerRibbon.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(ribbon))
 				printerSpeed.WithLabelValues(printerIDStr, cfg.Name).Set(parseNumeric(speed))
+
+				// БЕЗОПАСНОЕ НАКОПЛЕНИЕ ДЕЛЬТЫ ДЛЯ COUNTER
+				currentCountValue := parseNumeric(curCount)
+				pm.mu.Lock()
+				lastCountValue := pm.lastCounts[id]
+
+				if currentCountValue >= lastCountValue {
+					diff := currentCountValue - lastCountValue
+					if diff > 0 {
+						printerPrintsTotal.WithLabelValues(printerIDStr, cfg.Name).Add(diff)
+					}
+				} else {
+					// Если счетчик на принтере сбросился (перезагрузка железа)
+					printerPrintsTotal.WithLabelValues(printerIDStr, cfg.Name).Add(currentCountValue)
+				}
+				pm.lastCounts[id] = currentCountValue
+				pm.mu.Unlock()
 			}
 
 			pm.mu.Lock()
@@ -360,19 +362,15 @@ func (pm *PrinterManager) addLogNoLock(printer, event string) {
 
 func (pm *PrinterManager) addLog(printer, event string) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	pm.addLogNoLock(printer, event)
+	return
 }
 
-// GetPrinterState возвращает копию текущего состояния принтера
 func (pm *PrinterManager) GetPrinterState(id int) models.PrinterState {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.states[id]
 }
 
-// UpdatePrinterDeltaState сохраняет последние успешно отправленные параметры
-// Это нужно, чтобы алгоритм Delta понимал, что данные в принтере уже обновлены
 func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
