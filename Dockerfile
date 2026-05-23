@@ -1,5 +1,5 @@
-# Stage 1: Сборка
-FROM golang:1.22-alpine AS builder
+# Stage 1: Сборка (поднимаем версию Go до 1.23)
+FROM golang:1.23-alpine AS builder
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
@@ -28,5 +28,5 @@ COPY --from=builder /app/marking-service /bin/marking-service
 # Устанавливаем рабочую директорию туда, куда будет смотреть Volume из compose
 WORKDIR /app/data
 
-# Запуск приложения (оно создаст rovnoMark.db прямо в /app/data)
+# Запуск приложения
 CMD ["/bin/marking-service"]
