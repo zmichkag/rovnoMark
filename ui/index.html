@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <title>РОВНО v1.5 | Диспетчер</title>
     <style>
-        /* темная тема */
         :root {
             --bg-color: #121212;
             --surface: #1e1e1e;
@@ -16,20 +15,15 @@
             --warning: #ffc107;
             --info: #17a2b8;
         }
-
         body { font-family: 'Segoe UI', Tahoma, sans-serif; background-color: var(--bg-color); color: var(--text); margin: 0; padding: 20px; }
         h1 { margin-top: 0; border-bottom: 2px solid var(--surface); padding-bottom: 10px; }
-
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
         .tab-btn { background: var(--surface); color: var(--text); border: 1px solid #333; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; transition: 0.2s; }
         .tab-btn:hover { background: #333; }
         .tab-btn.active { background: var(--primary); border-color: var(--primary); }
-
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
-
         .card { background: var(--surface); border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border-left: 5px solid var(--warning); display: flex; flex-direction: column; gap: 15px; }
         .card.online { border-left-color: var(--success); }
         .card.offline { border-left-color: var(--danger); }
@@ -38,55 +32,21 @@
         .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; font-weight: bold; background: #333; color: var(--warning); }
         .card.online .status-badge { color: var(--success); }
         .card.offline .status-badge { color: var(--danger); }
-
-        .btn { background: #333; color: white; border: 1px solid #444; padding: 8px; border-radius: 4px; cursor: pointer; transition: 0.2s; text-decoration: none; display: inline-block; text-align: center;}
+        .btn { background: #333; color: white; border: 1px solid #444; padding: 8px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         .btn:hover { background: #444; }
-        .btn-sm { padding: 4px 8px; font-size: 0.8rem; }
-
         .field { margin-bottom: 10px; }
         .field label { display: block; margin-bottom: 5px; color: var(--text-muted); }
-        input, select, textarea { background: #2a2a2a; color: white; border: 1px solid #444; border-radius: 4px; box-sizing: border-box; font-family: inherit; padding: 8px; width: 100%;}
-        input[type="checkbox"] { width: auto; }
-        
-        .task-card {
-            background: #252525;
-            border: 1px solid #333;
-            border-radius: 6px;
-            padding: 15px;
-            margin-bottom: 15px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .progress-container {
-            background: #111;
-            border-radius: 10px;
-            height: 12px;
-            width: 100%;
-            overflow: hidden;
-            margin: 5px 0;
-        }
-        .progress-bar {
-            background: var(--success);
-            height: 100%;
-            transition: width 0.5s ease;
-        }
-        .task-header { display: flex; justify-content: space-between; align-items: flex-start; }
-        .task-info { font-size: 0.9rem; }
-        .task-stats { font-family: monospace; font-size: 0.85rem; color: var(--text-muted); }
-
-        table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.9rem; margin-bottom: 20px; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #333; }
-        th { color: var(--text-muted); font-weight: normal; }
-        tr:hover { background: #252525; }
-
-        .var-row { display: flex; gap: 10px; margin-bottom: 10px; }
+        input, select, textarea { background: #2a2a2a; color: white; border: 1px solid #444; border-radius: 4px; box-sizing: border-box; padding: 8px; font-family: inherit; width: 100%; }
+        .task-card { background: #252525; border: 1px solid #333; border-radius: 6px; padding: 15px; margin-bottom: 15px; display: flex; flex-direction: column; gap: 10px; }
+        .progress-container { background: #111; border-radius: 10px; height: 12px; width: 100%; overflow: hidden; margin: 5px 0; }
+        .progress-bar { background: var(--success); height: 100%; transition: width 0.5s ease; }
+        table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.9rem; margin-bottom: 30px; }
+        th { text-align: left; border-bottom: 1px solid #444; padding: 10px; }
+        td { padding: 10px; border-bottom: 1px solid #333; }
     </style>
 </head>
 <body>
-
 <h1>РОВНО v1.5 <span style="color: var(--text-muted); font-size: 1rem;">| Диспетчер печати</span></h1>
-
 <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('monitoring')">Мониторинг парка</button>
     <button class="tab-btn" onclick="switchTab('control')">Управление печатью</button>
@@ -94,543 +54,396 @@
     <button class="tab-btn" onclick="switchTab('templatesTab')">Шаблоны</button>
 </div>
 
-<!-- ВКЛАДКА МОНИТОРИНГ -->
 <div id="monitoring" class="tab-content active">
-    <div id="active-tasks-container" style="margin-bottom: 30px;">
+    <div id="active-tasks-container">
         <h3>🚀 Текущие задания (в работе)</h3>
-        <div id="tasks-list">
-            <div style="color: var(--text-muted);">Нет активных заданий</div>
-        </div>
+        <div id="tasks-list"><div style="color: var(--text-muted);">Загрузка...</div></div>
     </div>
-
     <hr style="border: 1px solid #333; margin: 20px 0;">
-    <div class="grid" id="printers-grid">
-        <div style="color: var(--text-muted);">Загрузка данных от диспетчера...</div>
-    </div>
-
+    <div class="grid" id="printers-grid"></div>
     <hr style="border: 1px solid #333; margin: 30px 0;">
     <h3>Журнал событий</h3>
-    <div id="event-log" style="background: var(--surface); padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;">
-    </div>
+    <div id="event-log" style="background: var(--surface); padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;"></div>
 </div>
 
-<!-- ВКЛАДКА УПРАВЛЕНИЕ -->
 <div id="control" class="tab-content">
     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-        <!-- Блок 1: Единичная печать -->
+        <!-- Одиночная печать (теперь тоже через Линию) -->
         <div style="flex: 1; min-width: 400px; background: var(--surface); padding: 20px; border-radius: 8px;">
-            <h3>Одиночная печать (Тест шаблона)</h3>
-            <div class="field">
-                <label>Выберите целевой принтер:</label>
-                <select id="print_target"></select>
-            </div>
-            <div class="field">
-                <label>Шаблон (.rox / .ciff):</label>
-                <input type="text" id="print_template" value="CZDM.rox">
-            </div>
-            <hr style="border: 1px solid #333; margin: 15px 0;">
-            <h4>Переменные шаблона</h4>
+            <h3>Одиночная печать (Статика)</h3>
+            <div class="field"><label>Линия:</label><select id="print_line_target"></select></div>
+            <div class="field"><label>Шаблон:</label><input type="text" id="print_template" value="CZDM.rox"></div>
+            <h4>Переменные</h4>
             <div id="print_fields_container">
-                <div class="var-row">
-                    <input type="text" class="var-key" placeholder="Имя поля (Text01)" value="Text01">
-                    <input type="text" class="var-val" placeholder="Значение" value="ПАРТИЯ 1">
-                    <button class="btn" style="background: var(--danger);" onclick="this.parentElement.remove()">X</button>
+                <div class="var-row" style="display:flex; gap:10px; margin-bottom:10px;">
+                    <input type="text" class="var-key" value="Text01" style="flex:1;" placeholder="Поле">
+                    <input type="text" class="var-val" value="ПАРТИЯ 1" style="flex:2;" placeholder="Значение">
                 </div>
             </div>
-            <button class="btn" style="background: #444; margin-bottom: 20px; width: 100%;" onclick="addVarField()">+ Добавить поле</button>
-            <button class="btn" style="background: var(--primary); width: 100%; font-size: 1.1rem; padding: 12px;" onclick="sendPrintJob()">ОТПРАВИТЬ ЗАДАНИЕ</button>
+            <button class="btn" onclick="addVarField()">+ Поле</button>
+            <button class="btn" style="background: var(--primary); width: 100%; margin-top: 15px;" onclick="sendPrintJob()">ОТПРАВИТЬ</button>
         </div>
 
-        <!-- Блок 2: Пакетная загрузка ЧЗ -->
+        <!-- Массовая печать (ЧЗ) -->
         <div style="flex: 1; min-width: 400px; background: var(--surface); padding: 20px; border-radius: 8px; border: 1px solid var(--primary);">
-            <h3>Массовая загрузка (Линия ⟶ ЧЗ)</h3>
-
-            <div class="field">
-                <label>Выберите целевую линию:</label>
-                <select id="batch_line_target" style="border-color: var(--primary);"></select>
-            </div>
-
-            <div class="field">
-                <label>Шаблон:</label>
-                <input type="text" id="batch_template" placeholder="Выберите в Шаблонах или введите имя">
-            </div>
-            <div class="field">
-                <label>Динамическое поле (для кодов):</label>
-                <input type="text" id="batch_fieldname" placeholder="например, DataMatrix">
-            </div>
-
+            <h3>Массовая загрузка (Честный ЗНАК)</h3>
+            <div class="field"><label>Линия:</label><select id="batch_line_target"></select></div>
+            <div class="field"><label>Шаблон:</label><input type="text" id="batch_template" readonly placeholder="Выберите во вкладке «Шаблоны»"></div>
+            <div class="field"><label>Динамическое поле:</label><input type="text" id="batch_fieldname" readonly placeholder="Автоопределение (DM)"></div>
+            
             <div id="batch_static_fields_container" style="margin-top: 15px; border-top: 1px solid #333; padding-top: 15px;">
-                <p style="color: var(--text-muted); font-size: 0.8rem;">Выберите шаблон во вкладке «Шаблоны», чтобы настроить поля автоматически.</p>
+                <p style="color: var(--text-muted); font-size: 0.8rem;">Выберите шаблон для настройки статических полей.</p>
             </div>
-
-            <div class="field" style="margin-top: 15px;">
-                <label>Список кодов ЧЗ:</label>
-                <textarea id="batch_codes" rows="6" placeholder="Вставьте коды, каждый с новой строки..."></textarea>
-            </div>
-            <button class="btn" style="background: var(--primary); width: 100%; font-size: 1.1rem; padding: 12px;" onclick="sendBatchJob()">ОТПРАВИТЬ НА ЛИНИЮ</button>
+            
+            <div class="field" style="margin-top: 15px;"><label>Коды (по одному на строку):</label><textarea id="batch_codes" rows="6" placeholder="Вставьте коды здесь..."></textarea></div>
+            <button class="btn" style="background: var(--primary); width: 100%;" onclick="sendBatchJobV2()">ЗАПУСТИТЬ ПЕЧАТЬ</button>
         </div>
     </div>
 </div>
 
-<!-- ВКЛАДКА НАСТРОЙКИ -->
 <div id="settings" class="tab-content">
     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-        <!-- Карточка устройства -->
         <div style="flex: 1; min-width: 300px; background: var(--surface); padding: 20px; border-radius: 8px;">
-            <h3 id="printer_form_title">Добавить/Изменить принтер</h3>
-            <input type="hidden" id="p_id">
-            <div class="field">
-                <label>Название принтера:</label>
-                <input type="text" id="p_name" placeholder="Savema 53-i">
-            </div>
-            <div class="field">
-                <label>IP адрес:</label>
-                <input type="text" id="p_ip" placeholder="192.168.1.100">
-            </div>
-            <div class="field">
-                <label>Порт:</label>
-                <input type="number" id="p_port" value="9100">
-            </div>
-            <div class="field">
-                <label>Тип драйвера:</label>
-                <select id="p_driver">
-                    <option value="savema">Savema (SPPL)</option>
-                    <option value="videojet">Videojet (Zipher)</option>
-                </select>
-            </div>
-            <div class="field" style="margin-top: 15px;">
-                <label style="display: flex; align-items: center; cursor: pointer; color: var(--text);">
-                    <input type="checkbox" id="p_active" checked style="margin-right: 10px;">
-                    Активен (участвует в опросе и печати)
-                </label>
-            </div>
-            <div style="display: flex; gap: 10px; margin-top: 20px;">
-                <button class="btn" style="background: var(--success); flex: 2;" onclick="savePrinter()">СОХРАНИТЬ</button>
-                <button class="btn" style="background: #555; flex: 1;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
-            </div>
+            <h3>Принтер</h3>
+            <input type="number" id="p_id" readonly placeholder="ID (Авто)" style="background: #333; margin-bottom: 10px;">
+            <div class="field"><label>Имя:</label><input type="text" id="p_name"></div>
+            <div class="field"><label>IP:</label><input type="text" id="p_ip"></div>
+            <div class="field"><label>Порт:</label><input type="number" id="p_port" value="9100"></div>
+            <div class="field"><label>Драйвер:</label><select id="p_driver"><option value="savema">Savema</option><option value="videojet">Videojet</option><option value="carlvalentine">Carl Valentine</option></select></div>
+            <div class="field"><label><input type="checkbox" id="p_active" checked style="width:auto;"> Активен</label></div>
+            <button class="btn" style="background: var(--success); width: 100%;" onclick="addPrinter()">СОХРАНИТЬ</button>
+            <button class="btn" style="width: 100%; margin-top: 5px;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
         </div>
-
-        <!-- Настройка линий -->
         <div style="flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 20px;">
             <div style="background: var(--surface); padding: 20px; border-radius: 8px;">
-                <h3 id="line_form_title">Создать/Изменить линию</h3>
-                <input type="hidden" id="l_id">
-                <div class="field">
-                    <label>Название линии:</label>
-                    <input type="text" id="l_name" placeholder="Название (Линия №1)">
-                </div>
-                <div class="field">
-                    <label>Описание:</label>
-                    <input type="text" id="l_desc" placeholder="Описание">
-                </div>
-                <div style="display: flex; gap: 10px; margin-top: 10px;">
-                    <button class="btn" style="background: var(--primary); flex: 2;" onclick="saveLine()">СОХРАНИТЬ</button>
-                    <button class="btn" style="background: #555; flex: 1;" onclick="clearLineForm()">ОЧИСТИТЬ</button>
-                </div>
+                <h3>Создать линию</h3>
+                <div class="field"><input type="text" id="l_name" placeholder="Имя"></div>
+                <div class="field"><input type="text" id="l_desc" placeholder="Описание"></div>
+                <button class="btn" style="background: var(--primary); width: 100%;" onclick="saveLine()">СОЗДАТЬ</button>
             </div>
-
             <div style="background: var(--surface); padding: 20px; border-radius: 8px;">
-                <h3>Привязать принтер к линии</h3>
-                <div class="field">
-                    <label>Линия:</label>
-                    <select id="assign_line"></select>
-                </div>
-                <div class="field">
-                    <label>Принтер:</label>
-                    <select id="assign_printer"></select>
-                </div>
-                <div class="field">
-                    <label>Роль:</label>
-                    <select id="assign_role">
-                        <option value="PRIMARY">Основной (Печать кодов)</option>
-                        <option value="SECONDARY">Дублирующий</option>
-                        <option value="BOX">Групповая упаковка</option>
-                    </select>
-                </div>
-                <button class="btn" style="background: var(--warning); color: black; width: 100%; margin-top: 10px;" onclick="assignPrinter()">ПРИВЯЗАТЬ</button>
+                <h3>Привязать к линии</h3>
+                <div class="field"><select id="assign_line"></select></div>
+                <div class="field"><select id="assign_printer"></select></div>
+                <div class="field"><select id="assign_role"><option value="PRIMARY">Основной</option><option value="SECONDARY">Дублирующий</option></select></div>
+                <button class="btn" style="background: var(--warning); color: black; width: 100%;" onclick="assignPrinter()">ПРИВЯЗАТЬ</button>
             </div>
         </div>
     </div>
-
-    <!-- Таблицы настроек -->
-    <hr style="border: 1px solid #333; margin: 30px 0;">
-    <h4>Текущие привязки (Линия ⟷ Принтер)</h4>
-    <table>
-        <thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th><th>Действие</th></tr></thead>
-        <tbody id="assignments-table"></tbody>
-    </table>
-
-    <hr style="border: 1px solid #333; margin: 30px 0;">
-    <h4>Список существующих линий</h4>
-    <table>
-        <thead>
-        <tr>
-            <th>ID</th>
-            <th>Название</th>
-            <th>Описание</th>
-            <th>Действие</th>
-        </tr>
-        </thead>
-        <tbody id="lines-list-table"></tbody>
-    </table>
-
-    <hr style="border: 1px solid #333; margin: 30px 0;">
-    <h4>Список устройств в базе</h4>
-    <table>
-        <thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Статус</th><th>Действие</th></tr></thead>
-        <tbody id="printers-list-table"></tbody>
-    </table>
+    <h4 style="margin-top:30px;">Привязки</h4>
+    <table><thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th></tr></thead><tbody id="assignments-table"></tbody></table>
+    <h4>Линии</h4>
+    <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th></tr></thead><tbody id="lines-list-table"></tbody></table>
+    <h4>Принтеры</h4>
+    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
 </div>
 
-<!-- ВКЛАДКА ШАБЛОНЫ -->
 <div id="templatesTab" class="tab-content">
-    <div style="background: var(--surface); padding: 20px; border-radius: 8px; max-width: 800px;">
-        <h3>Управление шаблонами</h3>
-        <div class="field">
-            <label>Выберите принтер для опроса памяти:</label>
-            <select id="template_printer_select"></select>
-        </div>
-        <button class="btn" style="background: var(--primary); width: 100%; margin-bottom: 20px;" onclick="fetchPrinterTemplates()">ЗАПРОСИТЬ СПИСОК ШАБЛОНОВ</button>
-
+    <div style="background: var(--surface); padding: 20px; border-radius: 8px; max-width: 600px;">
+        <h3>Шаблоны</h3>
+        <div class="field"><label>Принтер:</label><select id="template_printer_select"></select></div>
+        <button class="btn" style="background: var(--primary); width: 100%;" onclick="fetchPrinterTemplates()">ОПРОСИТЬ ПАМЯТЬ</button>
         <hr style="border: 1px solid #333; margin: 15px 0;">
-        <h4>Доступные макеты:</h4>
-        <ul id="templates_list" style="list-style-type: none; padding: 0; margin: 0;">
-            <li style="color: var(--text-muted);">Нажмите кнопку для опроса...</li>
-        </ul>
+        <ul id="templates_list" style="list-style: none; padding: 0;"></ul>
     </div>
 </div>
 
 <script>
-    // --- ГЛОБАЛЬНАЯ НАВИГАЦИЯ ---
     function switchTab(tabId) {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        const target = document.getElementById(tabId);
-        if (target) target.classList.add('active');
-
-        // Подсветка активной кнопки
-        const btn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick').includes(`'${tabId}'`));
-        if (btn) btn.classList.add('active');
-
+        document.getElementById(tabId).classList.add('active');
         if (tabId === 'settings') loadSettingsData();
-        if (tabId === 'control') updatePrintTargets();
+        if (tabId === 'control') updateControlTargets();
         if (tabId === 'templatesTab') updateTemplateTargets();
     }
 
-    // --- МОНИТОРИНГ ---
     async function fetchPrintersStatus() {
         try {
-            const pRes = await fetch('/api/printers');
-            const pData = await pRes.json();
-            renderPrintersGrid(pData);
-            renderLogs(pData.logs);
+            const res = await fetch('/api/printers');
+            if (!res.ok) return;
+            const data = await res.json();
+            renderPrintersGrid(data);
+            renderLogs(data.logs);
             fetchActiveTasks();
-        } catch (e) { console.error("Status fetch error", e); }
+        } catch (e) {
+            console.error("Status fetch error:", e);
+        }
     }
 
     async function fetchActiveTasks() {
+        const container = document.getElementById('tasks-list');
         try {
-            const response = await fetch('/api/task/active');
-            const tasks = await response.json();
-            const container = document.getElementById('tasks-list');
+            const res = await fetch('/api/task/active');
+            if (!res.ok) throw new Error(`Ошибка сервера: ${res.status}`);
+            const tasks = await res.json();
 
             if (!tasks || tasks.length === 0) {
-                container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Простой линий. Заданий нет.</div>';
+                container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Активных заданий нет</div>';
                 return;
             }
 
             container.innerHTML = tasks.map(t => {
-                const total = t.stats.total || 0;
-                const printed = t.stats.printed || 0;
-                const percent = total > 0 ? Math.round((printed / total) * 100) : 0;
+                const printed = t.stats?.printed || 0;
+                const total = t.stats?.total || 1;
+                const progress = Math.min(Math.round((printed / total) * 100), 100);
+                const barColor = t.status === 'error' ? 'var(--danger)' : 'var(--success)';
 
                 return `
-                <div class="task-card">
-                    <div class="task-header">
-                        <div class="task-info">
-                            <b style="color:var(--info)">Задание #${t.task_id}</b> — <span>Линия: ${t.line_name}</span><br>
-                            <small style="color:var(--text-muted)">Макет: ${t.template_name} | Поле: ${t.dynamic_field_name}</small>
+                <div class="task-card" data-task-id="${t.task_id}">
+                    <div style="display: flex; justify-content: space-between; align-items: start;">
+                        <div>
+                            <b style="color: var(--primary);">#${t.task_id}</b>
+                            <span style="margin-left: 10px;">Линия: <b>${t.line_name}</b></span>
                         </div>
-                        <button class="btn" style="background:var(--danger); border:none; padding: 5px 12px;"
-                                onclick="stopTask(${t.task_id}, ${t.line_id})">ОСТАНОВИТЬ</button>
+                        <span class="status-badge" style="font-size: 0.7rem;">${t.template_name}</span>
                     </div>
 
-                    <div class="task-stats">
-                        Прогресс: ${percent}% (${printed} / ${total} шт.)
+                    <div style="margin: 10px 0;">
+                        <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 5px;">
+                            <span>Прогресс: ${printed} / ${total}</span>
+                            <span>${progress}%</span>
+                        </div>
+                        <div class="progress-container">
+                            <div class="progress-bar" style="width: ${progress}%; background: ${barColor};"></div>
+                        </div>
                     </div>
-                    <div class="progress-container">
-                        <div class="progress-bar" style="width: ${percent}%"></div>
-                    </div>
-                    <div style="font-size: 0.7rem; color: #555;">Создано: ${t.created_at}</div>
+
+                    <button class="btn" style="border-color: var(--danger); color: var(--danger);"
+                            onclick="stopTask(${t.task_id}, ${t.line_id})">
+                        ОСТАНОВИТЬ
+                    </button>
                 </div>`;
             }).join('');
-        } catch (e) { console.error("Ошибка загрузки задач", e); }
+        } catch (err) {
+            console.error("Task Fetch Error:", err);
+            container.innerHTML = `<div style="color: var(--danger); padding: 10px;">⚠️ Ошибка связи: ${err.message}</div>`;
+        }
     }
 
     async function stopTask(id, lineId) {
-        if(!confirm(`Остановить задачу #${id}?`)) return;
+        if(!confirm('Остановить выполнение задачи?')) return;
         try {
             const res = await fetch(`/api/task/stop?id=${id}&line_id=${lineId}`);
             if (res.ok) {
-                alert("Задача остановлена.");
                 fetchActiveTasks();
+            } else {
+                alert('Ошибка при остановке задачи');
             }
-        } catch (e) { alert("Ошибка при остановке"); }
+        } catch (e) {
+            alert('Ошибка связи: ' + e.message);
+        }
     }
 
     function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
-        if (data.lines) {
-            data.lines.forEach(line => {
-                const activeInLine = (line.printers || []).filter(p => p.is_active);
-                if (activeInLine.length > 0) {
-                    grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; border-left: 4px solid var(--primary); padding-left: 15px;">
-                        <h2 style="margin:0;">${line.name} <small style="color:var(--text-muted); font-size:0.9rem;">— ${line.description}</small></h2>
+        (data.lines || []).forEach(l => {
+            grid.innerHTML += `<div style="grid-column:1/-1; margin-top:10px;"><h2>Линия: ${l.name}</h2></div>`;
+            (l.printers || []).forEach(p => {
+                const status = p.status || 'НЕИЗВЕСТНО';
+                const cls = status.includes('ОФФЛАЙН') ? 'offline' : 'online';
+                grid.innerHTML += `
+                    <div class="card ${cls}">
+                        <div class="card-header">
+                            <h3 class="card-title">${p.name}</h3>
+                            <span class="status-badge">${status}</span>
+                        </div>
+                        <div style="font-size: 0.9rem;">
+                            <div>Ribbon: <b>${p.ribbon || '-'}</b></div>
+                            <div>Queue: <b>${p.queue || '0'}</b></div>
+                            <div>Template: <b>${p.cur_template || '-'}</b></div>
+                        </div>
                     </div>`;
-                    activeInLine.forEach(p => grid.innerHTML += createPrinterCard(p));
-                }
             });
-        }
-        if (data.all_printers) {
-            const activeStandalone = data.all_printers.filter(p => p.is_active && !isPrinterInAnyLine(p.id, data.lines));
-            if (activeStandalone.length > 0) {
-                grid.innerHTML += `<div style="grid-column: 1/-1; margin-top: 20px; opacity: 0.6;"><h3>Вне линий (Тест/Резерв)</h3></div>`;
-                activeStandalone.forEach(p => grid.innerHTML += createPrinterCard(p));
-            }
-        }
-    }
-
-    function isPrinterInAnyLine(printerId, lines) {
-        if (!lines) return false;
-        return lines.some(line => (line.printers || []).some(p => p.id === printerId));
-    }
-
-    function createPrinterCard(p) {
-        let cardClass = (p.status || '').includes('ОФФЛАЙН') ? 'offline' : (p.status && p.status !== 'INITIALIZING' ? 'online' : '');
-        let queueWarning = (parseInt(p.queue) < 20) ? 'color: var(--warning);' : '';
-        return `
-        <div class="card ${cardClass}">
-            <div class="card-header">
-                <h3 class="card-title">${p.name} <small style="color: var(--text-muted);">(${p.id})</small></h3>
-                <span class="status-badge">${p.status || 'ИНИЦИАЛИЗАЦИЯ'}</span>
-            </div>
-            <div style="background: #2a2a2a; padding: 10px; border-radius: 4px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
-                <div><div style="font-size: 0.7rem; color: var(--text-muted);">Риббон</div><b>${p.ribbon || '??'}</b></div>
-                <div><div style="font-size: 0.7rem; color: var(--text-muted);">Счетчик</div><b>${p.cur_count || 0}</b></div>
-                <div style="text-align: right;"><div style="font-size: 0.7rem; color: var(--text-muted);">Очередь</div><b style="${queueWarning}">${p.queue || 0}</b></div>
-            </div>
-            <div style="color: var(--text-muted); font-size: 0.8rem;">${p.ip}:${p.port} | ${p.driver_type} | ${p.cur_template || 'Нет шаблона'}</div>
-        </div>`;
+        });
     }
 
     function renderLogs(logs) {
-        const logBox = document.getElementById('event-log');
-        if (!logBox || !logs) return;
-        logBox.innerHTML = logs.map(log => {
-            let color = log.event.includes("ПОТЕРЯ") ? "var(--danger)" : (log.event.includes("восстановлена") ? "var(--success)" : "var(--text)");
-            return `<div style="margin-bottom: 5px; color: ${color};"><span style="color: var(--text-muted);">[${log.time}]</span> <strong>ID:${log.printer}</strong>: ${log.event}</div>`;
-        }).join('');
+        document.getElementById('event-log').innerHTML = (logs || []).map(l => `<div>[${l.time}] <b>${l.printer}</b>: ${l.event}</div>`).join('');
     }
 
-    // --- УПРАВЛЕНИЕ ПЕЧАТЬЮ (ВКЛАДКА CONTROL) ---
-    async function updatePrintTargets() {
-        const res = await fetch('/api/printers');
-        const data = await res.json();
-        
-        const selectSingle = document.getElementById('print_target');
-        if (data.all_printers && selectSingle) {
-            selectSingle.innerHTML = data.all_printers.map(p => `<option value="${p.id}">[ID: ${p.id}] ${p.name}</option>`).join('');
-        }
-        
-        const selectLine = document.getElementById('batch_line_target');
-        if (data.lines && selectLine) {
-            selectLine.innerHTML = data.lines.map(l => `<option value="${l.id}">${l.name} (${l.description})</option>`).join('');
-        }
+    async function updateControlTargets() {
+        try {
+            const res = await fetch('/api/printers');
+            const data = await res.json();
+            const lineOpts = (data.lines || []).map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+            document.getElementById('print_line_target').innerHTML = lineOpts;
+            document.getElementById('batch_line_target').innerHTML = lineOpts;
+        } catch (e) {}
     }
 
     function addVarField() {
-        const container = document.getElementById('print_fields_container');
         const div = document.createElement('div');
-        div.className = 'var-row';
-        div.innerHTML = `
-            <input type="text" class="var-key" placeholder="Имя поля">
-            <input type="text" class="var-val" placeholder="Значение">
-            <button class="btn" style="background: var(--danger);" onclick="this.parentElement.remove()">X</button>
-        `;
-        container.appendChild(div);
+        div.className = 'var-row'; div.style = 'display:flex; gap:10px; margin-bottom:5px;';
+        div.innerHTML = '<input type="text" class="var-key" style="flex:1;"><input type="text" class="var-val" style="flex:2;"><button class="btn" onclick="this.parentElement.remove()">X</button>';
+        document.getElementById('print_fields_container').appendChild(div);
     }
 
     async function sendPrintJob() {
-        const printerId = document.getElementById('print_target').value;
-        const template = document.getElementById('print_template').value;
-        const staticFields = {};
-        document.querySelectorAll('#print_fields_container .var-row').forEach(row => {
-            const key = row.querySelector('.var-key').value.trim();
-            const val = row.querySelector('.var-val').value.trim();
-            if (key) staticFields[key] = val;
+        const fields = {};
+        document.querySelectorAll('.var-row').forEach(r => {
+            const key = r.querySelector('.var-key').value.trim();
+            const val = r.querySelector('.var-val').value.trim();
+            if (key) fields[key] = val;
         });
-
-        // Одиночная печать через /api/task/create (без динамических полей)
-        const payload = {
-            line_id: 0, // 0 означает прямую печать на принтер (если бэкенд поддерживает)
-            // Но наш бэкенд требует line_id. Найдем линию этого принтера.
-            template_name: template,
-            dynamic_field_name: "",
-            static_fields: staticFields
-        };
-
-        // Т.к. бэкенд требует line_id, нам нужно найти к какой линии привязан принтер
-        const resP = await fetch('/api/printers');
-        const dataP = await resP.json();
-        const printerObj = dataP.all_printers.find(p => p.id == printerId);
-        
-        // Поиск line_id
-        let lineId = 0;
-        dataP.lines.forEach(l => {
-            if (l.printers.some(p => p.id == printerId)) lineId = l.id;
-        });
-
-        if (lineId === 0) {
-            alert("Принтер не привязан к линии. Одиночная печать через API задач требует привязки.");
-            return;
-        }
-
-        payload.line_id = lineId;
 
         try {
             const res = await fetch('/api/task/create', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload)
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    line_id: parseInt(document.getElementById('print_line_target').value),
+                    template_name: document.getElementById('print_template').value,
+                    dynamic_field_name: "",
+                    static_fields: fields
+                })
             });
-            const data = await res.json();
+
             if (res.ok) {
-                alert("✅ Задание отправлено! Task ID: " + data.task_id);
+                alert('Задание отправлено на принтеры линии');
                 switchTab('monitoring');
             } else {
-                alert("❌ Ошибка: " + (data.error || "Неизвестная ошибка"));
+                const err = await res.json();
+                alert('Ошибка: ' + (err.error || res.statusText));
             }
-        } catch (e) { alert("Ошибка сети"); }
+        } catch (e) {
+            alert('Ошибка связи: ' + e.message);
+        }
     }
 
-    async function sendBatchJob() {
-        const lineId = document.getElementById('batch_line_target').value;
-        const template = document.getElementById('batch_template').value.trim();
-        const fieldName = document.getElementById('batch_fieldname').value.trim();
-        const codes = document.getElementById('batch_codes').value.split('\n').map(c => c.trim()).filter(c => c.length > 0);
+    async function sendBatchJobV2() {
+        const lineId = parseInt(document.getElementById('batch_line_target').value);
+        const template = document.getElementById('batch_template').value;
+        const dynamicField = document.getElementById('batch_fieldname').value;
+        const codes = document.getElementById('batch_codes').value.split('\n').map(c => c.trim()).filter(c => c);
 
-        if (!lineId || !template || codes.length === 0) { alert("Заполните линию, шаблон и коды"); return; }
+        if (!template) return alert('Выберите шаблон!');
+        if (codes.length === 0) return alert('Введите коды!');
 
-        // Собираем статику
         const statics = {};
-        document.querySelectorAll('#batch_static_fields_container .static-val').forEach(input => {
-            statics[input.getAttribute('data-key')] = input.value;
-        });
+        document.querySelectorAll('.static-val').forEach(i => statics[i.dataset.key] = i.value);
 
         try {
             // 1. Создаем задачу
-            const resCreate = await fetch('/api/task/create', {
+            const createRes = await fetch('/api/task/create', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    line_id: parseInt(lineId),
+                    line_id: lineId,
                     template_name: template,
-                    dynamic_field_name: fieldName,
+                    dynamic_field_name: dynamicField,
                     static_fields: statics
                 })
             });
-            const dataCreate = await resCreate.json();
-            if (!resCreate.ok) {
-                alert("Ошибка создания задачи: " + (dataCreate.error || "Backend error"));
-                return;
+
+            if (!createRes.ok) {
+                const err = await createRes.json();
+                throw new Error(err.error || 'Ошибка создания задачи');
             }
 
-            const taskId = dataCreate.task_id;
+            const { task_id } = await createRes.json();
 
-            // 2. Отправляем коды
-            const resAppend = await fetch('/api/task/append', {
+            // 2. Загружаем коды
+            const appendRes = await fetch('/api/task/append', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    task_id: taskId,
+                    task_id: task_id,
                     codes: codes
                 })
             });
-            
-            if (resAppend.ok) {
-                alert("✅ Пакет (" + codes.length + " кодов) успешно отправлен!");
-                document.getElementById('batch_codes').value = "";
+
+            if (appendRes.ok) {
+                alert(`Задача #${task_id} успешно запущена!`);
+                document.getElementById('batch_codes').value = '';
                 switchTab('monitoring');
             } else {
-                alert("Ошибка при передаче кодов");
+                alert('Ошибка при загрузке кодов в задачу #' + task_id);
             }
-        } catch (e) { alert("Ошибка сети"); }
+        } catch (e) {
+            alert('Ошибка: ' + e.message);
+        }
     }
 
-    // --- НАСТРОЙКИ (ВКЛАДКА SETTINGS) ---
+    async function updateTemplateTargets() {
+        try {
+            const res = await fetch('/api/printers');
+            const data = await res.json();
+            document.getElementById('template_printer_select').innerHTML = (data.all_printers || []).map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+        } catch (e) {}
+    }
+
+    async function fetchPrinterTemplates() {
+        const pid = document.getElementById('template_printer_select').value;
+        if (!pid) return;
+        try {
+            const res = await fetch(`/api/templates?printer_id=${pid}`);
+            if (!res.ok) throw new Error(await res.text());
+            const tps = await res.json();
+            document.getElementById('templates_list').innerHTML = tps.map(t => `
+                <li style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; padding:5px; background:#2a2a2a; border-radius:4px;">
+                    ${t} <button class="btn" onclick="loadTemplateFields('${t}')">Выбрать</button>
+                </li>`).join('');
+        } catch (e) {
+            alert('Ошибка: ' + e.message);
+        }
+    }
+
+    async function loadTemplateFields(t) {
+        const pid = document.getElementById('template_printer_select').value;
+        try {
+            const res = await fetch(`/api/template/fields?printer_id=${pid}&template=${t}`);
+            if (!res.ok) throw new Error(await res.text());
+            const fields = await res.json();
+
+            document.getElementById('batch_template').value = t;
+            document.getElementById('batch_fieldname').value = ""; // Сброс
+
+            const cont = document.getElementById('batch_static_fields_container');
+            cont.innerHTML = '<h4>Статические поля</h4>';
+            
+            fields.forEach(f => {
+                // Автоопределение динамического поля (обычно содержит DM или DataMatrix)
+                const lower = f.toLowerCase();
+                if (lower.includes('dm') || lower.includes('datamatrix') || lower.includes('gs1')) {
+                    document.getElementById('batch_fieldname').value = f;
+                } else {
+                    cont.innerHTML += `<div class="field"><label>${f}:</label><input class="static-val" data-key="${f}"></div>`;
+                }
+            });
+            
+            if (!document.getElementById('batch_fieldname').value && fields.length > 0) {
+                alert('Внимание: Динамическое поле не определено автоматически. Будет использоваться первое подходящее или пустое.');
+            }
+
+            switchTab('control');
+        } catch (e) {
+            alert('Ошибка загрузки полей: ' + e.message);
+        }
+    }
+
     async function loadSettingsData() {
         try {
-            const [linesRes, printersRes, assignsRes] = await Promise.all([
-                fetch('/api/lines'),
-                fetch('/api/printers'),
-                fetch('/api/assignments')
-            ]);
+            const lRes = await fetch('/api/lines');
+            const lines = await lRes.json();
+            document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+            document.getElementById('lines-list-table').innerHTML = lines.map(l => `<tr><td>${l.id}</td><td>${l.name}</td><td>${l.description}</td></tr>`).join('');
 
-            const lines = await linesRes.json();
-            const pData = await printersRes.json();
-            const assigns = await assignsRes.json();
+            const pRes = await fetch('/api/printers');
+            const pData = await pRes.json();
+            document.getElementById('assign_printer').innerHTML = pData.all_printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+            document.getElementById('printers-list-table').innerHTML = pData.all_printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td><button class="btn" onclick='editPrinter(${JSON.stringify(p)})'>Edit</button></td></tr>`).join('');
 
-            // Заполнение селекторов
-            const lineOptions = (lines || []).map(l => `<option value="${l.id}">${l.name}</option>`).join('');
-            document.getElementById('assign_line').innerHTML = lineOptions;
-            
-            const printerOptions = (pData.all_printers || []).map(p => `<option value="${p.id}">${p.name} (${p.ip})</option>`).join('');
-            document.getElementById('assign_printer').innerHTML = printerOptions;
-
-            // Таблица линий
-            document.getElementById('lines-list-table').innerHTML = (lines || []).map(l => `
-                <tr>
-                    <td>${l.id}</td>
-                    <td>${l.name}</td>
-                    <td>${l.description}</td>
-                    <td>
-                        <button class="btn btn-sm" onclick='editLine(${JSON.stringify(l)})'>Edit</button>
-                    </td>
-                </tr>
-            `).join('');
-
-            // Таблица принтеров
-            document.getElementById('printers-list-table').innerHTML = (pData.all_printers || []).map(p => `
-                <tr>
-                    <td>${p.id}</td>
-                    <td>${p.name}</td>
-                    <td>${p.ip}:${p.port}</td>
-                    <td>${p.driver_type}</td>
-                    <td>${p.is_active ? '✅' : '❌'}</td>
-                    <td>
-                        <button class="btn btn-sm" onclick='editPrinter(${JSON.stringify(p)})'>Edit</button>
-                    </td>
-                </tr>
-            `).join('');
-
-            // Таблица привязок
-            document.getElementById('assignments-table').innerHTML = (assigns || []).map(a => `
-                <tr>
-                    <td>${a.line_name}</td>
-                    <td>${a.printer_name}</td>
-                    <td>${a.role}</td>
-                    <td><button class="btn btn-sm" style="background:var(--danger)" onclick="deleteAssignment(${a.line_id}, ${a.printer_id})">Del</button></td>
-                </tr>
-            `).join('');
-
-        } catch (e) { console.error("Load settings error", e); }
+            const aRes = await fetch('/api/assignments');
+            const as = await aRes.json();
+            document.getElementById('assignments-table').innerHTML = as.map(a => `<tr><td>${a.line_name}</td><td>${a.printer_name}</td><td>${a.role}</td></tr>`).join('');
+        } catch (e) {}
     }
 
-    async function savePrinter() {
-        const id = document.getElementById('p_id').value;
-        const payload = {
-            id: id ? parseInt(id) : 0,
+    async function addPrinter() {
+        const body = {
+            id: parseInt(document.getElementById('p_id').value) || 0,
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value),
@@ -638,18 +451,20 @@
             is_active: document.getElementById('p_active').checked
         };
 
-        if (!payload.name || !payload.ip) { alert("Имя и IP обязательны"); return; }
-
-        const res = await fetch('/api/printers/add', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        });
-        if (res.ok) {
-            alert("Принтер сохранен");
-            clearPrinterForm();
-            loadSettingsData();
-        } else {
-            alert("Ошибка сохранения");
+        try {
+            const res = await fetch('/api/printers/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (res.ok) {
+                alert('Сохранено');
+                loadSettingsData();
+            } else {
+                alert('Ошибка сохранения');
+            }
+        } catch (e) {
+            alert('Ошибка связи: ' + e.message);
         }
     }
 
@@ -660,185 +475,52 @@
         document.getElementById('p_port').value = p.port;
         document.getElementById('p_driver').value = p.driver_type;
         document.getElementById('p_active').checked = p.is_active;
-        document.getElementById('printer_form_title').innerText = "Изменить принтер #" + p.id;
     }
 
     function clearPrinterForm() {
-        document.getElementById('p_id').value = "";
-        document.getElementById('p_name').value = "";
-        document.getElementById('p_ip').value = "";
-        document.getElementById('p_port').value = "9100";
-        document.getElementById('p_active').checked = true;
-        document.getElementById('printer_form_title').innerText = "Добавить/Изменить принтер";
+        document.getElementById('p_id').value = '';
+        document.getElementById('p_name').value = '';
+        document.getElementById('p_ip').value = '';
+        document.getElementById('p_port').value = '9100';
     }
 
     async function saveLine() {
-        const id = document.getElementById('l_id').value;
-        const payload = {
-            id: id ? parseInt(id) : 0,
-            name: document.getElementById('l_name').value,
-            description: document.getElementById('l_desc').value,
-            is_active: true
-        };
-
-        if (!payload.name) { alert("Имя линии обязательно"); return; }
-
-        const res = await fetch('/api/lines', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        });
-        if (res.ok) {
-            alert("Линия сохранена");
-            clearLineForm();
-            loadSettingsData();
-        }
-    }
-
-    function editLine(l) {
-        document.getElementById('l_id').value = l.id;
-        document.getElementById('l_name').value = l.name;
-        document.getElementById('l_desc').value = l.description;
-        document.getElementById('line_form_title').innerText = "Изменить линию #" + l.id;
-    }
-
-    function clearLineForm() {
-        document.getElementById('l_id').value = "";
-        document.getElementById('l_name').value = "";
-        document.getElementById('l_desc').value = "";
-        document.getElementById('line_form_title').innerText = "Создать/Изменить линию";
+        try {
+            const res = await fetch('/api/lines', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: document.getElementById('l_name').value,
+                    description: document.getElementById('l_desc').value,
+                    is_active: true
+                })
+            });
+            if (res.ok) {
+                alert('Линия создана');
+                loadSettingsData();
+            }
+        } catch (e) {}
     }
 
     async function assignPrinter() {
-        const payload = {
-            line_id: parseInt(document.getElementById('assign_line').value),
-            printer_id: parseInt(document.getElementById('assign_printer').value),
-            role: document.getElementById('assign_role').value
-        };
-
-        const res = await fetch('/api/assignments', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        });
-        if (res.ok) {
-            alert("Привязка создана");
-            loadSettingsData();
-        }
-    }
-
-    async function deleteAssignment(lineId, printerId) {
-        // API assignments doesn't have DELETE, but POST with different role or just overwriting is usually how it's handled.
-        // However, there's no explicit delete endpoint in main.go for assignments.
-        // I'll skip implementation for now or just warn.
-        alert("Удаление привязки не реализовано в текущем API (можно перепривязать к другой линии)");
-    }
-
-    // --- ШАБЛОНЫ (ВКЛАДКА TEMPLATESTAB) ---
-    async function updateTemplateTargets() {
-        const res = await fetch('/api/printers');
-        const data = await res.json();
-        const select = document.getElementById('template_printer_select');
-        const activePrinters = (data.all_printers || []).filter(p => p.is_active);
-        if (select) {
-            select.innerHTML = activePrinters.map(p => `<option value="${p.id}">[ID: ${p.id}] ${p.name} (${p.ip})</option>`).join('');
-        }
-    }
-
-    async function fetchPrinterTemplates() {
-        const printerId = document.getElementById('template_printer_select').value;
-        const listContainer = document.getElementById('templates_list');
-        listContainer.innerHTML = '<li>⏳ Опрашиваю память...</li>';
         try {
-            const res = await fetch(`/api/templates?printer_id=${printerId}`);
-            if (!res.ok) {
-                listContainer.innerHTML = '<li style="color:var(--danger)">Ошибка опроса принтера. Убедитесь, что он в сети.</li>';
-                return;
-            }
-            const templates = await res.json();
-            listContainer.innerHTML = templates.map(t => {
-                const safeId = t.replace(/\W/g, '');
-                return `
-                <li style="background: #2a2a2a; margin-bottom: 10px; padding: 10px; border-radius: 4px; border-left: 3px solid var(--primary);">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <span style="font-family: monospace;">📄 ${t}</span>
-                        <div>
-                            <button class="btn btn-sm" style="background: var(--warning); color: black;" onclick="loadTemplateFields(${printerId}, '${t}', 'fields_${safeId}')">👁 Поля</button>
-                            <button class="btn btn-sm" onclick="copyTemplateName('${t}')">📋</button>
-                        </div>
-                    </div>
-                    <div id="fields_${safeId}" style="display: none; margin-top: 10px; padding: 10px; background: #1e1e1e; border-radius: 4px;"></div>
-                </li>`;
-            }).join('');
-        } catch (e) { listContainer.innerHTML = 'Ошибка сети'; }
-    }
-
-    async function loadTemplateFields(printerId, templateName, containerId) {
-        const container = document.getElementById(containerId);
-        if (container.style.display === 'block') { container.style.display = 'none'; return; }
-        container.style.display = 'block';
-        container.innerHTML = '<i>Загрузка полей (GJF)...</i>';
-
-        try {
-            const res = await fetch(`/api/template/fields?printer_id=${printerId}&template=${encodeURIComponent(templateName)}`);
-            const fields = await res.json();
-
-            let html = `<table style="width:100%; font-size:0.8rem; border-spacing: 2px;">
-            <tr style="color:var(--text-muted); text-align:center;">
-                <th align="left">Поле</th>
-                <th>Статик</th>
-                <th>ЧЗ</th>
-                <th>Нет</th>
-            </tr>`;
-
-            fields.forEach((f, idx) => {
-                const isDM = f.toLowerCase().includes('dm') || f.toLowerCase().includes('mark');
-                html += `<tr>
-                <td><code>${f}</code></td>
-                <td align="center"><input type="radio" name="role_${containerId}_${idx}" value="static" ${!isDM ? 'checked' : ''} data-field="${f}"></td>
-                <td align="center"><input type="radio" name="role_${containerId}_${idx}" value="dynamic" ${isDM ? 'checked' : ''} data-field="${f}"></td>
-                <td align="center"><input type="radio" name="role_${containerId}_${idx}" value="none" data-field="${f}"></td>
-            </tr>`;
+            const res = await fetch('/api/assignments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    line_id: parseInt(document.getElementById('assign_line').value),
+                    printer_id: parseInt(document.getElementById('assign_printer').value),
+                    role: document.getElementById('assign_role').value
+                })
             });
-
-            html += `</table>
-        <button class="btn" style="background:var(--success); width:100%; margin-top:10px;" onclick="applyTemplateToControl('${templateName}', '${containerId}')">
-            ИСПОЛЬЗОВАТЬ В УПРАВЛЕНИИ
-        </button>`;
-            container.innerHTML = html;
-        } catch (e) { container.innerHTML = 'Ошибка GJF'; }
+            if (res.ok) {
+                alert('Привязка выполнена');
+                loadSettingsData();
+            }
+        } catch (e) {}
     }
 
-    function applyTemplateToControl(templateName, containerId) {
-        const rows = document.querySelectorAll(`input[name^="role_${containerId}"]:checked`);
-        let dynamicField = "";
-        let staticFields = [];
-
-        rows.forEach(r => {
-            if (r.value === 'dynamic') dynamicField = r.getAttribute('data-field');
-            if (r.value === 'static') staticFields.push(r.getAttribute('data-field'));
-        });
-
-        document.getElementById('batch_template').value = templateName;
-        document.getElementById('batch_fieldname').value = dynamicField;
-
-        // Строим форму во вкладке Control
-        const container = document.getElementById('batch_static_fields_container');
-        container.innerHTML = '<h4>Статические данные:</h4>';
-
-        staticFields.forEach(f => {
-            container.insertAdjacentHTML('beforeend', `
-            <div class="static-var-row" style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
-                <label style="flex:1; font-size:0.8rem; color:var(--success);">${f}:</label>
-                <input type="text" class="static-val" data-key="${f}" placeholder="Значение..." style="flex:2; padding:5px;">
-            </div>`);
-        });
-
-        switchTab('control');
-        document.getElementById('batch_template').scrollIntoView({behavior: "smooth"});
-    }
-
-    function copyTemplateName(name) { navigator.clipboard.writeText(name).then(() => { alert("Скопировано"); }); }
-
-    setInterval(fetchPrintersStatus, 2000);
+    setInterval(fetchPrintersStatus, 5000);
     fetchPrintersStatus();
 </script>
 </body>
