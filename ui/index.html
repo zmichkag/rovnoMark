@@ -147,7 +147,6 @@
 </div>
 
 <script>
-    // Глобальное хранилище данных о принтерах, чтобы безопасно вызывать их при редактировании
     window.printersMap = {};
 
     function switchTab(tabId) {
@@ -226,7 +225,7 @@
         try {
             const res = await fetch(`/api/task/stop?id=${id}&line_id=${lineId}`);
             if (res.ok) fetchActiveTasks();
-            else alert('Ошибка при остановке задачи');
+            else alert('Ошибка при остановке задачи:\n' + await res.text());
         } catch (e) {
             alert('Ошибка связи: ' + e.message);
         }
@@ -257,7 +256,6 @@
         grid.innerHTML = '';
         const assignedIds = new Set();
 
-        // 1. Рендерим принтеры, привязанные к линиям
         (data.lines || []).forEach(l => {
             if (!l.printers || l.printers.length === 0) return;
             grid.innerHTML += `<div style="grid-column:1/-1; margin-top:10px; border-bottom:1px solid #333; padding-bottom:5px;"><h2>Линия: ${l.name}</h2></div>`;
@@ -267,7 +265,6 @@
             });
         });
 
-        // 2. Рендерим свободные (непривязанные) принтеры, чтобы их можно было отслеживать до привязки
         const unassigned = (data.all_printers || []).filter(p => !assignedIds.has(p.id));
         if (unassigned.length > 0) {
             grid.innerHTML += `<div style="grid-column:1/-1; margin-top:10px; border-bottom:1px solid #333; padding-bottom:5px;"><h2 style="color:var(--warning);">Без линии (Свободные)</h2></div>`;
@@ -322,8 +319,7 @@
                 alert('Задание отправлено на принтеры линии');
                 switchTab('monitoring');
             } else {
-                const err = await res.json();
-                alert('Ошибка: ' + (err.error || res.statusText));
+                alert('Ошибка сервера:\n' + await res.text());
             }
         } catch (e) {
             alert('Ошибка связи: ' + e.message);
@@ -354,20 +350,13 @@
                 })
             });
 
-            if (!createRes.ok) {
-                const err = await createRes.json();
-                throw new Error(err.error || 'Ошибка создания задачи');
-            }
-
+            if (!createRes.ok) throw new Error(await createRes.text());
             const { task_id } = await createRes.json();
 
             const appendRes = await fetch('/api/task/append', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    task_id: task_id,
-                    codes: codes
-                })
+                body: JSON.stringify({ task_id: task_id, codes: codes })
             });
 
             if (appendRes.ok) {
@@ -375,10 +364,10 @@
                 document.getElementById('batch_codes').value = '';
                 switchTab('monitoring');
             } else {
-                alert('Ошибка при загрузке кодов в задачу #' + task_id);
+                alert('Ошибка при загрузке кодов:\n' + await appendRes.text());
             }
         } catch (e) {
-            alert('Ошибка: ' + e.message);
+            alert('Сбой создания задачи:\n' + e.message);
         }
     }
 
@@ -402,7 +391,7 @@
                     ${t} <button class="btn" onclick="loadTemplateFields('${t}')">Выбрать</button>
                 </li>`).join('');
         } catch (e) {
-            alert('Ошибка: ' + e.message);
+            alert('Ошибка сервера:\n' + e.message);
         }
     }
 
@@ -414,7 +403,7 @@
             const fields = await res.json() || [];
 
             document.getElementById('batch_template').value = t;
-            document.getElementById('batch_fieldname').value = ""; // Сброс
+            document.getElementById('batch_fieldname').value = "";
 
             const cont = document.getElementById('batch_static_fields_container');
             cont.innerHTML = '<h4>Статические поля</h4>';
@@ -434,23 +423,24 @@
 
             switchTab('control');
         } catch (e) {
-            alert('Ошибка загрузки полей: ' + e.message);
+            alert('Ошибка загрузки полей:\n' + e.message);
         }
     }
 
-    // ИСПРАВЛЕНИЕ: Безопасная загрузка таблиц с обработкой пустых ответов
+    // ТЕПЕРЬ ОШИБКИ БУДУТ ВИДНЫ!
     async function loadSettingsData() {
         try {
             const lRes = await fetch('/api/lines');
+            if (!lRes.ok) throw new Error(`Сбой на бэкенде (/api/lines), код ${lRes.status}:\n${await lRes.text()}`);
             const lines = await lRes.json() || [];
             document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
             document.getElementById('lines-list-table').innerHTML = lines.map(l => `<tr><td>${l.id}</td><td>${l.name}</td><td>${l.description || '-'}</td></tr>`).join('');
 
             const pRes = await fetch('/api/printers');
+            if (!pRes.ok) throw new Error(`Сбой на бэкенде (/api/printers), код ${pRes.status}:\n${await pRes.text()}`);
             const pData = await pRes.json() || {};
             const printers = pData.all_printers || [];
 
-            // Сохраняем в глобальный объект для безопасной передачи в editPrinter
             window.printersMap = {};
             printers.forEach(p => window.printersMap[p.id] = p);
 
@@ -458,10 +448,12 @@
             document.getElementById('printers-list-table').innerHTML = printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td></tr>`).join('');
 
             const aRes = await fetch('/api/assignments');
+            if (!aRes.ok) throw new Error(`Сбой на бэкенде (/api/assignments), код ${aRes.status}:\n${await aRes.text()}`);
             const as = await aRes.json() || [];
             document.getElementById('assignments-table').innerHTML = as.map(a => `<tr><td>${a.line_name}</td><td>${a.printer_name}</td><td>${a.role}</td></tr>`).join('');
         } catch (e) {
-            console.error("Ошибка загрузки данных настроек:", e);
+            console.error("Критический сбой:", e);
+            alert("⚠️ ИНТЕРФЕЙС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ СЕРВЕРА ⚠️\n\n" + e.message + "\n\nСкорее всего, бинарный файл не перекомпилировался после обновления (проверьте последствия git stash) или в базе нет нужной таблицы.");
         }
     }
 
@@ -482,18 +474,17 @@
                 body: JSON.stringify(body)
             });
             if (res.ok) {
-                alert('Принтер сохранен');
+                alert('Принтер успешно сохранен!');
                 clearPrinterForm();
                 loadSettingsData();
             } else {
-                alert('Ошибка сохранения');
+                alert('СЕРВЕР ОТКЛОНИЛ СОХРАНЕНИЕ:\n' + await res.text());
             }
         } catch (e) {
-            alert('Ошибка связи: ' + e.message);
+            alert('Сбой сети: ' + e.message);
         }
     }
 
-    // ИСПРАВЛЕНИЕ: Вызов по ID вместо сложной передачи JSON-объекта в HTML-строку
     function editPrinter(id) {
         const p = window.printersMap[id];
         if (!p) return;
@@ -526,13 +517,15 @@
                 })
             });
             if (res.ok) {
-                alert('Линия создана');
+                alert('Линия успешно создана!');
                 document.getElementById('l_name').value = '';
                 document.getElementById('l_desc').value = '';
                 loadSettingsData();
+            } else {
+                alert('СЕРВЕР ОТКЛОНИЛ СОЗДАНИЕ ЛИНИИ:\n' + await res.text());
             }
         } catch (e) {
-            console.error(e);
+            alert('Сбой сети: ' + e.message);
         }
     }
 
@@ -548,11 +541,13 @@
                 })
             });
             if (res.ok) {
-                alert('Привязка выполнена');
+                alert('Привязка выполнена успешно!');
                 loadSettingsData();
+            } else {
+                alert('ОШИБКА ПРИВЯЗКИ:\n' + await res.text());
             }
         } catch (e) {
-            console.error(e);
+            alert('Сбой сети: ' + e.message);
         }
     }
 
