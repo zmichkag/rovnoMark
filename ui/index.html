@@ -279,21 +279,28 @@
     function createPrinterCard(p) {
         const status = p.status || 'НЕИЗВЕСТНО';
         const cls = status.includes('ОФФЛАЙН') ? 'offline' : 'online';
+
+        // Добавляем проверку IP для формирования ссылки
+        const webLink = p.ip ? `http://${p.ip}` : '#';
+
         return `
-            <div class="card ${cls}">
-                <div class="card-header">
-                    <h3 class="card-title">${p.name}</h3>
-                    <span class="status-badge">${status}</span>
-                </div>
-                <div style="font-size: 0.85rem;">
-                    <div>IP/Порт: <b>${p.ip}:${p.port}</b></div>
-                    <div>Драйвер: <b>${p.driver_type || '-'}</b></div>
-                    <div>Ribbon: <b>${p.ribbon || '-'}</b></div>
-                    <div>Queue: <b>${p.queue || '0'}</b></div>
-                    <div>Template: <b>${p.cur_template || '-'}</b></div>
-                    <div>Напечатано: <b>${p.cur_count || '0'}</b></div>
-                </div>
-            </div>`;
+        <div class="card ${cls}">
+            <div class="card-header">
+                <h3 class="card-title">${p.name}</h3>
+                <span class="status-badge">${status}</span>
+            </div>
+            <div style="font-size: 0.85rem;">
+                <div>IP/Порт: <b>${p.ip}:${p.port}</b></div>
+                <div>Драйвер: <b>${p.driver_type || '-'}</b></div>
+                <div>Ribbon: <b>${p.ribbon || '-'}</b></div>
+                <div>Queue: <b>${p.queue || '0'}</b></div>
+                <div>Template: <b>${p.cur_template || '-'}</b></div>
+                <div>Напечатано: <b>${p.cur_count || '0'}</b></div>
+            </div>
+            <a href="${webLink}" target="_blank" class="btn" style="text-align: center; text-decoration: none; margin-top: 5px; background: #2a2a2a; border-color: #555;">
+                ВЕБ-ИНТЕРФЕЙС
+            </a>
+        </div>`;
     }
 
     function renderPrintersGrid(data) {
