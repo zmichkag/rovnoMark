@@ -17,19 +17,19 @@ services:
       - rovno-analytics-net
 
   # Тестовый сборщик метрик Prometheus
-  prometheus-test:
+  prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus-test
-    ports:
-      - "9090:9090" # Сюда подключится ваша общая Grafana
+    container_name: prometheus
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
-    restart: unless-stopped
-    networks:
-      - rovno-analytics-net
+      - '--storage.tsdb.path=/prometheus'
 
 networks:
   rovno-analytics-net:
     driver: bridge
+
+volumes:
+  prometheus-data:
