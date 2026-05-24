@@ -53,34 +53,35 @@ func (d *Driver) sendBlock(body string) (string, error) {
 		d.conn = conn
 	}
 
+	// Задаем честный таймаут на ожидание нашего ответа
 	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
-
-	// Формируем пакет: [SOH] + Тело данных + [ETB]
-	packet := append([]byte{SOH}, []byte(body)...)
-	packet = append(packet, ETB)
-
-	slog.Debug("CARL VALENTIN IO Out", "ip", d.Address, "bytes_len", len(packet))
-
-	_, err := d.conn.Write(packet)
-	if err != nil {
-		d.conn.Close()
-		d.conn = nil
-		return "", err
-	}
-
-	// Читаем ответ от принтера. Валентин обычно возвращает статус подтверждения (ACK/NAK блока или текстовую строку)
 	reader := bufio.NewReader(d.conn)
-	respBytes, err := reader.ReadBytes(ETB)
-	if err != nil {
-		d.conn.Close()
-		d.conn = nil
-		return "", err
+
+	var cleanResp string
+
+	// Запускаем цикл ожидания: крутимся, пока не поймаем НАШ ответ
+	for {
+		respBytes, err := reader.ReadBytes(ETB)
+		if err != nil {
+			d.conn.Close()
+			d.conn = nil
+			return "", err
+		}
+
+		// Очищаем от служебных байт обрамления Валентина
+		cleanResp = strings.Trim(string(respBytes), string([]byte{SOH, ETB, CR, LF}))
+
+		// ЕСЛИ ЭТО ПЛЕВОК ПРИНТЕРА (начинается с TD) — игнорируем и читаем сокет дальше!
+		if strings.HasPrefix(cleanResp, "TD") {
+			slog.Warn("CARL VALENTIN Спонтанный плевок из порта успешно проигнорирован", "ip", d.Address, "raw", cleanResp)
+			continue
+		}
+
+		// Если пришло что-то другое (наш ответ на 'S', 'FBBC' или ACK) — выходим из цикла
+		break
 	}
 
-	// Очищаем от служебных байт обрамления для логирования
-	cleanResp := strings.Trim(string(respBytes), string([]byte{SOH, ETB, CR, LF}))
-	slog.Debug("CARL VALENTIN IO In", "ip", d.Address, "resp", cleanResp)
-
+	slog.Debug("CARL VALENTIN IO In (ЧЕСТНЫЙ ОТВЕТ)", "ip", d.Address, "resp", cleanResp)
 	return cleanResp, nil
 }
 
@@ -113,7 +114,6 @@ func (d *Driver) sendRealTimeCommand(cmd byte) (string, error) {
 	return strings.Trim(string(respBytes), string([]byte{SOH, ETB, CR, LF})), nil
 }
 
-// GetStatus запрашивает статус устройства командами реального времени
 // GetStatus запрашивает статус устройства и разбирает битовую маску
 func (d *Driver) GetStatus() (string, error) {
 	// Отправляем правильный фрейм [SOH] S [ETB]
