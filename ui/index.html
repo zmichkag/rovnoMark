@@ -24,12 +24,12 @@
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* НОВАЯ СТРУКТУРА: Вертикальные колонки линий с горизонтальным скроллом */
+        /* ИСПРАВЛЕНИЕ: Многорядная сетка вместо горизонтального скролла */
         .columns-wrapper {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
             gap: 20px;
             align-items: flex-start;
-            overflow-x: auto;
             padding-bottom: 20px;
         }
         .line-column {
@@ -37,8 +37,6 @@
             border: 1px solid #2d2d2d;
             border-radius: 8px;
             padding: 15px;
-            width: 320px;
-            min-width: 320px;
             display: flex;
             flex-direction: column;
             gap: 15px;
@@ -155,24 +153,28 @@
         </div>
         <div style="flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 20px;">
             <div style="background: var(--surface); padding: 20px; border-radius: 8px;">
-                <h3>Создать линию</h3>
+                <h3 id="line_form_title">Создать линию</h3>
+                <input type="hidden" id="l_id" value="">
                 <div class="field"><input type="text" id="l_name" placeholder="Имя"></div>
                 <div class="field"><input type="text" id="l_desc" placeholder="Описание"></div>
-                <button class="btn" style="background: var(--primary); width: 100%;" onclick="saveLine()">СОЗДАТЬ</button>
+                <button class="btn" id="l_submit_btn" style="background: var(--primary); width: 100%;" onclick="saveLine()">СОЗДАТЬ</button>
+                <button class="btn" id="l_clear_btn" style="width: 100%; margin-top: 5px; display: none;" onclick="clearLineForm()">ОТМЕНИТЬ РЕДАКТИРОВАНИЕ</button>
             </div>
             <div style="background: var(--surface); padding: 20px; border-radius: 8px;">
-                <h3>Привязать к линии</h3>
+                <h3 id="assign_form_title">Привязать к линии</h3>
+                <input type="hidden" id="assign_is_edit" value="0">
                 <div class="field"><select id="assign_line"></select></div>
                 <div class="field"><select id="assign_printer"></select></div>
                 <div class="field"><select id="assign_role"><option value="PRIMARY">Основной</option><option value="SECONDARY">Дублирующий</option></select></div>
-                <button class="btn" style="background: var(--warning); color: black; width: 100%;" onclick="assignPrinter()">ПРИВЯЗАТЬ</button>
+                <button class="btn" id="assign_submit_btn" style="background: var(--warning); color: black; width: 100%;" onclick="assignPrinter()">ПРИВЯЗАТЬ</button>
+                <button class="btn" id="assign_clear_btn" style="width: 100%; margin-top: 5px; display: none;" onclick="clearAssignForm()">ОТМЕНИТЬ РЕДАКТИРОВАНИЕ</button>
             </div>
         </div>
     </div>
     <h4 style="margin-top:30px;">Привязки</h4>
-    <table><thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th></tr></thead><tbody id="assignments-table"></tbody></table>
+    <table><thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th><th>Действие</th></tr></thead><tbody id="assignments-table"></tbody></table>
     <h4>Линии</h4>
-    <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th></tr></thead><tbody id="lines-list-table"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th><th>Действие</th></tr></thead><tbody id="lines-list-table"></tbody></table>
     <h4>Принтеры</h4>
     <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
 </div>
@@ -189,6 +191,8 @@
 
 <script>
     window.printersMap = {};
+    window.linesMap = {};
+    window.assignmentsList = [];
 
     function switchTab(tabId) {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -292,13 +296,11 @@
             </div>`;
     }
 
-    /* ИСПРАВЛЕНИЕ: Пересборка генерации интерфейса под Вертикальные Колонки */
     function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
         const assignedIds = new Set();
 
-        // 1. Рендерим каждую линию как самостоятельную колонку
         (data.lines || []).forEach(l => {
             if (!l.printers || l.printers.length === 0) return;
 
@@ -317,7 +319,6 @@
                 </div>`;
         });
 
-        // 2. Свободные принтеры выносим в отдельную финальную колонку справа
         const unassigned = (data.all_printers || []).filter(p => !assignedIds.has(p.id));
         if (unassigned.length > 0) {
             let unassignedHtml = '';
@@ -493,8 +494,18 @@
             const lRes = await fetch('/api/lines');
             if (!lRes.ok) throw new Error(`Сбой на бэкенде (/api/lines), код ${lRes.status}:\n${await lRes.text()}`);
             const lines = await lRes.json() || [];
+
+            window.linesMap = {};
+            lines.forEach(l => window.linesMap[l.id] = l);
+
             document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
-            document.getElementById('lines-list-table').innerHTML = lines.map(l => `<tr><td>${l.id}</td><td>${l.name}</td><td>${l.description || '-'}</td></tr>`).join('');
+            document.getElementById('lines-list-table').innerHTML = lines.map(l => `
+                <tr>
+                    <td>${l.id}</td>
+                    <td>${l.name}</td>
+                    <td>${l.description || '-'}</td>
+                    <td><button class="btn" onclick="editLine(${l.id})">Редактировать</button></td>
+                </tr>`).join('');
 
             const pRes = await fetch('/api/printers');
             if (!pRes.ok) throw new Error(`Сбой на бэкенде (/api/printers), код ${pRes.status}:\n${await pRes.text()}`);
@@ -510,7 +521,15 @@
             const aRes = await fetch('/api/assignments');
             if (!aRes.ok) throw new Error(`Сбой на бэкенде (/api/assignments), код ${aRes.status}:\n${await aRes.text()}`);
             const as = await aRes.json() || [];
-            document.getElementById('assignments-table').innerHTML = as.map(a => `<tr><td>${a.line_name}</td><td>${a.printer_name}</td><td>${a.role}</td></tr>`).join('');
+            window.assignmentsList = as;
+
+            document.getElementById('assignments-table').innerHTML = as.map((a, idx) => `
+                <tr>
+                    <td>${a.line_name}</td>
+                    <td>${a.printer_name}</td>
+                    <td>${a.role}</td>
+                    <td><button class="btn" onclick="editAssignment(${idx})">Редактировать</button></td>
+                </tr>`).join('');
         } catch (e) {
             console.error("Критический сбой:", e);
             alert("⚠️ ИНТЕРФЕЙС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ СЕРВЕРА ⚠️\n\n" + e.message);
@@ -565,34 +584,109 @@
         document.getElementById('p_port').value = '9100';
     }
 
+    /* НОВЫЙ ФУНКЦИОНАЛ: Управление формой линий */
+    function editLine(id) {
+        const l = window.linesMap[id];
+        if (!l) return;
+
+        document.getElementById('l_id').value = l.id;
+        document.getElementById('l_name').value = l.name;
+        document.getElementById('l_desc').value = l.description || '';
+
+        document.getElementById('line_form_title').innerText = 'Редактировать линию';
+        document.getElementById('l_submit_btn').innerText = 'СОХРАНИТЬ ИЗМЕНЕНИЯ';
+        document.getElementById('l_submit_btn').style.background = 'var(--success)';
+        document.getElementById('l_clear_btn').style.display = 'block';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function clearLineForm() {
+        document.getElementById('l_id').value = '';
+        document.getElementById('l_name').value = '';
+        document.getElementById('l_desc').value = '';
+
+        document.getElementById('line_form_title').innerText = 'Создать линию';
+        document.getElementById('l_submit_btn').innerText = 'СОЗДАТЬ';
+        document.getElementById('l_submit_btn').style.background = 'var(--primary)';
+        document.getElementById('l_clear_btn').style.display = 'none';
+    }
+
     async function saveLine() {
+        const lineIdStr = document.getElementById('l_id').value;
+        const isEdit = lineIdStr !== '';
+
+        const body = {
+            name: document.getElementById('l_name').value,
+            description: document.getElementById('l_desc').value,
+            is_active: true
+        };
+
+        if (isEdit) {
+            body.id = parseInt(lineIdStr);
+        }
+
         try {
+            // Если бэкенд использует POST /api/lines и для создания, и для обновления (определяя по ID), логика верна.
+            // Если для редактирования нужен PUT, измените метод на: isEdit ? 'PUT' : 'POST'
             const res = await fetch('/api/lines', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: document.getElementById('l_name').value,
-                    description: document.getElementById('l_desc').value,
-                    is_active: true
-                })
+                body: JSON.stringify(body)
             });
             if (res.ok) {
-                alert('Линия успешно создана!');
-                document.getElementById('l_name').value = '';
-                document.getElementById('l_desc').value = '';
+                alert(isEdit ? 'Линия успешно обновлена!' : 'Линия успешно создана!');
+                clearLineForm();
                 loadSettingsData();
             } else {
-                alert('СЕРВЕР ОТКЛОНИЛ СОЗДАНИЕ ЛИНИИ:\n' + await res.text());
+                alert('СЕРВЕР ОТКЛОНИЛ ЗАПРОС:\n' + await res.text());
             }
         } catch (e) {
             alert('Сбой сети: ' + e.message);
         }
     }
 
+    /* НОВЫЙ ФУНКЦИОНАЛ: Управление формой привязок */
+    function editAssignment(index) {
+        const a = window.assignmentsList[index];
+        if (!a) return;
+
+        // Поиск ID по именам в кэшированных данных интерфейса
+        let lineId = '';
+        for (let id in window.linesMap) {
+            if (window.linesMap[id].name === a.line_name) { lineId = id; break; }
+        }
+        let printerId = '';
+        for (let id in window.printersMap) {
+            if (window.printersMap[id].name === a.printer_name) { printerId = id; break; }
+        }
+
+        if (lineId) document.getElementById('assign_line').value = lineId;
+        if (printerId) document.getElementById('assign_printer').value = printerId;
+        document.getElementById('assign_role').value = a.role;
+        document.getElementById('assign_is_edit').value = "1";
+
+        document.getElementById('assign_form_title').innerText = 'Изменить привязку';
+        document.getElementById('assign_submit_btn').innerText = 'ОБНОВИТЬ ПРИВЯЗКУ';
+        document.getElementById('assign_submit_btn').style.background = 'var(--success)';
+        document.getElementById('assign_submit_btn').style.color = 'white';
+        document.getElementById('assign_clear_btn').style.display = 'block';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function clearAssignForm() {
+        document.getElementById('assign_is_edit').value = "0";
+        document.getElementById('assign_form_title').innerText = 'Привязать к линии';
+        document.getElementById('assign_submit_btn').innerText = 'ПРИВЯЗАТЬ';
+        document.getElementById('assign_submit_btn').style.background = 'var(--warning)';
+        document.getElementById('assign_submit_btn').style.color = 'black';
+        document.getElementById('assign_clear_btn').style.display = 'none';
+    }
+
     async function assignPrinter() {
+        const isEdit = document.getElementById('assign_is_edit').value === "1";
         try {
             const res = await fetch('/api/assignments', {
-                method: 'POST',
+                method: 'POST', // Стандартный метод привязки в RovnoMark перетирает или обновляет связи в SQLite
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     line_id: parseInt(document.getElementById('assign_line').value),
@@ -601,7 +695,8 @@
                 })
             });
             if (res.ok) {
-                alert('Привязка выполнена успешно!');
+                alert(isEdit ? 'Привязка успешно изменена!' : 'Привязка выполнена успешно!');
+                clearAssignForm();
                 loadSettingsData();
             } else {
                 alert('ОШИБКА ПРИВЯЗКИ:\n' + await res.text());
