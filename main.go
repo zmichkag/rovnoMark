@@ -599,22 +599,58 @@ func main() {
 	// Получение списка активных задач
 	http.HandleFunc("/api/task/active", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			sendJSONError(w, http.StatusMethodNotAllowed, "Only GET")
+			sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только метод GET")
 			return
 		}
 
 		// Читаем параметры из запроса
 		query := r.URL.Query()
-		lineID, _ := strconv.Atoi(query.Get("line_id"))
-		printerID, _ := strconv.Atoi(query.Get("printer_id"))
+		lineIDStr := query.Get("line_id")
+		printerIDStr := query.Get("printer_id")
 
-		// Передаем фильтры в метод БД
+		// 1. ПРОВЕРКА НА ЧУШЬ (ВАЛИДАЦИЯ ПАРАМЕТРОВ)
+		// Если параметр передан, но это не число (например, line_id=abc) — возвращаем 400 Bad Request
+		var lineID, printerID int
+		var err error
+
+		if lineIDStr != "" {
+			lineID, err = strconv.Atoi(lineIDStr)
+			if err != nil || lineID < 0 {
+				sendJSONError(w, http.StatusBadRequest, "Неверный формат параметра line_id. Ожидается целое положительное число.")
+				return
+			}
+		}
+
+		if printerIDStr != "" {
+			printerID, err = strconv.Atoi(printerIDStr)
+			if err != nil || printerID < 0 {
+				sendJSONError(w, http.StatusBadRequest, "Неверный формат параметра printer_id. Ожидается целое положительное число.")
+				return
+			}
+		}
+
+		// Передаем проверенные фильтры в метод БД
 		tasks, err := store.GetActiveTasks(lineID, printerID)
 		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, err.Error())
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка при обращении к БД: "+err.Error())
 			return
 		}
 
+		// 2. ПРОВЕРКА НА ОТСУТСТВИЕ АКТИВНЫХ ЗАДАЧ
+		// Если задач нет, возвращаем статус 200 OK (так как сам запрос корректный),
+		// но добавляем в JSON понятный статус и пустой массив, чтобы 1С не падала при парсинге.
+		if len(tasks) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "no_active_tasks",
+				"message": "Активные или готовые к запуску задачи не найдены",
+				"tasks":   []interface{}{}, // Возвращаем пустой массив
+			})
+			return
+		}
+
+		// Если задачи найдены — отдаем их как обычно
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(tasks)
 	})
