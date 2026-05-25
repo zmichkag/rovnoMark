@@ -404,39 +404,58 @@ func main() {
 	})
 
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
+			return
+		}
+
+		// 1. Читаем task_id из Query-параметров URL, как просит Ваге
+		taskIDStr := r.URL.Query().Get("task_id")
+		taskID, err := strconv.Atoi(taskIDStr)
+		if err != nil || taskID <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "Missing or invalid task_id parameter in URL")
+			return
+		}
+
 		var req struct {
-			TaskID int      `json:"task_id"`
-			Codes  []string `json:"codes"`
+			Codes []string `json:"codes"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			slog.Warn("Append: ошибка JSON", "err", err)
-			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
+			sendJSONError(w, http.StatusBadRequest, "Ошибка в теле JSON")
 			return
 		}
 
-		// Просто складываем коды в базу. Насос (StartPumping),
-		// запущенный при create, сам их заберет и распределит.
-		err := store.AppendTaskCodes(req.TaskID, req.Codes)
+		// Валидация: если 1С прислала пустой массив кодов
+		if len(req.Codes) == 0 {
+			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
+			return
+		}
+
+		// 3. Складываем коды в базу. Используем проверенную локальную переменную taskID
+		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
-			slog.Error("Append: Ошибка записи в БД", "task_id", req.TaskID, "err", err)
+			slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 			return
 		}
 
-		// 2. ПЫТАЕМСЯ АКТИВИРОВАТЬ ЗАДАЧУ И ЗАПУСТИТЬ НАСОС
-		// TryActivateTask вернет true только если статус был 'ready' и стал 'active'
-		activated, _ := store.TryActivateTask(req.TaskID)
+		// 4. ПЫТАЕМСЯ АКТИВИРОВАТЬ ЗАДАЧУ И ЗАПУСТИТЬ НАСОС
+		// TryActivateTask переведет задачу из 'ready' в 'active' при первой пачке
+		activated, _ := store.TryActivateTask(taskID)
 		if activated {
-			// Нам нужен ID линии, чтобы передать его насосу
-			lineID, err := store.GetLineIDByTask(req.TaskID)
+			// Нам нужен ID линии, чтобы передать его горутине-насосу
+			lineID, err := store.GetLineIDByTask(taskID)
 			if err == nil {
-				taskProcessor.StartPumping(lineID, req.TaskID)
-				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос запущен", "task_id", req.TaskID)
+				taskProcessor.StartPumping(lineID, taskID)
+				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос (Pumper) успешно запущен", "task_id", taskID, "line_id", lineID)
+			} else {
+				slog.Error("Append: Задача активирована, но line_id не найден в БД", "task_id", taskID, "err", err)
 			}
 		}
 
-		slog.Debug("Коды добавлены в задачу", "task_id", req.TaskID, "count", len(req.Codes))
+		slog.Debug("Коды успешно добавлены в задачу", "task_id", taskID, "count", len(req.Codes))
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
