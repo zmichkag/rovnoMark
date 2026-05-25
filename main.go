@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -449,62 +448,133 @@ func main() {
 
 	// Метод Graceful Stop: корректное завершение печати и сверка остатков
 	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
-		// 1. Получаем ID задачи из запроса
-		taskIDStr := r.URL.Query().Get("task_id")
-		taskID, err := strconv.Atoi(taskIDStr)
-		if err != nil {
-			http.Error(w, "Invalid Task ID", http.StatusBadRequest)
+		if r.Method != http.MethodPost && r.Method != http.MethodGet { // Рекомендуется POST, но оставляем поддержку GET
+			sendJSONError(w, http.StatusMethodNotAllowed, "Метод не поддерживается")
 			return
 		}
 
-		// 2. Нам нужно знать, на какой линии работала задача, чтобы найти принтеры
-		// (Для этого можно либо передать line_id в запросе, либо быстро дернуть из БД)
-		lineIDStr := r.URL.Query().Get("line_id")
-		lineID, _ := strconv.Atoi(lineIDStr)
+		// Получаем и проверяем ID задачи из запроса
+		taskIDStr := r.URL.Query().Get("task_id")
+		taskID, err := strconv.Atoi(taskIDStr)
+		if err != nil || taskID <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "Неверный или отсутствующий ID задачи (параметр 'id')")
+			return
+		}
 
-		log.Printf("[STOP] Инициирована остановка задачи ID:%d на линии %d", taskID, lineID)
+		// Автоматически вытягиваем ID линии из БД по ID задачи, чтобы избежать ошибок ручного ввода
+		lineID, err := store.GetLineIDByTask(taskID)
+		if err != nil {
+			slog.Error("[STOP] Задача не найдена в БД", "task_id", taskID, "err", err)
+			sendJSONError(w, http.StatusNotFound, fmt.Sprintf("Задача с ID %d не найдена", taskID))
+			return
+		}
 
-		// 3. Опрашиваем принтеры на линии для финальной сверки
-		printers, _ := store.GetPrintersByLine(lineID)
+		//  Узнаем текущий статус задачи из БД
+		currentStatus, err := store.GetTaskStatus(taskID)
+		if err != nil {
+			slog.Error("[STOP] Не удалось получить статус задачи", "task_id", taskID, "err", err)
+			sendJSONError(w, http.StatusNotFound, fmt.Sprintf("Задача с ID %d не найдена", taskID))
+			return
+		}
+
+		// Сверяем полученный статус. Если она уже остановлена — прерываем выполнение
+		if currentStatus == "stopped" {
+			slog.Warn("[STOP] Попытка остановить уже остановленную задачу", "task_id", taskID)
+			sendJSONError(w, http.StatusBadRequest, "Задача уже остановлена")
+			return
+		}
+
+		// Если задача, например, уже "completed" (завершена успешно), её тоже нет смысла останавливать:
+		if currentStatus == "completed" {
+			sendJSONError(w, http.StatusBadRequest, "Задача уже успешно завершена, остановка не требуется")
+			return
+		}
+
+		slog.Info("[STOP] Инициирована остановка задачи", "task_id", taskID, "line_id", lineID)
+
+		// Опрашиваем принтеры на линии для финальной сверки
+		printers, err := store.GetPrintersByLine(lineID)
+		if err != nil {
+			slog.Error("[STOP] Ошибка получения принтеров для линии", "line_id", lineID, "err", err)
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при поиске принтеров на линии")
+			return
+		}
+
+		if len(printers) == 0 {
+			slog.Warn("[STOP] На линии нет привязанных принтеров", "line_id", lineID)
+		}
+
 		report := make(map[string]interface{})
+		totalConfirmed := 0
+		printerErrors := make([]string, 0)
 
 		for _, pCfg := range printers {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
+				slog.Warn("[STOP] Принтер отсутствует в менеджере (оффлайн)", "printer_id", pCfg.ID, "name", pCfg.Name)
+				report[pCfg.Name] = map[string]interface{}{
+					"status": "offline_skipped",
+					"error":  "Принтер не подключен к менеджеру",
+				}
+				printerErrors = append(printerErrors, fmt.Sprintf("принтер %s оффлайн", pCfg.Name))
 				continue
 			}
 
-			// А) Получаем последний реально напечатанный индекс (Команда SGP в Zipher)
+			// А) Получаем последний реально напечатанный индекс
 			lastIdx, err := p.GetLastPrintedIndex()
 			if err != nil {
-				log.Printf("Ошибка получения индекса с принтера %d: %v", pCfg.ID, err)
+				slog.Error("[STOP] Ошибка получения индекса с устройства", "printer_id", pCfg.ID, "err", err)
+				report[pCfg.Name] = map[string]interface{}{
+					"status": "error",
+					"error":  err.Error(),
+				}
+				printerErrors = append(printerErrors, fmt.Sprintf("ошибка опроса %s: %v", pCfg.Name, err))
 				continue
 			}
 
-			// Б) Синхронизируем БД: всё, что принтер подтвердил, помечаем как 'printed'
-			// Всё, что было в буфере, но не напечатано, останется в статусе 'in_buffer' или вернется в 'pending'
-			affected, _ := store.MarkAsPrinted(taskID, lastIdx)
+			// Б) Синхронизируем БД
+			affected, err := store.MarkAsPrinted(taskID, lastIdx)
+			if err != nil {
+				slog.Error("[STOP] Ошибка обновления статусов кодов в БД", "task_id", taskID, "printer_id", pCfg.ID, "err", err)
+			}
+			totalConfirmed += int(affected)
 
-			// В) Очищаем физическую очередь принтера (Команда CQI), чтобы не допечатывать лишнее
+			// В) Очищаем физическую очередь принтера
 			p.ClearQueue()
 
 			report[pCfg.Name] = map[string]interface{}{
+				"status":             "cleared",
 				"last_printed_index": lastIdx,
 				"confirmed_codes":    affected,
-				"status":             "cleared",
 			}
 		}
 
 		// 4. Меняем статус задачи в БД на завершенную
-		store.SetTaskStatus(taskID, "stopped")
+		err = store.SetTaskStatus(taskID, "stopped")
+		if err != nil {
+			slog.Error("[STOP] Не удалось обновить статус задачи в БД", "task_id", taskID, "err", err)
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка при сохранении финального статуса задачи")
+			return
+		}
 
-		// 5. Отправляем отчет в 1С/MES
+		// 5. Формируем красивый и информативный ответ для 1С/MES
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"task_id": taskID,
-			"status":  "stopped",
-			"report":  report,
-		})
+		w.WriteHeader(http.StatusOK)
+
+		response := map[string]interface{}{
+			"task_id":         taskID,
+			"line_id":         lineID,
+			"status":          "stopped",
+			"timestamp":       time.Now().Format(time.RFC3339),
+			"total_confirmed": totalConfirmed,
+			"printers_report": report,
+		}
+
+		if len(printerErrors) > 0 {
+			response["warnings"] = printerErrors
+		}
+
+		json.NewEncoder(w).Encode(response)
 	})
 
 	// Получение списка активных задач
