@@ -450,7 +450,7 @@ func main() {
 	// Метод Graceful Stop: корректное завершение печати и сверка остатков
 	http.HandleFunc("/api/task/stop", func(w http.ResponseWriter, r *http.Request) {
 		// 1. Получаем ID задачи из запроса
-		taskIDStr := r.URL.Query().Get("id")
+		taskIDStr := r.URL.Query().Get("task_id")
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil {
 			http.Error(w, "Invalid Task ID", http.StatusBadRequest)
