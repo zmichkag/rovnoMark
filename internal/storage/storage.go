@@ -46,6 +46,13 @@ func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit
 	return err
 }
 
+// GetTemplateBody получает шаблон для принтераиз базы
+func (s *Store) GetTemplateBody(name string) (string, error) {
+	var body string
+	err := s.db.QueryRow("SELECT body FROM local_templates WHERE name = ?", name).Scan(&body)
+	return body, err
+}
+
 // GetPrintersByLine Показывает привязаные  принтеры
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	query := `
@@ -570,6 +577,13 @@ func createTables(db *sql.DB) {
         printed_at DATETIME,
         FOREIGN KEY(task_id) REFERENCES tasks(id)
     );`)
+
+	//
+	db.Exec(`CREATE TABLE IF NOT EXISTS local_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    body TEXT
+	);`)
 
 	// Таблица периодических снимков состояния
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (

@@ -1,12 +1,14 @@
 package tsc
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 )
 
@@ -124,25 +126,58 @@ func (d *Driver) GetStatus() (string, error) {
 	return "ГОТОВ", nil
 }
 
-// PrintTemplate выполняет отправку готового шаблона (дизайна) с замененными переменными
-func (d *Driver) PrintTemplate(templateName string, fields map[string]string) error {
-	var sb strings.Builder
-
-	// Очистка буфера принтера перед формированием этикетки
-	sb.WriteString("CLS\r\n")
-
-	// В TSPL динамический текст выводится через команду TEXT x,y,"font",rotation,x-multi,y-multi,"content"
-	// Для демонстрации генерируем простую структуру. В продакшене здесь может быть загрузка пред-скомпилированного .BAS макета
-	for name, value := range fields {
-		// Пример: вывод полей в виде строк. Координаты и параметры подставляются условно
-		sb.WriteString(fmt.Sprintf("TEXT 50,50,\"ROMAN.TTF\",0,1,1,\"%s: %s\"\r\n", name, value))
+// PrintTemplate принимает сырой BLOB макета (текст команд + бинарные BITMAP) и мапу данных
+func (d *Driver) PrintTemplate(templateBlob string, fields map[string]string) error {
+	// 1. Инициализируем шаблонизатор Go
+	t, err := template.New("tsc_label").Parse(templateBlob)
+	if err != nil {
+		slog.Error("TSC TSPL Parsing Error", "ip", d.Address, "err", err)
+		return fmt.Errorf("ошибка парсинга структуры TSPL-макета: %w", err)
 	}
 
-	// Команда печати: PRINT m[,n] -> PRINT 1,1 (Напечатать 1 копию)
-	sb.WriteString("PRINT 1,1\r\n")
+	// 2. Рендерим текстовые переменные в байтовый буфер (бинарная графика внутри string не пострадает)
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, fields); err != nil {
+		slog.Error("TSC TSPL Execution Error", "ip", d.Address, "err", err)
+		return fmt.Errorf("ошибка подстановки данных: %w", err)
+	}
 
-	_, err := d.sendRaw(sb.String(), false)
-	return err
+	finalPayload := buf.Bytes()
+
+	// 3. Добавляем перенос строки в самый конец, если его забыли в шаблоне
+	if !bytes.HasSuffix(finalPayload, []byte("\r\n")) {
+		finalPayload = append(finalPayload, []byte("\r\n")...)
+	}
+
+	// 4. Пишем массив напрямую в сетевое подключение
+	return d.sendRawBytes(finalPayload)
+}
+
+// Новая вспомогательная функция для безопасного пуша сырых байт (текст + графика)
+func (d *Driver) sendRawBytes(payload []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.conn == nil {
+		address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+		conn, err := net.DialTimeout("tcp", address, d.Timeout)
+		if err != nil {
+			slog.Error("TSC Connect Error", "ip", d.Address, "err", err)
+			return err
+		}
+		d.conn = conn
+	}
+
+	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
+
+	_, err := d.conn.Write(payload)
+	if err != nil {
+		slog.Error("TSC Socket Write Error", "ip", d.Address, "err", err)
+		d.closeConn()
+		return err
+	}
+
+	return nil
 }
 
 // SelectTemplate запоминает имя текущего макета в памяти драйвера
@@ -183,6 +218,42 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	}
 
 	return successCount, nil
+}
+
+// PrintBatchIndexed осуществляет поштучную загрузку кодов (для совместимости с Pumper)
+func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
+	// Для TSC пока просто пробрасываем в обычный PrintBatch, так как TSPL не поддерживает Job ID нативно
+	return d.PrintBatch(fieldName, codes)
+}
+
+func (d *Driver) GetLastPrintedIndex() (int, error) {
+	return 0, nil
+}
+
+func (d *Driver) GetTemplates() ([]string, error) {
+	return []string{"DEFAULT.BAS"}, nil
+}
+
+func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
+	return []string{"DataMatrix", "Text"}, nil
+}
+
+func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
+	return "N/A", nil
+}
+
+func (d *Driver) GetBufferFreeSpace() (int, error) {
+	// Принтеры TSC обычно имеют небольшой входной буфер, возвращаем безопасное значение
+	return 10, nil
+}
+
+func (d *Driver) UpdateStaticFields(fields map[string]string) error {
+	// TSPL требует перерисовки всей этикетки, поэтому статика обычно зашита в PrintTemplate
+	return nil
+}
+
+func (d *Driver) InitSession(fieldName string, maxQueue int) error {
+	return d.ClearQueue()
 }
 
 // Заглушки под методы интерфейса Printer для обеспечения совместимости с аппаратной абстракцией

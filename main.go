@@ -18,6 +18,7 @@ import (
 
 	"rovnoMark/internal/drivers/carlvalentine"
 	"rovnoMark/internal/drivers/savema"
+	"rovnoMark/internal/drivers/tsc"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
 
@@ -70,6 +71,8 @@ func main() {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "carlvalentine" {
 			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
+		} else if cfg.DriverType == "tsc" {
+			manager.AddPrinter(cfg, tsc.New(cfg.IP, cfg.Port))
 		}
 
 	}
@@ -101,6 +104,8 @@ func main() {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		case "carlvalentine":
 			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
+		case "tsc":
+			manager.AddPrinter(cfg, tsc.New(cfg.IP, cfg.Port))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
@@ -383,8 +388,17 @@ func main() {
 			if req.DynamicFieldName == "" {
 				// Если динамические поля не заданы
 				p.ClearQueue()
-				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка SLA: "+err.Error())
+
+				// 1. Достаем макет из нашей SQLite, а не из памяти принтера
+				templateBody, err := store.GetTemplateBody(req.TemplateName)
+				if err != nil {
+					// Если в локальной базе нет, используем имя (для Videojet/Valentin/Savema)
+					templateBody = req.TemplateName
+				}
+
+				// 2. Отправляем отрендеренный макет на печать!
+				if err := p.PrintTemplate(templateBody, req.StaticFields); err != nil {
+					sendJSONError(w, http.StatusInternalServerError, "Ошибка печати статического шаблона TSC: "+err.Error())
 					return
 				}
 			} else {

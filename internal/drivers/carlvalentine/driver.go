@@ -2,6 +2,7 @@ package carlvalentine
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Низкоуровневые константы интерфейса Carl Valentin
@@ -36,6 +39,12 @@ func New(ip string, port int) *Driver {
 		Port:    port,
 		Timeout: 3 * time.Second,
 	}
+}
+
+// Вспомогательная функция перевода UTF-8 в Windows-1251
+func encodeToCP1251(utf8Bytes []byte) ([]byte, error) {
+	encoder := charmap.Windows1251.NewEncoder()
+	return encoder.Bytes(utf8Bytes)
 }
 
 // sendBlock — упаковывает данные в SOH/ETB фрейм согласно спецификации Valentin
@@ -306,8 +315,39 @@ func (d *Driver) ClearQueue() error {
 	return err
 }
 
-func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
-	return d.SelectTemplate(template, fields)
+// PrintTemplate принимает сырой BLOB макета и мапу данных
+func (d *Driver) PrintTemplate(templateBlob string, fields map[string]string) error {
+	// 1. Инициализируем шаблонизатор Go
+	t, err := template.New("tsc_label").Parse(templateBlob)
+	if err != nil {
+		slog.Error("TSC TSPL Parsing Error", "ip", d.Address, "err", err)
+		return fmt.Errorf("ошибка парсинга структуры TSPL-макета: %w", err)
+	}
+
+	// 2. Рендерим текстовые переменные в байтовый буфер
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, fields); err != nil {
+		slog.Error("TSC TSPL Execution Error", "ip", d.Address, "err", err)
+		return fmt.Errorf("ошибка подстановки данных: %w", err)
+	}
+
+	finalPayload := buf.Bytes()
+
+	// 3. Добавляем перенос строки в самый конец, если его забыли в шаблоне
+	if !bytes.HasSuffix(finalPayload, []byte("\r\n")) {
+		finalPayload = append(finalPayload, []byte("\r\n")...)
+	}
+
+	// 4. КРИТИЧЕСКИЙ ШАГ: Конвертируем готовый поток из UTF-8 в Windows-1251
+	cp1251Payload, err := encodeToCP1251(finalPayload)
+	if err != nil {
+		slog.Warn("TSC Encoding Error, fallback to raw", "ip", d.Address, "err", err)
+		// Если упало, шлем оригинал, чтобы не останавливать конвейер
+		cp1251Payload = finalPayload
+	}
+
+	// 5. Пишем массив байт кодировки CP1251 напрямую в сетевое подключение
+	return d.sendRawBytes(cp1251Payload)
 }
 
 func (d *Driver) GetTemplates() ([]string, error) {
