@@ -476,7 +476,7 @@ func main() {
 		taskIDStr := r.URL.Query().Get("task_id")
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil || taskID <= 0 {
-			sendJSONError(w, http.StatusBadRequest, "Неверный или отсутствующий ID задачи (параметр 'id')")
+			sendJSONError(w, http.StatusBadRequest, "Неверный или отсутствующий ID задачи (параметр 'line_id')")
 			return
 		}
 
