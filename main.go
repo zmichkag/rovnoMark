@@ -392,7 +392,7 @@ func main() {
 
 		// 3. Сохраняем задачу
 		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, req.RndText, string(staticBytes))
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
 			return
