@@ -110,6 +110,12 @@ func (s *Store) GetAssignments() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+func (s *Store) GetRndTextByTask(taskID int) (string, error) {
+	var rndText string
+	err := s.db.QueryRow("SELECT rnd_text FROM tasks WHERE id = ?", taskID).Scan(&rndText)
+	return rndText, err
+}
+
 // GetTelemetry возвращает историю состояния принтера
 func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}, error) {
 	query := `
@@ -140,10 +146,10 @@ func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}
 	return result, nil
 }
 
-// GetActiveTaskByLine возвращает ID активной задачи для линии, если она есть
+// GetActiveTaskByLine возвращает ID активной или ожидающей задачи для линии
 func (s *Store) GetActiveTaskByLine(lineID int) (int, error) {
 	var taskID int
-	query := `SELECT id FROM tasks WHERE line_id = ? AND status = 'active' LIMIT 1`
+	query := `SELECT id FROM tasks WHERE line_id = ? AND status IN ('active', 'ready') LIMIT 1`
 	err := s.db.QueryRow(query, lineID).Scan(&taskID)
 	if err == sql.ErrNoRows {
 		return 0, nil

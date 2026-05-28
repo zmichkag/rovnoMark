@@ -398,9 +398,13 @@ func main() {
 			return
 		}
 
-		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusOK)
 		// Отвечаем 1С, что задача ГОТОВА к приему кодов
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ready", "task_id": taskID})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "ready",
+			"task_id":  taskID,
+			"rnd_text": req.RndText,
+		})
 	})
 
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
@@ -457,11 +461,14 @@ func main() {
 
 		slog.Debug("Коды успешно добавлены в задачу", "task_id", taskID, "count", len(req.Codes))
 
+		rndText, _ := store.GetRndTextByTask(taskID)
+
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
 			"count":          len(req.Codes),
 			"pumper_started": activated,
+			"rnd_text":       rndText,
 		})
 	})
 
@@ -561,6 +568,8 @@ func main() {
 			// В) Очищаем физическую очередь принтера
 			p.ClearQueue()
 
+			// TODO передать rnd_text
+
 			report[pCfg.Name] = map[string]interface{}{
 				"status":             "cleared",
 				"last_printed_index": lastIdx,
@@ -577,6 +586,8 @@ func main() {
 		}
 
 		// 5. Формируем красивый и информативный ответ для 1С/MES
+
+		rndText, _ := store.GetRndTextByTask(taskID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 
@@ -587,6 +598,7 @@ func main() {
 			"timestamp":       time.Now().Format(time.RFC3339),
 			"total_confirmed": totalConfirmed,
 			"printers_report": report,
+			"rnd_text":        rndText,
 		}
 
 		if len(printerErrors) > 0 {
