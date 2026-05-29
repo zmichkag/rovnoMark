@@ -360,27 +360,41 @@ func main() {
 			}
 
 			// Свежий опрос статуса
+			// Пытаемся получить статус «здесь и сейчас»
 			status, err := p.GetStatus()
+
+			// Собираем всё в одну строку для анализа (и ошибку сокета, и текстовый статус)
+			var checkString string
 			if err != nil {
-				slog.Error("Сетевая ошибка при проверке принтера перед задачей", "printer", pCfg.Name, "err", err)
-
-				// Если в ошибке есть слова timeout, connection refused или EOF — это проблемы с кабелем/питанием
-				errMsg := err.Error()
-				if strings.Contains(errMsg, "timeout") {
-					errMsg = "Таймаут соединения (устройство не отвечает, проверьте кабель/питание)"
-				} else if strings.Contains(errMsg, "refused") {
-					errMsg = "В соединении отказано (принтер сбросил подключение)"
-				}
-
-				sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf("Принтер %s физически недоступен по адресу %s:%d. Ошибка: %s", pCfg.Name, pCfg.IP, pCfg.Port, errMsg))
-				return
+				checkString = strings.ToUpper(err.Error())
+			} else {
+				checkString = strings.ToUpper(status)
 			}
 
-			// Дополнительно чекаем внутреннее состояние, которое вернул принтер
-			statusUpper := strings.ToUpper(status)
-			if statusUpper == "ОШИБКА" || strings.Contains(statusUpper, "ОФФЛАЙН") || strings.Contains(statusUpper, "OFFLINE") || strings.Contains(statusUpper, "ERROR") {
-				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s в сети, но сообщает о критическом состоянии: %s. Исправьте ошибку на самом принтере.", pCfg.Name, status))
-				return
+			// Словарь (массив) «плохих» статусов, при которых работать нельзя
+			badStatuses := []string{
+				"TIMEOUT",      // Сетевой таймаут сокета
+				"INITIALIZING", // Инициализация (в вашем случае — застрявший оффлайн)
+				"STARTING",     // Запуск устройства
+				"ОФФЛАЙН",      //
+				"OFFLINE",
+				"ОШИБКА", //
+				"ERROR",
+				"REFUSED", // Сброс соединения сокетом
+			}
+
+			// Бежим по словарю и проверяем, не поймали ли мы проблему
+			for _, bad := range badStatuses {
+				if strings.Contains(checkString, bad) {
+					slog.Warn("Принтер забракован перед стартом задачи", "printer", pCfg.Name, "detected_status", status, "err", err)
+
+					sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+						"Принтер %s не готов к работе (Текущее состояние: %s). Проверьте питание, сеть или устраните ошибку на устройстве.",
+						pCfg.Name,
+						status,
+					))
+					return // Полностью прерываем создание задачи, Ваге получает от ворот поворот
+				}
 			}
 
 			// Если принтер успешно прошел сетевой и логический чек — только тогда применяем шаблон
