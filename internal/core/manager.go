@@ -35,21 +35,46 @@ type Printer interface {
 
 // TaskProcessor Добавляем возможность управления задачами
 type TaskProcessor struct {
-	Store   *storage.Store
-	Manager *PrinterManager
+	Store       *storage.Store
+	Manager     *PrinterManager
+	activeMu    sync.Mutex
+	activeTasks map[int]bool // Тут храним ID задач, у которых насос УЖЕ крутится
 }
 
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
+	tp.activeMu.Lock()
+	if tp.activeTasks == nil {
+		tp.activeTasks = make(map[int]bool)
+	}
+	// Если насос для этой задачи уже запущен — тихо выходим, не плодим горутины!
+	if tp.activeTasks[taskID] {
+		tp.activeMu.Unlock()
+		slog.Debug("Pumper: Насос для этой задачи уже работает, дублирование проигнорировано", "task_id", taskID)
+		return
+	}
+	// Регистрируем запуск
+	tp.activeTasks[taskID] = true
+	tp.activeMu.Unlock()
+
 	// Достаем имя динамического поля для этой задачи ИЗ БАЗЫ
 	dynamicField, err := tp.Store.GetTaskDynamicField(taskID)
 	if err != nil || dynamicField == "" {
 		slog.Error("Накачка отменена: не найдено или пустое динамическое поле", "task_id", taskID)
+
+		tp.activeMu.Lock()
+		delete(tp.activeTasks, taskID) // Снимаем регистрацию при ошибке
+		tp.activeMu.Unlock()
 		return
 	}
 
-	// Запускаем асинхронный насос
 	go func() {
-		// Четкий информационный лог о фактическом старте горутины
+		// Очищаем регистрацию, когда горутина завершит работу (при stop)
+		defer func() {
+			tp.activeMu.Lock()
+			delete(tp.activeTasks, taskID)
+			tp.activeMu.Unlock()
+		}()
+
 		slog.Info("=== [PUMPER] Насос кодов успешно запущен в фоне ===",
 			"task_id", taskID,
 			"line_id", lineID,
