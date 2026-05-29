@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"regexp"
 	"rovnoMark/internal/core"
 	"rovnoMark/internal/models"
 	"strconv"
@@ -456,7 +455,7 @@ func main() {
 			return
 		}
 
-		// Читаем сырые байты от 1С
+		// === ЛОУШКА ДЛЯ 1С: ЧИТАЕМ СЫРОЕ ТЕЛО ЗАПРОСА ===
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			slog.Error("[1C-DEBUG] Не удалось прочитать сырые байты из запроса", "task_id", taskID, "err", err)
@@ -465,47 +464,37 @@ func main() {
 		}
 
 		rawBodyStr := string(bodyBytes)
-		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ОТ 1С", "task_id", taskID, "raw_body", rawBodyStr)
+		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ОТ 1С (ДО КОРРЕКЦИИ)", "task_id", taskID, "raw_body", rawBodyStr)
 
-		// КОРРЕКЦИЯ 1: Меняем ломающие JSON экранированные кавычки `\"` на безопасную одиночную кавычку `'`
+		// КОРРЕКЦИЯ: Меняем ломающие JSON экранированные кавычки `\"`
+		// на безопасную одиночную кавычку `'`
 		cleanBodyStr := strings.ReplaceAll(rawBodyStr, `\"`, `'`)
 
-		// Создаем структуру для приемки кодов
+		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ПОСЛЕ ОЧИСТКИ ХВОСТОВ", "task_id", taskID, "clean_body", cleanBodyStr)
+
+		// Подменяем r.Body ОЧИЩЕННЫМ БУФЕРОМ (используем cleanBodyStr)
+		r.Body = io.NopCloser(bytes.NewBuffer([]byte(cleanBodyStr)))
+		// ===============================================
+
 		var req struct {
 			Codes []string `json:"codes"`
 		}
 
-		// Попытка №1: Пробуем распарсить стандартным, быстрым способом
-		r.Body = io.NopCloser(bytes.NewBuffer([]byte(cleanBodyStr)))
-		err = json.NewDecoder(r.Body).Decode(&req)
-
-		// Попытка №2: Если стандартный парсер сдох из-за запятых, процентов или кавычек —
-		// включаем АВАРИЙНЫЙ РЕЖИМ и вытаскиваем коды "руками" через регулярку!
-		if err != nil || len(req.Codes) == 0 {
-			slog.Warn("[1C-DEBUG] Стандартный JSON-парсер не справился со спецсимволами, включаем регулярные выражения", "task_id", taskID, "err", err)
-
-			// Регулярка ищет все строки вида "01046200..." внутри кавычек
-			// Символ `[^"]+` означает "любые символы, кроме кавычки" (сожрет и проценты, и запятые, и слэши)
-			re := regexp.MustCompile(`"01[A-Za-z0-9%+,./:=?_'\-]{20,}"`)
-			matches := re.FindAllString(cleanBodyStr, -1)
-
-			for _, match := range matches {
-				// Удаляем кавычки по краям, которые захватила регулярка
-				code := strings.Trim(match, `"`)
-				req.Codes = append(req.Codes, code)
-			}
-		}
-
-		// Если даже регулярка ничего не нашла — значит 1С прислала совсем пустой или битый запрос
-		if len(req.Codes) == 0 {
-			slog.Warn("[1C-DEBUG] Критическая ошибка: Не удалось извлечь ни одного кода маркировки из запроса", "task_id", taskID)
-			sendJSONError(w, http.StatusBadRequest, "Не удалось распознать коды маркировки в запросе. Проверьте формат.")
+		// Теперь декодируем JSON
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Warn("[1C-DEBUG] Ошибка парсинга JSON", "task_id", taskID, "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Ошибка в теле JSON: "+err.Error())
 			return
 		}
 
-		slog.Info("[APPEND-DIAG] Коды успешно извлечены из запроса", "task_id", taskID, "codes_count", len(req.Codes))
+		if len(req.Codes) == 0 {
+			slog.Warn("[1C-DEBUG] Внимание: 1С прислала пустой массив кодов 'codes'", "task_id", taskID)
+			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
+			return
+		}
 
-		// Складываем коды в базу
+		slog.Info("[APPEND-DIAG] Запрос принят", "task_id", taskID, "codes_received", len(req.Codes))
+
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
 			slog.Error("[APPEND-DIAG] Ошибка записи кодов в БД", "task_id", taskID, "err", err)
