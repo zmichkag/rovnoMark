@@ -446,7 +446,6 @@ func main() {
 			return
 		}
 
-		// 1. Читаем task_id из Query-параметров URL, как просит Ваге
 		taskIDStr := r.URL.Query().Get("task_id")
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil || taskID <= 0 {
@@ -464,48 +463,60 @@ func main() {
 			return
 		}
 
-		// Валидация: если 1С прислала пустой массив кодов
 		if len(req.Codes) == 0 {
 			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
 			return
 		}
 
-		// 3. Складываем коды в базу
+		// ЛОГ 1: Приняли запрос от 1С
+		slog.Info("[APPEND-DIAG] Запрос принят от 1С", "task_id", taskID, "codes_received", len(req.Codes))
+
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
-			slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
+			slog.Error("[APPEND-DIAG] Ошибка записи кодов в БД", "task_id", taskID, "err", err)
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 			return
 		}
+		// ЛОГ 2: Коды в базе
+		slog.Info("[APPEND-DIAG] Коды успешно записаны в БД в статусе pending", "task_id", taskID)
 
-		// 4. АКТИВИРУЕМ ЗАДАЧУ И ГАРАНТИРОВАННО СТАРТУЕМ НАСОС
-		// Переводим из 'ready' в 'active' при первой пачке
-		store.TryActivateTask(taskID)
+		// ЛОГ 3: Проверяем статус задачи ДО попытки активации
+		statusBefore, _ := store.GetTaskStatus(taskID)
+		slog.Info("[APPEND-DIAG] Статус задачи в базе перед активацией", "task_id", taskID, "status", statusBefore)
+
+		// Пытаемся перевести из 'ready' в 'active'
+		activated, _ := store.TryActivateTask(taskID)
+		slog.Info("[APPEND-DIAG] Результат работы TryActivateTask", "task_id", taskID, "was_activated_now", activated)
+
+		// Проверяем текущий статус задачи
+		currentStatus, err := store.GetTaskStatus(taskID)
+		if err != nil {
+			slog.Error("[APPEND-DIAG] Ошибка получения статуса задачи из БД", "task_id", taskID, "err", err)
+		}
+		slog.Info("[APPEND-DIAG] Финальный статус задачи для запуска насоса", "task_id", taskID, "status", currentStatus)
 
 		pumperStarted := false
-		// В любом случае проверяем текущий статус задачи перед стартом насоса
-		currentStatus, err := store.GetTaskStatus(taskID)
-		if err == nil && currentStatus == "active" {
+		if currentStatus == "active" {
 			lineID, errLine := store.GetLineIDByTask(taskID)
-			if errLine == nil {
-				// Вызываем всегда! Защита внутри StartPumping не даст запустить дубликат.
+			if errLine != nil {
+				slog.Error("[APPEND-DIAG] КРИТИЧЕСКАЯ ОШИБКА: Не нашли line_id для этой задачи!", "task_id", taskID, "err", errLine)
+			} else {
+				slog.Info("[APPEND-DIAG] Насос получает команду на старт", "line_id", lineID, "task_id", taskID)
 				taskProcessor.StartPumping(lineID, taskID)
 				pumperStarted = true
 			}
+		} else {
+			slog.Warn("[APPEND-DIAG] Насос НЕ запущен, так как статус задачи не 'active'!", "task_id", taskID, "status", currentStatus)
 		}
-
-		slog.Debug("Коды успешно добавлены в задачу", "task_id", taskID, "count", len(req.Codes))
 
 		rndText, _ := store.GetRndTextByTask(taskID)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-
-		// Отдаем ответ без ошибок компиляции, используя pumperStarted
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
 			"count":          len(req.Codes),
-			"pumper_started": pumperStarted, // Теперь тут используется живая и объявленная переменная!
+			"pumper_started": pumperStarted,
 			"rnd_text":       rndText,
 		})
 	})
