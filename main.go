@@ -351,39 +351,58 @@ func main() {
 			return
 		}
 
-		// 2. Выполняем Handshake
+		// 2. Выполняем Handshake и проверку связи с принтерами
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
-				continue
-			}
-
-			status, _ := p.GetStatus()
-			// Принтер должен быть готов (или уже печатать, если мы просто подливаем статику)
-			if status == "ОШИБКА" || strings.Contains(status, "ОФФЛАЙН") {
-				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s не в сети", pCfg.Name))
+				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s не зарегистрирован в системе или отключен", pCfg.Name))
 				return
 			}
 
+			// Свежий опрос статуса
+			status, err := p.GetStatus()
+			if err != nil {
+				slog.Error("Сетевая ошибка при проверке принтера перед задачей", "printer", pCfg.Name, "err", err)
+
+				// Если в ошибке есть слова timeout, connection refused или EOF — это проблемы с кабелем/питанием
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "timeout") {
+					errMsg = "Таймаут соединения (устройство не отвечает, проверьте кабель/питание)"
+				} else if strings.Contains(errMsg, "refused") {
+					errMsg = "В соединении отказано (принтер сбросил подключение)"
+				}
+
+				sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf("Принтер %s физически недоступен по адресу %s:%d. Ошибка: %s", pCfg.Name, pCfg.IP, pCfg.Port, errMsg))
+				return
+			}
+
+			// Дополнительно чекаем внутреннее состояние, которое вернул принтер
+			statusUpper := strings.ToUpper(status)
+			if statusUpper == "ОШИБКА" || strings.Contains(statusUpper, "ОФФЛАЙН") || strings.Contains(statusUpper, "OFFLINE") || strings.Contains(statusUpper, "ERROR") {
+				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s в сети, но сообщает о критическом состоянии: %s. Исправьте ошибку на самом принтере.", pCfg.Name, status))
+				return
+			}
+
+			// Если принтер успешно прошел сетевой и логический чек — только тогда применяем шаблон
 			if req.DynamicFieldName == "" {
 				// Если динамические поля не заданы
 				p.ClearQueue()
 				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка SLA: "+err.Error())
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона (SLA) на %s: %v", pCfg.Name, err))
 					return
 				}
 			} else {
 				// нормальная работа с Чз
 				if err := p.SelectTemplate(req.TemplateName, nil); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка макета: "+err.Error())
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
 				if err := p.InitSession(req.DynamicFieldName, 10); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка SHO: "+err.Error())
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
 					return
 				}
 				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, "Ошибка обновления статических полей (SCF): "+err.Error())
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка статических полей (SCF) на %s: %v", pCfg.Name, err))
 					return
 				}
 			}
