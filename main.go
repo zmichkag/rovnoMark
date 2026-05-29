@@ -456,7 +456,6 @@ func main() {
 		}
 
 		// === ЛОУШКА ДЛЯ 1С: ЧИТАЕМ СЫРОЕ ТЕЛО ЗАПРОСА ===
-		// Читаем все входящие байты из r.Body до того, как JSON-декодер их уничтожит
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			slog.Error("[1C-DEBUG] Не удалось прочитать сырые байты из запроса", "task_id", taskID, "err", err)
@@ -464,17 +463,17 @@ func main() {
 			return
 		}
 
-		// Переводим байты в строку и выводим в консоль как INFO-лог
 		rawBodyStr := string(bodyBytes)
-		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ОТ 1С",
-			"task_id", taskID,
-			"raw_body", rawBodyStr,
-			"content_length", r.ContentLength,
-			"headers", fmt.Sprintf("%v", r.Header),
-		)
+		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ОТ 1С (ДО КОРРЕКЦИИ)", "task_id", taskID, "raw_body", rawBodyStr)
 
-		// Подменяем r.Body обратно, чтобы наш JSON-декодер мог с ним работать (так как мы его уже один раз прочитали)
-		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		// КОРРЕКЦИЯ: Меняем ломающие JSON экранированные кавычки `\"`
+		// на безопасную одиночную кавычку `'`
+		cleanBodyStr := strings.ReplaceAll(rawBodyStr, `\"`, `'`)
+
+		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ПОСЛЕ ОЧИСТКИ ХВОСТОВ", "task_id", taskID, "clean_body", cleanBodyStr)
+
+		// Подменяем r.Body ОЧИЩЕННЫМ БУФЕРОМ (используем cleanBodyStr)
+		r.Body = io.NopCloser(bytes.NewBuffer([]byte(cleanBodyStr)))
 		// ===============================================
 
 		var req struct {
