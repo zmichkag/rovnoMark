@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -453,23 +455,46 @@ func main() {
 			return
 		}
 
+		// === ЛОУШКА ДЛЯ 1С: ЧИТАЕМ СЫРОЕ ТЕЛО ЗАПРОСА ===
+		// Читаем все входящие байты из r.Body до того, как JSON-декодер их уничтожит
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			slog.Error("[1C-DEBUG] Не удалось прочитать сырые байты из запроса", "task_id", taskID, "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Ошибка чтения тела запроса")
+			return
+		}
+
+		// Переводим байты в строку и выводим в консоль как INFO-лог
+		rawBodyStr := string(bodyBytes)
+		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ОТ 1С",
+			"task_id", taskID,
+			"raw_body", rawBodyStr,
+			"content_length", r.ContentLength,
+			"headers", fmt.Sprintf("%v", r.Header),
+		)
+
+		// Подменяем r.Body обратно, чтобы наш JSON-декодер мог с ним работать (так как мы его уже один раз прочитали)
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		// ===============================================
+
 		var req struct {
 			Codes []string `json:"codes"`
 		}
 
+		// Теперь декодируем JSON
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Append: ошибка JSON", "err", err)
-			sendJSONError(w, http.StatusBadRequest, "Ошибка в теле JSON")
+			slog.Warn("[1C-DEBUG] Ошибка парсинга JSON", "task_id", taskID, "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Ошибка в теле JSON: "+err.Error())
 			return
 		}
 
 		if len(req.Codes) == 0 {
+			slog.Warn("[1C-DEBUG] Внимание: 1С прислала пустой массив кодов 'codes'", "task_id", taskID)
 			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
 			return
 		}
 
-		// ЛОГ 1: Приняли запрос от 1С
-		slog.Info("[APPEND-DIAG] Запрос принят от 1С", "task_id", taskID, "codes_received", len(req.Codes))
+		slog.Info("[APPEND-DIAG] Запрос принят", "task_id", taskID, "codes_received", len(req.Codes))
 
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
@@ -477,36 +502,18 @@ func main() {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 			return
 		}
-		// ЛОГ 2: Коды в базе
 		slog.Info("[APPEND-DIAG] Коды успешно записаны в БД в статусе pending", "task_id", taskID)
 
-		// ЛОГ 3: Проверяем статус задачи ДО попытки активации
-		statusBefore, _ := store.GetTaskStatus(taskID)
-		slog.Info("[APPEND-DIAG] Статус задачи в базе перед активацией", "task_id", taskID, "status", statusBefore)
-
-		// Пытаемся перевести из 'ready' в 'active'
-		activated, _ := store.TryActivateTask(taskID)
-		slog.Info("[APPEND-DIAG] Результат работы TryActivateTask", "task_id", taskID, "was_activated_now", activated)
-
-		// Проверяем текущий статус задачи
-		currentStatus, err := store.GetTaskStatus(taskID)
-		if err != nil {
-			slog.Error("[APPEND-DIAG] Ошибка получения статуса задачи из БД", "task_id", taskID, "err", err)
-		}
-		slog.Info("[APPEND-DIAG] Финальный статус задачи для запуска насоса", "task_id", taskID, "status", currentStatus)
+		store.TryActivateTask(taskID)
 
 		pumperStarted := false
-		if currentStatus == "active" {
+		currentStatus, err := store.GetTaskStatus(taskID)
+		if err == nil && currentStatus == "active" {
 			lineID, errLine := store.GetLineIDByTask(taskID)
-			if errLine != nil {
-				slog.Error("[APPEND-DIAG] КРИТИЧЕСКАЯ ОШИБКА: Не нашли line_id для этой задачи!", "task_id", taskID, "err", errLine)
-			} else {
-				slog.Info("[APPEND-DIAG] Насос получает команду на старт", "line_id", lineID, "task_id", taskID)
+			if errLine == nil {
 				taskProcessor.StartPumping(lineID, taskID)
 				pumperStarted = true
 			}
-		} else {
-			slog.Warn("[APPEND-DIAG] Насос НЕ запущен, так как статус задачи не 'active'!", "task_id", taskID, "status", currentStatus)
 		}
 
 		rndText, _ := store.GetRndTextByTask(taskID)
