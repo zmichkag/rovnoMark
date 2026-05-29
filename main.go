@@ -470,7 +470,7 @@ func main() {
 			return
 		}
 
-		// 3. Складываем коды в базу. Используем проверенную локальную переменную taskID
+		// 3. Складываем коды в базу
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
 			slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
@@ -478,17 +478,19 @@ func main() {
 			return
 		}
 
-		// 4. ПЫТАЕМСЯ АКТИВИРОВАТЬ ЗАДАЧУ И ЗАПУСТИТЬ НАСОС
-		// TryActivateTask переведет задачу из 'ready' в 'active' при первой пачке
-		activated, _ := store.TryActivateTask(taskID)
-		if activated {
-			// Нам нужен ID линии, чтобы передать его горутине-насосу
-			lineID, err := store.GetLineIDByTask(taskID)
-			if err == nil {
+		// 4. АКТИВИРУЕМ ЗАДАЧУ И ГАРАНТИРОВАННО СТАРТУЕМ НАСОС
+		// Переводим из 'ready' в 'active' при первой пачке
+		store.TryActivateTask(taskID)
+
+		pumperStarted := false
+		// В любом случае проверяем текущий статус задачи перед стартом насоса
+		currentStatus, err := store.GetTaskStatus(taskID)
+		if err == nil && currentStatus == "active" {
+			lineID, errLine := store.GetLineIDByTask(taskID)
+			if errLine == nil {
+				// Вызываем всегда! Защита внутри StartPumping не даст запустить дубликат.
 				taskProcessor.StartPumping(lineID, taskID)
-				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос (Pumper) успешно запущен", "task_id", taskID, "line_id", lineID)
-			} else {
-				slog.Error("Append: Задача активирована, но line_id не найден в БД", "task_id", taskID, "err", err)
+				pumperStarted = true
 			}
 		}
 
@@ -496,11 +498,14 @@ func main() {
 
 		rndText, _ := store.GetRndTextByTask(taskID)
 
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+
+		// Отдаем ответ без ошибок компиляции, используя pumperStarted
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
 			"count":          len(req.Codes),
-			"pumper_started": activated,
+			"pumper_started": pumperStarted, // Теперь тут используется живая и объявленная переменная!
 			"rnd_text":       rndText,
 		})
 	})
