@@ -1,17 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
-	"regexp"
 	"rovnoMark/internal/core"
 	"rovnoMark/internal/models"
 	"strconv"
@@ -70,7 +67,7 @@ func main() {
 		}
 	}
 
-	go manager.BackgroundPoller()
+	go manager.BackgroundPoller(store)
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
 	// 2. API для добавления нового принтера
@@ -449,6 +446,7 @@ func main() {
 			return
 		}
 
+		// 1. Читаем task_id из Query-параметров URL, как просит Ваге
 		taskIDStr := r.URL.Query().Get("task_id")
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil || taskID <= 0 {
@@ -456,84 +454,53 @@ func main() {
 			return
 		}
 
-		// Читаем сырые байты от 1С
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			slog.Error("[1C-DEBUG] Не удалось прочитать сырые байты из запроса", "task_id", taskID, "err", err)
-			sendJSONError(w, http.StatusBadRequest, "Ошибка чтения тела запроса")
-			return
-		}
-
-		rawBodyStr := string(bodyBytes)
-		slog.Info("[1C-DEBUG] СЫРЫЕ ДАННЫЕ ОТ 1С", "task_id", taskID, "raw_body", rawBodyStr)
-
-		// КОРРЕКЦИЯ 1: Меняем ломающие JSON экранированные кавычки `\"` на безопасную одиночную кавычку `'`
-		cleanBodyStr := strings.ReplaceAll(rawBodyStr, `\"`, `'`)
-
-		// Создаем структуру для приемки кодов
 		var req struct {
 			Codes []string `json:"codes"`
 		}
 
-		// Попытка №1: Пробуем распарсить стандартным, быстрым способом
-		r.Body = io.NopCloser(bytes.NewBuffer([]byte(cleanBodyStr)))
-		err = json.NewDecoder(r.Body).Decode(&req)
-
-		// Попытка №2: Если стандартный парсер сдох из-за запятых, процентов или кавычек —
-		// включаем АВАРИЙНЫЙ РЕЖИМ и вытаскиваем коды "руками" через регулярку!
-		if err != nil || len(req.Codes) == 0 {
-			slog.Warn("[1C-DEBUG] Стандартный JSON-парсер не справился со спецсимволами, включаем регулярные выражения", "task_id", taskID, "err", err)
-
-			// Регулярка ищет все строки вида "01046200..." внутри кавычек
-			// Символ `[^"]+` означает "любые символы, кроме кавычки" (сожрет и проценты, и запятые, и слэши)
-			re := regexp.MustCompile(`"01[A-Za-z0-9%+,./:=?_'\-]{20,}"`)
-			matches := re.FindAllString(cleanBodyStr, -1)
-
-			for _, match := range matches {
-				// Удаляем кавычки по краям, которые захватила регулярка
-				code := strings.Trim(match, `"`)
-				req.Codes = append(req.Codes, code)
-			}
-		}
-
-		// Если даже регулярка ничего не нашла — значит 1С прислала совсем пустой или битый запрос
-		if len(req.Codes) == 0 {
-			slog.Warn("[1C-DEBUG] Критическая ошибка: Не удалось извлечь ни одного кода маркировки из запроса", "task_id", taskID)
-			sendJSONError(w, http.StatusBadRequest, "Не удалось распознать коды маркировки в запросе. Проверьте формат.")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Warn("Append: ошибка JSON", "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Ошибка в теле JSON")
 			return
 		}
 
-		slog.Info("[APPEND-DIAG] Коды успешно извлечены из запроса", "task_id", taskID, "codes_count", len(req.Codes))
+		// Валидация: если 1С прислала пустой массив кодов
+		if len(req.Codes) == 0 {
+			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
+			return
+		}
 
-		// Складываем коды в базу
+		// 3. Складываем коды в базу. Используем проверенную локальную переменную taskID
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
-			slog.Error("[APPEND-DIAG] Ошибка записи кодов в БД", "task_id", taskID, "err", err)
+			slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 			return
 		}
-		slog.Info("[APPEND-DIAG] Коды успешно записаны в БД в статусе pending", "task_id", taskID)
 
-		store.TryActivateTask(taskID)
-
-		pumperStarted := false
-		currentStatus, err := store.GetTaskStatus(taskID)
-		if err == nil && currentStatus == "active" {
-			lineID, errLine := store.GetLineIDByTask(taskID)
-			if errLine == nil {
+		// 4. ПЫТАЕМСЯ АКТИВИРОВАТЬ ЗАДАЧУ И ЗАПУСТИТЬ НАСОС
+		// TryActivateTask переведет задачу из 'ready' в 'active' при первой пачке
+		activated, _ := store.TryActivateTask(taskID)
+		if activated {
+			// Нам нужен ID линии, чтобы передать его горутине-насосу
+			lineID, err := store.GetLineIDByTask(taskID)
+			if err == nil {
 				taskProcessor.StartPumping(lineID, taskID)
-				pumperStarted = true
+				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос (Pumper) успешно запущен", "task_id", taskID, "line_id", lineID)
+			} else {
+				slog.Error("Append: Задача активирована, но line_id не найден в БД", "task_id", taskID, "err", err)
 			}
 		}
 
+		slog.Debug("Коды успешно добавлены в задачу", "task_id", taskID, "count", len(req.Codes))
+
 		rndText, _ := store.GetRndTextByTask(taskID)
 
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
 			"count":          len(req.Codes),
-			"pumper_started": pumperStarted,
+			"pumper_started": activated,
 			"rnd_text":       rndText,
 		})
 	})

@@ -190,7 +190,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 			COALESCE(t.dynamic_field_name, '') as dynamic_field_name, 
 			t.status, 
 			t.created_at,
-			COALESCE(t.rnd_text, '') as rnd_text, -- Выбираем новое поле
+			COALESCE(t.rnd_text, '') as rnd_text, 
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id) as total_codes,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'in_buffer') as buffered_codes

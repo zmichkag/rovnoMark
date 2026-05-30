@@ -247,7 +247,7 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 	}()
 }
 
-func (pm *PrinterManager) BackgroundPoller() {
+func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
 	for {
 		pm.mu.RLock()
@@ -273,7 +273,6 @@ func (pm *PrinterManager) BackgroundPoller() {
 			if err == nil {
 				ribbon, _ = p.GetRemainingRibbon()
 
-				// ИСПРАВЛЕНИЕ: Безопасное получение очереди без хардкода поля
 				free, errSpace := p.GetBufferFreeSpace()
 				if errSpace == nil {
 					queue = strconv.Itoa(free)
@@ -284,6 +283,30 @@ func (pm *PrinterManager) BackgroundPoller() {
 				speed, _ = p.GetPrintSpeed()
 				curCount, _ = p.GetCurrentPrintCount()
 				curTemplate, _ = p.GetCurrentTemplate()
+
+				// ==================== ЖИВАЯ СИНХРОНИЗАЦИЯ ПЕЧАТИ ====================
+				// Обращаемся напрямую к store (с маленькой буквы), который передали в аргументах!
+				lineMap, errMap := store.GetPrinterLineMap()
+				if errMap == nil {
+					if lineID, ok := lineMap[id]; ok {
+						activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
+						if errTask == nil && activeTaskID > 0 {
+							lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
+							if errIdx == nil && lastPrintedIdx >= 0 {
+								affected, errMark := store.MarkAsPrinted(activeTaskID, lastPrintedIdx)
+								if errMark == nil && affected > 0 {
+									slog.Info("[POLLER-SYNC] Коды успешно подтверждены печатью",
+										"printer", cfg.Name,
+										"task_id", activeTaskID,
+										"last_index", lastPrintedIdx,
+										"confirmed_now", affected,
+									)
+								}
+							}
+						}
+					}
+				}
+				// ====================================================================
 			}
 
 			pm.mu.Lock()
