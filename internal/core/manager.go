@@ -285,7 +285,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 				curTemplate, _ = p.GetCurrentTemplate()
 
 				// ==================== ЖИВАЯ СИНХРОНИЗАЦИЯ ПЕЧАТИ ====================
-				// Обращаемся напрямую к store (с маленькой буквы), который передали в аргументах!
+				// Обращаемся напрямую к store
 				lineMap, errMap := store.GetPrinterLineMap()
 				if errMap == nil {
 					if lineID, ok := lineMap[id]; ok {
