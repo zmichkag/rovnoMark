@@ -418,7 +418,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		currIdx := startIndex + i
 
 		// Используем уже существующий механизм sendRaw!
-		cmd := fmt.Sprintf("SID|%d|%s|\n", currIdx, cleanCode)
+		cmd := fmt.Sprintf("SID|%d|%s|", currIdx, cleanCode)
 		r, err := d.sendRaw(cmd)
 
 		if err != nil || strings.Contains(r, "ERR") {
