@@ -471,7 +471,6 @@ func main() {
 		}
 
 		// Нормализуем коды перед записью в БД:
-		// Если в коде прилетел реальный скрытый \x1d, меняем его на неубиваемый текст "<GS>"
 		for i, code := range req.Codes {
 			req.Codes[i] = strings.ReplaceAll(code, "\x1d", "<GS>")
 		}

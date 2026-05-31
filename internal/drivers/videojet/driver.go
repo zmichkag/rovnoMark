@@ -419,7 +419,8 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 
 	successCount := 0
 	for i, code := range codes {
-		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
+		codeWithGS := strings.ReplaceAll(code, "<GS>", "~1")
+		cleanCode := strings.ReplaceAll(codeWithGS, "\x1d", "~1")
 		currIdx := startIndex + i
 
 		// Используем уже существующий механизм sendRaw!
