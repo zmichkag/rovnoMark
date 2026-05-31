@@ -470,6 +470,14 @@ func main() {
 			return
 		}
 
+		// Нормализуем коды перед записью в БД:
+		// Если в коде прилетел реальный скрытый \x1d, меняем его на неубиваемый текст "<GS>"
+		for i, code := range req.Codes {
+			req.Codes[i] = strings.ReplaceAll(code, "\x1d", "<GS>")
+		}
+
+		slog.Info("[APPEND-DIAG] Коды подготовлены к записи в БД", "task_id", taskID, "count", len(req.Codes))
+
 		// 3. Складываем коды в базу. Используем проверенную локальную переменную taskID
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
