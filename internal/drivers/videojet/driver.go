@@ -109,6 +109,11 @@ func (d *Driver) InitSession(fieldName string, maxQueue int) error {
 		return fmt.Errorf("SHO failed: %v", err)
 	}
 
+	//
+	if _, err := d.sendRaw("SID|0||"); err != nil {
+		return fmt.Errorf("Initial SID flush failed: %v", err)
+	}
+
 	if strings.Contains(resp, "ERR") {
 		return fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
 	}
