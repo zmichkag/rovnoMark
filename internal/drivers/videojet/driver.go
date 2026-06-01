@@ -92,6 +92,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 // InitSession
 func (d *Driver) InitSession(fieldName string, maxQueue int) error {
 	// Вместо открытия нового соединения используем существующий механизм sendRaw
+	slog.Info("Проводим настройку прринтра")
 
 	// 1. Очистка буфера
 	if _, err := d.sendRaw("SCB"); err != nil {
