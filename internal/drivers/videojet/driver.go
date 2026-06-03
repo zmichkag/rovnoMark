@@ -420,12 +420,12 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 
 	successCount := 0
 	for i, code := range codes {
-		codeWithGS := strings.ReplaceAll(code, "<GS>", "~1")
-		cleanCode := strings.ReplaceAll(codeWithGS, "~1", "\u001D")
+		codeWithGS := strings.ReplaceAll(code, "<GS>", "\u001D")
+		//cleanCode := strings.ReplaceAll(codeWithGS, "~1", "\u001D")
 		currIdx := startIndex + i
 
 		// Используем уже существующий механизм sendRaw!
-		cmd := fmt.Sprintf("SID|%d|%s|", currIdx, cleanCode)
+		cmd := fmt.Sprintf("SID|%d|%s|", currIdx, codeWithGS)
 		r, err := d.sendRaw(cmd)
 
 		if err != nil || strings.Contains(r, "ERR") {
