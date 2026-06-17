@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"rovnoMark/internal/drivers/savema"
+	"rovnoMark/internal/drivers/tsc"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
 )
@@ -64,6 +65,8 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "videojet" {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		} else if cfg.DriverType == "tsc" { // <-- ДОБАВИТЬ ЭТО
+			manager.AddPrinter(cfg, tsc.New(cfg.IP, cfg.Port))
 		}
 	}
 
@@ -92,6 +95,8 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		case "videojet":
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		case "tsc": // <-- ДОБАВИТЬ ЭТО
+			manager.AddPrinter(cfg, tsc.New(cfg.IP, cfg.Port))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return

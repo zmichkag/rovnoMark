@@ -46,6 +46,13 @@ func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit
 	return err
 }
 
+// GetTemplateBody получает шаблон для принтераиз базы
+func (s *Store) GetTemplateBody(name string) (string, error) {
+	var body string
+	err := s.db.QueryRow("SELECT body FROM local_templates WHERE name = ?", name).Scan(&body)
+	return body, err
+}
+
 // GetPrintersByLine Показывает привязаные  принтеры
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	query := `
@@ -146,10 +153,10 @@ func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}
 	return result, nil
 }
 
-// GetActiveTaskByLine возвращает ID активной или ожидающей задачи для линии
+// GetActiveTaskByLine возвращает ID активной задачи для линии, если она есть
 func (s *Store) GetActiveTaskByLine(lineID int) (int, error) {
 	var taskID int
-	query := `SELECT id FROM tasks WHERE line_id = ? AND status IN ('active', 'ready') LIMIT 1`
+	query := `SELECT id FROM tasks WHERE line_id = ? AND status = 'active' LIMIT 1`
 	err := s.db.QueryRow(query, lineID).Scan(&taskID)
 	if err == sql.ErrNoRows {
 		return 0, nil
@@ -190,7 +197,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 			COALESCE(t.dynamic_field_name, '') as dynamic_field_name, 
 			t.status, 
 			t.created_at,
-			COALESCE(t.rnd_text, '') as rnd_text, 
+			COALESCE(t.rnd_text, '') as rnd_text, -- Выбираем новое поле
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id) as total_codes,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'printed') as printed_codes,
 			(SELECT COUNT(*) FROM task_codes WHERE task_id = t.id AND status = 'in_buffer') as buffered_codes
@@ -405,12 +412,15 @@ func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
 
 // Сохранить или обновить линию
 func (s *Store) SaveLine(l models.LineConfig) error {
-	query := `INSERT OR REPLACE INTO lines (id, name, description, is_active) VALUES (?, ?, ?, ?)`
-	var id interface{} = l.ID
 	if l.ID == 0 {
-		id = nil
+		// Для создания новой линии исключаем id из запроса, чтобы сработал AUTOINCREMENT
+		query := `INSERT INTO lines (name, description, is_active, is_deleted) VALUES (?, ?, ?, 0)`
+		_, err := s.db.Exec(query, l.Name, l.Description, l.IsActive)
+		return err
 	}
-	_, err := s.db.Exec(query, id, l.Name, l.Description, l.IsActive)
+	// Для обновления существующей
+	query := `UPDATE lines SET name = ?, description = ?, is_active = ? WHERE id = ?`
+	_, err := s.db.Exec(query, l.Name, l.Description, l.IsActive, l.ID)
 	return err
 }
 
@@ -438,7 +448,6 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	return err
 }
 
-// New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
 func New(path string) *Store {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -452,13 +461,11 @@ func New(path string) *Store {
 	// 2. Включаем WAL (Write-Ahead Logging) для быстрой работы
 	db.Exec("PRAGMA journal_mode = WAL;")
 
-	// 3. Если база заблокирована на долю секунды, ждем до 5 секунд вместо ошибки 500
+	// 3. Если база заблокирована на долю секунды, ждем до 5 секунд
 	db.Exec("PRAGMA busy_timeout = 5000;")
 
-	// 4. Оптимизация записи на диск (в связке с WAL дает прирост скорости)
+	// 4. Оптимизация записи на диск
 	db.Exec("PRAGMA synchronous = NORMAL;")
-
-	// Включаем внешние ключи
 	db.Exec("PRAGMA foreign_keys = ON;")
 
 	// --- 1. ПРОВЕРКА НА МИГРАЦИЮ СО СТАРОЙ ВЕРСИИ ---
@@ -474,7 +481,14 @@ func New(path string) *Store {
 		db.Exec("ALTER TABLE printers RENAME TO printers_v1_backup;")
 	}
 
+	// ====================================================================
+	// БЕЗОПАСНОЕ ОБНОВЛЕНИЕ СХЕМЫ (Авто-добавление недостающих колонок)
+	// Если колонки уже есть, SQLite просто проигнорирует эти команды.
+	// ====================================================================
 	db.Exec("ALTER TABLE tasks ADD COLUMN rnd_text TEXT DEFAULT '';")
+	db.Exec("ALTER TABLE tasks ADD COLUMN static_fields_json TEXT DEFAULT '';")
+	db.Exec("ALTER TABLE lines ADD COLUMN is_deleted BOOLEAN DEFAULT 0;")
+	db.Exec("ALTER TABLE printers ADD COLUMN is_deleted BOOLEAN DEFAULT 0;")
 
 	// --- 2. СОЗДАНИЕ НОВОЙ СТРУКТУРЫ ---
 	createTables(db)
@@ -569,6 +583,13 @@ func createTables(db *sql.DB) {
         printed_at DATETIME,
         FOREIGN KEY(task_id) REFERENCES tasks(id)
     );`)
+
+	//
+	db.Exec(`CREATE TABLE IF NOT EXISTS local_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    body TEXT
+	);`)
 
 	// Таблица периодических снимков состояния
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (
