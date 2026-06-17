@@ -21,6 +21,12 @@ import (
 	"rovnoMark/internal/storage"
 )
 
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 //go:embed ui/*
 var uiFS embed.FS
 
@@ -50,7 +56,16 @@ func main() {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode)
+	// Найди эту строку (в районе 41-й) и замени её:
+	// slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode)
+
+	slog.Info("=== Запуск сервиса РОВНО ===",
+		"version", Version,
+		"build_time", BuildTime,
+		"git_commit", GitCommit,
+		"port", *port,
+		"debug", *debugMode,
+	)
 
 	store := storage.New("rovnoMark.db")
 	manager := core.NewPrinterManager()
@@ -147,6 +162,7 @@ func main() {
 			"lines":        responseLines,
 			"all_printers": allForUI,
 			"logs":         logs,
+			"version":      Version,
 		})
 	})
 
