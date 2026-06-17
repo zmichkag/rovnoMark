@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"rovnoMark/internal/drivers/carlvalentine"
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/tsc"
 	"rovnoMark/internal/drivers/videojet"
@@ -69,8 +68,6 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "videojet" {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
-		} else if cfg.DriverType == "carlvalentine" {
-			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "tsc" {
 			manager.AddPrinter(cfg, tsc.New(cfg.IP, cfg.Port))
 		}
@@ -102,8 +99,6 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		case "videojet":
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
-		case "carlvalentine":
-			manager.AddPrinter(cfg, carlvalentine.New(cfg.IP, cfg.Port))
 		case "tsc":
 			manager.AddPrinter(cfg, tsc.New(cfg.IP, cfg.Port))
 		default:
