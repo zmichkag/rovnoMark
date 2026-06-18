@@ -33,6 +33,11 @@ type Printer interface {
 	SelectTemplate(template string, fields map[string]string) error
 }
 
+// LocalTemplateLoader — интерфейс для драйверов, шаблоны которых хранятся централизованно в БД РовноМарк
+type LocalTemplateLoader interface {
+	SetTemplateBody(body string)
+}
+
 // TaskProcessor Добавляем возможность управления задачами
 type TaskProcessor struct {
 	Store       *storage.Store

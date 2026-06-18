@@ -180,12 +180,40 @@
 </div>
 
 <div id="templatesTab" class="tab-content">
-    <div style="background: var(--surface); padding: 20px; border-radius: 8px; max-width: 600px;">
-        <h3>Шаблоны</h3>
-        <div class="field"><label>Принтер:</label><select id="template_printer_select"></select></div>
-        <button class="btn" style="background: var(--primary); width: 100%;" onclick="fetchPrinterTemplates()">ОПРОСИТЬ ПАМЯТЬ</button>
-        <hr style="border: 1px solid #333; margin: 15px 0;">
-        <ul id="templates_list" style="list-style: none; padding: 0;"></ul>
+    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 280px; background: var(--surface); padding: 15px; border-radius: 8px; max-width: 320px; display: flex; flex-direction: column; gap: 15px;">
+            <h3>Библиотека макетов</h3>
+            <div class="field"><label>Принтер:</label><select id="template_printer_select"></select></div>
+            <button class="btn" style="background: var(--primary); width: 100%;" onclick="fetchPrinterTemplates()">ОПРОСИТЬ ПАМЯТЬ</button>
+            <hr style="border: 1px solid #333; margin: 5px 0;">
+            <ul id="templates_list" style="list-style: none; padding: 0;"></ul>
+
+            <hr style="border: 1px solid #333; margin: 5px 0;">
+            <h3>Свойства элемента</h3>
+            <div class="field"><label>Текст / Тег переменной:</label><input type="text" id="editor_item_text" oninput="updateSelectedElement()"></div>
+            <p style="color: var(--text-muted); font-size: 0.75rem;">* Для переменных используйте Go-синтаксис: <br><code style="color:var(--warning);">{{.DataMatrix}}</code> или <code style="color:var(--warning);">{{.BatchID}}</code></p>
+            <button class="btn" style="border-color: var(--danger); color: var(--danger); width: 100%;" onclick="deleteSelectedElement()">Удалить элемент</button>
+        </div>
+
+        <div style="flex: 3; min-width: 500px; background: var(--surface); padding: 20px; border-radius: 8px; display: flex; flex-direction: column; align-items: center;">
+            <div style="display: flex; gap: 10px; width: 100%; margin-bottom: 15px; background: #161616; padding: 10px; border-radius: 6px; box-sizing: border-box; flex-wrap: wrap; align-items: center;">
+                <b style="color:var(--primary)">Конструктор:</b>
+                <input type="text" id="new_template_name" placeholder="label_name.tspl" style="width: 150px; padding: 5px;">
+                <button class="btn" onclick="addNewElement('TEXT')">+ Текст</button>
+                <button class="btn" onclick="addNewElement('DMATRIX')">+ DataMatrix</button>
+
+                <span style="border-left: 1px solid #333; height: 20px; margin: 0 5px;"></span>
+                <label style="font-size:0.85rem; color:var(--text-muted)">Ширина (мм): <input type="number" id="label_mm_w" value="50" style="width:50px; padding:3px;" onchange="resizeEditorLabel()"></label>
+                <label style="font-size:0.85rem; color:var(--text-muted)">Высота (мм): <input type="number" id="label_mm_h" value="40" style="width:50px; padding:3px;" onchange="resizeEditorLabel()"></label>
+
+                <button class="btn" style="background: var(--success); margin-left: auto;" onclick="saveTemplateFromEditor()">💾 СОХРАНИТЬ В БД</button>
+            </div>
+
+            <div style="background: #ffffff; padding: 10px; border-radius: 4px; box-shadow: 0 10px 30px rgba(0,0,0,0.6); position: relative; margin: 10px 0;">
+                <canvas id="labelCanvas" width="350" height="280" style="background: #fff; border: 1px dashed #adadad; cursor: default;"></canvas>
+            </div>
+            <p style="color: var(--text-muted); font-size: 0.8rem;">💡 Кликните на элемент для выбора. Перетаскивайте мышкой. Координаты пересчитаются автоматически.</p>
+        </div>
     </div>
 </div>
 
@@ -201,6 +229,250 @@
         if (tabId === 'settings') loadSettingsData();
         if (tabId === 'control') updateControlTargets();
         if (tabId === 'templatesTab') updateTemplateTargets();
+    }
+
+    // Состояние активного редактируемого макета
+    window.editorElements = [];
+    window.selectedElementIndex = null;
+    window.isDragging = false;
+    window.dragOffsetX = 0;
+    window.dragOffsetY = 0;
+
+    // Инициализация интерактивных событий мыши для Canvas при загрузке страницы
+    document.addEventListener("DOMContentLoaded", () => {
+        const canvas = document.getElementById('labelCanvas');
+        if (!canvas) return;
+
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            window.selectedElementIndex = null;
+            window.isDragging = false;
+
+            // Бежим с конца массива, чтобы выбирать элементы, которые лежат выше (Z-Index)
+            for (let i = window.editorElements.length - 1; i >= 0; i--) {
+                const el = window.editorElements[i];
+
+                // Проверка попадания в габариты элемента
+                if (mouseX >= el.x && mouseX <= el.x + el.w && mouseY >= el.y && mouseY <= el.y + el.h) {
+                    window.selectedElementIndex = i;
+                    window.isDragging = true;
+                    window.dragOffsetX = mouseX - el.x;
+                    window.dragOffsetY = mouseY - el.y;
+
+                    // Заполняем поле редактора текущим текстом
+                    document.getElementById('editor_item_text').value = el.text;
+                    break;
+                }
+            }
+
+            if (window.selectedElementIndex === null) {
+                document.getElementById('editor_item_text').value = '';
+            }
+
+            drawEditorWorkspace();
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!window.isDragging || window.selectedElementIndex === null) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const el = window.editorElements[window.selectedElementIndex];
+            el.x = Math.round(mouseX - window.dragOffsetX);
+            el.y = Math.round(mouseY - window.dragOffsetY);
+
+            // Защита от вылета за границы этикетки
+            if (el.x < 0) el.x = 0;
+            if (el.y < 0) el.y = 0;
+
+            drawEditorWorkspace();
+        });
+
+        canvas.addEventListener('mouseup', () => { window.isDragging = false; });
+        canvas.addEventListener('mouseleave', () => { window.isDragging = false; });
+
+        // Создаем пустой дефолтный шаблон при первом входе
+        resizeEditorLabel();
+    });
+
+    // Добавление нового элемента на холст
+    function addNewElement(type) {
+        const el = {
+            type: type,
+            x: 40,
+            y: 40,
+            w: type === 'DMATRIX' ? 80 : 120,
+            h: type === 'DMATRIX' ? 80 : 20,
+            text: type === 'DMATRIX' ? '{{.DataMatrix}}' : 'Новый Текст'
+        };
+        window.editorElements.push(el);
+        window.selectedElementIndex = window.editorElements.length - 1;
+        document.getElementById('editor_item_text').value = el.text;
+        drawEditorWorkspace();
+    }
+
+    // Удаление выбранного элемента
+    function deleteSelectedElement() {
+        if (window.selectedElementIndex === null) return;
+        window.editorElements.splice(window.selectedElementIndex, 1);
+        window.selectedElementIndex = null;
+        document.getElementById('editor_item_text').value = '';
+        drawEditorWorkspace();
+    }
+
+    // Обновление параметров элемента при редактировании текста в инпуте
+    function updateSelectedElement() {
+        if (window.selectedElementIndex === null) return;
+        const el = window.editorElements[window.selectedElementIndex];
+        el.text = document.getElementById('editor_item_text').value;
+        drawEditorWorkspace();
+    }
+
+    // Изменение физических габаритов этикетки
+    function resizeEditorLabel() {
+        const mmW = parseFloat(document.getElementById('label_mm_w').value) || 50;
+        const mmH = parseFloat(document.getElementById('label_mm_h').value) || 40;
+
+        const canvas = document.getElementById('labelCanvas');
+        canvas.width = mmW * 7; // Коэффициент масштабирования для экрана
+        canvas.height = mmH * 7;
+
+        drawEditorWorkspace();
+    }
+
+    // Отрисовка рабочей области конструктора
+    function drawEditorWorkspace() {
+        const canvas = document.getElementById('labelCanvas');
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        window.editorElements.forEach((el, idx) => {
+            ctx.fillStyle = '#000000';
+            ctx.strokeStyle = '#000000';
+
+            if (el.type === 'TEXT') {
+                ctx.font = 'bold 16px monospace';
+                const metrics = ctx.measureText(el.text);
+                el.w = metrics.width;
+                el.h = 16;
+
+                ctx.fillText(el.text, el.x, el.y + 14);
+            }
+            else if (el.type === 'DMATRIX') {
+                ctx.fillRect(el.x, el.y, el.w, el.h);
+                ctx.fillStyle = '#FFFFFF';
+                // Отрисовка внутренней псевдосетки для имитации маркировки ЧЗ
+                for (let i = 4; i < el.w; i += 10) {
+                    for (let j = 4; j < el.h; j += 10) {
+                        if ((i+j) % 3 === 0) ctx.fillRect(el.x + i, el.y + j, 5, 5);
+                    }
+                }
+                ctx.fillStyle = '#888888';
+                ctx.font = '10px sans-serif';
+                ctx.fillText("DataMatrix", el.x, el.y - 4);
+            }
+
+            // Отрисовка рамки выделения вокруг активного элемента
+            if (idx === window.selectedElementIndex) {
+                ctx.strokeStyle = '#007bff';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(el.x - 4, el.y - 4, el.w + 8, el.h + 8);
+            }
+        });
+    }
+
+    // Генератор кода TSPL на основе элементов конструктора и отправка в API РовноМарк
+    async function saveTemplateFromEditor() {
+        const name = document.getElementById('new_template_name').value.trim();
+        if (!name) return alert('Укажите имя файла шаблона! (например, asahi_label.tspl)');
+
+        const mmW = document.getElementById('label_mm_w').value;
+        const mmH = document.getElementById('label_mm_h').value;
+
+        // Начинаем сборку сырого кода для промышленного контроллера TSC
+        let tspl = [];
+        tspl.push(`SIZE ${mmW} mm, ${mmH} mm`);
+        tspl.push(`GAP 3 mm, 0 mm`);
+        tspl.push(`DIRECTION 1`);
+        tspl.push(`CLS`);
+
+        window.editorElements.forEach(el => {
+            if (el.type === 'TEXT') {
+                // Синтаксис TSPL: TEXT x,y,"font",rotation,x-multi,y-multi,"content"
+                tspl.push(`TEXT ${el.x},${el.y},"3",0,1,1,"${el.text}"`);
+            } else if (el.type === 'DMATRIX') {
+                // Синтаксис TSPL: DMATRIX x,y,width,height,"content"
+                tspl.push(`DMATRIX ${el.x},${el.y},${el.w},${el.h},"${el.text}"`);
+            }
+        });
+
+        tspl.push(`PRINT 1,1`);
+        const finalBody = tspl.join('\n');
+
+        try {
+            const res = await fetch('/api/template/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, body: finalBody })
+            });
+
+            if (res.ok) {
+                alert(`Шаблон "${name}" успешно скомпилирован в TSPL и сохранен в БД!`);
+                if(typeof fetchPrinterTemplates === 'function') fetchPrinterTemplates();
+            } else {
+                alert('Ошибка сохранения:\n' + await res.text());
+            }
+        } catch(e) {
+            alert('Сбой связи с сервером: ' + e.message);
+        }
+    }
+
+    // Модифицируем старый метод выбора шаблона для интеграции обратной загрузки в конструктор
+    async function selectAndPreviewTemplate(templateName) {
+        document.getElementById('new_template_name').value = templateName;
+
+        try {
+            const resRaw = await fetch(`/api/template/raw?template=${encodeURIComponent(templateName)}`);
+            if (resRaw.ok) {
+                const data = await resRaw.json();
+
+                // Обратный парсинг TSPL-кода из БД в массив элементов конструктора window.editorElements
+                window.editorElements = [];
+                const lines = data.body.split('\n');
+
+                lines.forEach(line => {
+                    const clean = line.trim();
+                    const upper = clean.toUpperCase();
+
+                    if (upper.startsWith('SIZE')) {
+                        const m = clean.match(/SIZE\s+(\d+)\s*mm\s*,\s*(\d+)/i);
+                        if(m) {
+                            document.getElementById('label_mm_w').value = m[1];
+                            document.getElementById('label_mm_h').value = m[2];
+                        }
+                    }
+                    if (upper.startsWith('TEXT')) {
+                        const m = clean.match(/TEXT\s+(\d+)\s*,\s*(\d+)\s*,\s*"[^"]+"\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*"([^"]+)"/i);
+                        if(m) window.editorElements.push({type:'TEXT', x:parseInt(m[1]), y:parseInt(m[2]), w:50, h:16, text:m[3]});
+                    }
+                    if (upper.startsWith('DMATRIX')) {
+                        const m = clean.match(/DMATRIX\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]+)"/i);
+                        if(m) window.editorElements.push({type:'DMATRIX', x:parseInt(m[1]), y:parseInt(m[2]), w:parseInt(m[3]), h:parseInt(m[4]), text:m[5]});
+                    }
+                });
+
+                resizeEditorLabel();
+            }
+        } catch(e) { console.error(e); }
+
+        loadTemplateFields(templateName);
     }
 
     async function fetchPrintersStatus() {
@@ -221,7 +493,14 @@
         try {
             const res = await fetch('/api/task/active');
             if (!res.ok) throw new Error(`Ошибка сервера: ${res.status}`);
-            const tasks = await res.json() || [];
+            let responseData = await res.json();
+            // Если пришел объект со свойством tasks, берем его, иначе проверяем, массив ли это, иначе делаем пустой массив
+            let tasks = [];
+            if (responseData && responseData.tasks) {
+                tasks = responseData.tasks;
+            } else if (Array.isArray(responseData)) {
+                tasks = responseData;
+            }
 
             if (!tasks || tasks.length === 0) {
                 container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Активных заданий нет</div>';
@@ -677,6 +956,146 @@
         document.getElementById('assign_submit_btn').style.color = 'white';
         document.getElementById('assign_clear_btn').style.display = 'block';
         window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // Функция парсинга и рендеринга шаблона на Canvas
+    function renderTemplateToCanvas(rawBody) {
+        const canvas = document.getElementById('labelCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Очищаем холст перед новой отрисовкой (белый фон этикетки)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Дефолтные настройки пера для симуляции термопечати (черно-белая)
+        ctx.fillStyle = '#000000';
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+
+        // Разбиваем шаблон на строки
+        const lines = rawBody.split('\n');
+
+        lines.forEach(line => {
+            // Очищаем пробелы и приводим к верхнему регистру для парсинга команд
+            const cleanLine = line.trim();
+            const upperLine = cleanLine.toUpperCase();
+
+            // 1. Парсинг размеров этикетки (SIZE 50 mm, 40 mm или SIZE 400, 300)
+            if (upperLine.startsWith('SIZE')) {
+                const matches = cleanLine.match(/SIZE\s+([\d.]+)\s*(mm)?\s*,\s*([\d.]+)/i);
+                if (matches) {
+                    let w = parseFloat(matches[1]);
+                    let h = parseFloat(matches[3]);
+                    // Если указано в мм, условно переводим в пиксели для масштаба (1мм ~ 6px для наглядности)
+                    if (matches[2] && matches[2].toLowerCase() === 'mm') {
+                        canvas.width = w * 7;
+                        canvas.height = h * 7;
+                    } else {
+                        canvas.width = w;
+                        canvas.height = h;
+                    }
+                    // Перерисовываем фон после изменения размеров холста
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = '#000000';
+                }
+            }
+
+            // 2. Парсинг текстовых полей (TEXT x,y,"font",rotation,x-multi,y-multi,"content")
+            if (upperLine.startsWith('TEXT')) {
+                // Регулярка извлекает: x, y, шрифт, а также контент в кавычках в самом конце
+                const textMatch = cleanLine.match(/TEXT\s+(\d+)\s*,\s*(\d+)\s*,\s*"([^"]+)"\s*,\s*\d+\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*"([^"]+)"/i);
+                if (textMatch) {
+                    const x = parseInt(textMatch[1]);
+                    const y = parseInt(textMatch[2]);
+                    const sizeMultiplier = parseFloat(textMatch[5]) * 14; // Масштабирование шрифта
+                    const content = textMatch[6];
+
+                    ctx.font = `bold ${sizeMultiplier}px monospace`;
+                    ctx.fillText(content, x, y + sizeMultiplier); // Смещение по Y, так как в Canvas отсчет от базовой линии
+                }
+            }
+
+            // 3. Парсинг 2D датаматриксов маркировки (DMATRIX x,y,width,height,"content")
+            if (upperLine.startsWith('DMATRIX')) {
+                const dmMatch = cleanLine.match(/DMATRIX\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]+)"/i);
+                if (dmMatch) {
+                    const x = parseInt(dmMatch[1]);
+                    const y = parseInt(dmMatch[2]);
+                    const w = parseInt(dmMatch[3]);
+                    const h = parseInt(dmMatch[4]);
+                    const content = dmMatch[5];
+
+                    // Рисуем рамку и внутреннюю сетку-заполнитель, имитируя DataMatrix
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(x, y, w, h);
+
+                    // "Вырезаем" белые пиксели для симуляции паттерна QR/DataMatrix
+                    ctx.fillStyle = '#FFFFFF';
+                    for (let i = 2; i < w; i += 8) {
+                        for (let j = 2; j < h; j += 8) {
+                            if ((i+j) % 3 === 0) {
+                                ctx.fillRect(x + i, y + j, 4, 4);
+                            }
+                        }
+                    }
+
+                    // Метка поверх, чтобы инженер понимал, какое поле сюда подставится
+                    ctx.fillStyle = '#000000';
+                    ctx.font = '10px sans-serif';
+                    ctx.fillText("[DataMatrix: " + (content.length > 10 ? content.substring(0,10)+"..." : content) + "]", x, y - 4);
+                }
+            }
+
+            // 4. Парсинг классических штрихкодов (BARCODE x,y,"type",height,human-readable,rotation,narrow,wide,"content")
+            if (upperLine.startsWith('BARCODE')) {
+                const bcMatch = cleanLine.match(/BARCODE\s+(\d+)\s*,\s*(\d+)\s*,\s*"[^"]+"\s*,\s*(\d+)\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*"([^"]+)"/i);
+                if (bcMatch) {
+                    const x = parseInt(bcMatch[1]);
+                    const y = parseInt(bcMatch[2]);
+                    const h = parseInt(bcMatch[3]);
+                    const content = bcMatch[4];
+
+                    // Рисуем "зебру" штрихкода
+                    ctx.fillStyle = '#000000';
+                    let currentX = x;
+                    for (let b = 0; b < 15; b++) {
+                        ctx.fillRect(currentX, y, 3, h);
+                        currentX += 6;
+                    }
+                    ctx.font = '12px monospace';
+                    ctx.fillText(content, x, y + h + 14);
+                }
+            }
+        });
+    }
+
+    // Модифицированная функция выбора шаблона из списка
+    async function selectAndPreviewTemplate(templateName) {
+        document.getElementById('visualizer_title').innerText = templateName;
+
+        try {
+            // 1. Сначала запрашиваем сырой текст для визуализатора
+            const resRaw = await fetch(`/api/template/raw?template=${encodeURIComponent(templateName)}`);
+            if (resRaw.ok) {
+                const data = await resRaw.json();
+                renderTemplateToCanvas(data.body || "");
+            } else {
+                // Если шаблона нет в локальной БД (например, это Videojet) — очищаем канвас и пишем текст
+                const canvas = document.getElementById('labelCanvas');
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#888888';
+                ctx.font = '14px sans-serif';
+                ctx.fillText("Превью недоступно для сетевых макетов", 20, 50);
+            }
+        } catch (e) {
+            console.error("Visualizer error:", e);
+        }
+
+        // 2. Вызываем оригинальный метод загрузки полей, чтобы не ломать логику привязки
+        loadTemplateFields(templateName);
     }
 
     function clearAssignForm() {

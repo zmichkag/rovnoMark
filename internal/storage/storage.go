@@ -410,6 +410,17 @@ func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
 	return int64(p.ID), nil
 }
 
+// SaveTemplate сохраняет новый или обновляет существующий шаблон в локальной базе данных
+func (s *Store) SaveTemplate(name string, body string) (int64, error) {
+	query := `INSERT OR REPLACE INTO local_templates (name, body) VALUES (?, ?)`
+	res, err := s.db.Exec(query, name, body)
+	if err != nil {
+		slog.Error("SQL: Ошибка сохранения шаблона в БД", "name", name, "err", err)
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 // Сохранить или обновить линию
 func (s *Store) SaveLine(l models.LineConfig) error {
 	if l.ID == 0 {
@@ -489,6 +500,7 @@ func New(path string) *Store {
 	db.Exec("ALTER TABLE tasks ADD COLUMN static_fields_json TEXT DEFAULT '';")
 	db.Exec("ALTER TABLE lines ADD COLUMN is_deleted BOOLEAN DEFAULT 0;")
 	db.Exec("ALTER TABLE printers ADD COLUMN is_deleted BOOLEAN DEFAULT 0;")
+	db.Exec("ALTER TABLE tasks ADD COLUMN dynamic_field_name TEXT DEFAULT '';")
 
 	// --- 2. СОЗДАНИЕ НОВОЙ СТРУКТУРЫ ---
 	createTables(db)

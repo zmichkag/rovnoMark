@@ -296,7 +296,6 @@ func main() {
 		json.NewEncoder(w).Encode(templates)
 	})
 
-	// Получение списка полей конкретного шаблона (GET /api/template/fields?printer_id=X&template=Y)
 	http.HandleFunc("/api/template/fields", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Только GET", http.StatusMethodNotAllowed)
@@ -318,6 +317,15 @@ func main() {
 			return
 		}
 
+		// Пытаемся вытащить тело макета из таблицы local_templates
+		templateBody, errBody := store.GetTemplateBody(templateName)
+		if errBody == nil && templateBody != "" {
+			// Если драйвер поддерживает динамическое наполнение (TSC)
+			if loader, ok := p.(core.LocalTemplateLoader); ok {
+				loader.SetTemplateBody(templateBody)
+			}
+		}
+
 		fields, err := p.GetTemplateFields(templateName)
 		if err != nil {
 			http.Error(w, "Ошибка чтения полей: "+err.Error(), http.StatusInternalServerError)
@@ -326,6 +334,69 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(fields)
+	})
+
+	// Получение сырого текста шаблона из БД для визуализатора (GET /api/template/raw?template=Y)
+	http.HandleFunc("/api/template/raw", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Только GET", http.StatusMethodNotAllowed)
+			return
+		}
+
+		templateName := r.URL.Query().Get("template")
+		if templateName == "" {
+			http.Error(w, "Пустое имя шаблона", http.StatusBadRequest)
+			return
+		}
+
+		// Достаем макет из нашей таблицы local_templates
+		body, err := store.GetTemplateBody(templateName)
+		if err != nil {
+			http.Error(w, "Шаблон не найден в локальной БД: "+err.Error(), http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"name": templateName,
+			"body": body,
+		})
+	})
+
+	// Сохранение или обновление шаблона из конструктора (POST /api/template/save)
+	http.HandleFunc("/api/template/save", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Только POST", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Name string `json:"name"`
+			Body string `json:"body"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Ошибка парсинга JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if req.Name == "" || req.Body == "" {
+			http.Error(w, "Имя шаблона и его содержимое не могут быть пустыми", http.StatusBadRequest)
+			return
+		}
+
+		// Выполняем запись напрямую в SQLite local_templates
+		_, err := store.SaveTemplate(req.Name, req.Body) // Убедитесь, что метод в storage.go умеет делать INSERT OR REPLACE
+		if err != nil {
+			// Если метода SaveTemplate нет или он с другой сигнатурой, пишем SQL напрямую:
+			// _, err = store.db.Exec("INSERT OR REPLACE INTO local_templates (name, body) VALUES (?, ?)", req.Name, req.Body)
+			http.Error(w, "Ошибка сохранения шаблона в БД: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "saved", "name": req.Name})
 	})
 
 	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {

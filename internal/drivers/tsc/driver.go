@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,10 +21,11 @@ type Driver struct {
 	currstate   string
 	CurTemplate string
 	conn        net.Conn
+
+	// Хранилище загруженного в память драйвера сырого текста шаблона
+	currentTemplateBody string
 }
 
-// New создает новый экземпляр драйвера TSC.
-// Стандартный порт для JetDirect/TCP-печати обычно 9100.
 func New(ip string, port int) *Driver {
 	return &Driver{
 		Address: ip,
@@ -32,12 +34,11 @@ func New(ip string, port int) *Driver {
 	}
 }
 
-// sendRaw — низкоуровневый обмен данными с принтером по протоколу TSPL
+// sendRaw — низкоуровневый обмен данными с принтером
 func (d *Driver) sendRaw(cmd string, waitReply bool) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// 1. Инициализация/восстановление соединения
 	if d.conn == nil {
 		address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 		conn, err := net.DialTimeout("tcp", address, d.Timeout)
@@ -51,7 +52,6 @@ func (d *Driver) sendRaw(cmd string, waitReply bool) (string, error) {
 	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
 	slog.Debug("TSC IO Out", "ip", d.Address, "cmd", cmd)
 
-	// 2. Отправка команды. В TSPL команды разделяются переводом строки (\r\n)
 	_, err := d.conn.Write([]byte(cmd + "\r\n"))
 	if err != nil {
 		d.closeConn()
@@ -62,12 +62,10 @@ func (d *Driver) sendRaw(cmd string, waitReply bool) (string, error) {
 		return "", nil
 	}
 
-	// 3. Чтение ответа (актуально для команд статуса вроде <ESC>!? или ~!@)
-	// Принтеры TSC на статус-команды обычно отвечают 1 байтом состояния.
 	buf := make([]byte, 10)
 	n, err := d.conn.Read(buf)
 	if err != nil {
-		d.closeConn() // При таймауте сбрасываем сокет
+		d.closeConn()
 		return "", err
 	}
 
@@ -83,15 +81,35 @@ func (d *Driver) closeConn() {
 	}
 }
 
-// GetStatus запрашивает состояние принтера с помощью стандартной команды TSPL <ESC>!?
-// Возвращает байт статуса, который мы транслируем в понятные системе RovnoMark состояния.
+func (d *Driver) sendRawBytes(payload []byte) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.conn == nil {
+		address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+		conn, err := net.DialTimeout("tcp", address, d.Timeout)
+		if err != nil {
+			slog.Error("TSC Connect Error", "ip", d.Address, "err", err)
+			return err
+		}
+		d.conn = conn
+	}
+
+	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
+	_, err := d.conn.Write(payload)
+	if err != nil {
+		slog.Error("TSC Socket Write Error", "ip", d.Address, "err", err)
+		d.closeConn()
+		return err
+	}
+	return nil
+}
+
 func (d *Driver) GetStatus() (string, error) {
-	// \x1b!? — это статус-запрос в TSPL. Возвращает 1 байт flags.
 	resp, err := d.sendRaw("\x1b!?", true)
 	if err != nil {
 		return "ОШИБКА СВЯЗИ", err
 	}
-
 	if len(resp) == 0 {
 		return "НЕИЗВЕСТНО", nil
 	}
@@ -99,14 +117,6 @@ func (d *Driver) GetStatus() (string, error) {
 	statusByte := resp[0]
 	d.currstate = fmt.Sprintf("%d", statusByte)
 
-	// Разбор битовой маски статуса TSC:
-	// Bit 0: Normal (Ready)
-	// Bit 1: Head opened
-	// Bit 2: Paper jam
-	// Bit 3: Out of paper
-	// Bit 4: Out of ribbon
-	// Bit 5: Pause
-	// Bit 6: Printing
 	if statusByte == 0 {
 		return "ГОТОВ", nil
 	}
@@ -126,16 +136,31 @@ func (d *Driver) GetStatus() (string, error) {
 	return "ГОТОВ", nil
 }
 
-// PrintTemplate принимает сырой BLOB макета (текст команд + бинарные BITMAP) и мапу данных
+// SelectTemplate принимает имя макета. Физически загружает его тело из СИСТЕМЫ (или БД через менеджер)
+// Для TSC мы сохраняем тело шаблона в памяти драйвера, чтобы потом наполнять его данными
+func (d *Driver) SelectTemplate(name string, fields map[string]string) error {
+	d.CurTemplate = name
+
+	// Если в метод сразу переданы статические поля, выполняем рендеринг и печать
+	if len(fields) > 0 && d.currentTemplateBody != "" {
+		return d.PrintTemplate(d.currentTemplateBody, fields)
+	}
+	return nil
+}
+
+// SetTemplateBody — кастомный метод для TSC/Savema, позволяющий менеджеру передать сырой текст TSPL-шаблона из БД в драйвер
+func (d *Driver) SetTemplateBody(body string) {
+	d.currentTemplateBody = body
+}
+
+// PrintTemplate выполняет подстановку переменных (Go template) в сырой TSPL макет и отправляет в принтер
 func (d *Driver) PrintTemplate(templateBlob string, fields map[string]string) error {
-	// 1. Инициализируем шаблонизатор Go
 	t, err := template.New("tsc_label").Parse(templateBlob)
 	if err != nil {
 		slog.Error("TSC TSPL Parsing Error", "ip", d.Address, "err", err)
-		return fmt.Errorf("ошибка парсинга структуры TSPL-макета: %w", err)
+		return fmt.Errorf("ошибка структуры TSPL-макета: %w", err)
 	}
 
-	// 2. Рендерим текстовые переменные в байтовый буфер (бинарная графика внутри string не пострадает)
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, fields); err != nil {
 		slog.Error("TSC TSPL Execution Error", "ip", d.Address, "err", err)
@@ -143,75 +168,62 @@ func (d *Driver) PrintTemplate(templateBlob string, fields map[string]string) er
 	}
 
 	finalPayload := buf.Bytes()
-
-	// 3. Добавляем перенос строки в самый конец, если его забыли в шаблоне
 	if !bytes.HasSuffix(finalPayload, []byte("\r\n")) {
 		finalPayload = append(finalPayload, []byte("\r\n")...)
 	}
 
-	// 4. Пишем массив напрямую в сетевое подключение
 	return d.sendRawBytes(finalPayload)
 }
 
-// Новая вспомогательная функция для безопасного пуша сырых байт (текст + графика)
-func (d *Driver) sendRawBytes(payload []byte) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+// GetTemplateFields парсит текст TSPL шаблона регулярным выражением, находя все теги {{.Имя_Поля}}
+func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
+	if d.currentTemplateBody == "" {
+		return []string{"DataMatrix", "Text"}, nil // Дефолтный фоллбэк
+	}
 
-	if d.conn == nil {
-		address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-		conn, err := net.DialTimeout("tcp", address, d.Timeout)
-		if err != nil {
-			slog.Error("TSC Connect Error", "ip", d.Address, "err", err)
-			return err
+	// Ищем паттерны вида {{.FieldName}}
+	re := regexp.MustCompile(`\{\{\s*\.([a-zA-Z0-9_\-]+)\s*\}\}`)
+	matches := re.FindAllStringSubmatch(d.currentTemplateBody, -1)
+
+	var fields []string
+	seen := make(map[string]bool)
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			fieldName := match[1]
+			if !seen[fieldName] {
+				seen[fieldName] = true
+				fields = append(fields, fieldName)
+			}
 		}
-		d.conn = conn
 	}
 
-	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
-
-	_, err := d.conn.Write(payload)
-	if err != nil {
-		slog.Error("TSC Socket Write Error", "ip", d.Address, "err", err)
-		d.closeConn()
-		return err
-	}
-
-	return nil
+	return fields, nil
 }
 
-// SelectTemplate запоминает имя текущего макета в памяти драйвера
-func (d *Driver) SelectTemplate(name string, fields map[string]string) error {
-	d.CurTemplate = name
-	if len(fields) > 0 {
-		return d.PrintTemplate(name, fields)
+// PrintBatchIndexed интегрирует работу Насоса (Pumper) с TSPL шаблонами
+func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
+	if d.currentTemplateBody == "" {
+		// Если макет из БД не загружен, используем жестко зашитый аварийный макет
+		return d.PrintBatch(fieldName, codes)
 	}
-	return nil
-}
 
-// PrintBatch реализует пакетную отправку кодов (например, DataMatrix маркировки Честный Знак)
-func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	successCount := 0
-
 	for _, code := range codes {
-		var sb strings.Builder
-		sb.WriteString("CLS\r\n")
-
-		// Очищаем код от лишних символов, подготавливаем GS1 разделители если нужно
+		// Подготовка кодов для маркировки "Честный Знак" внутри TSPL
 		cleanCode := strings.ReplaceAll(code, "\x1d", "{FNC1}")
 
-		// Формируем команду печати 2D-кода DataMatrix: DMATRIX x,y,width,height,[content]
-		// Параметры подбираются под физическое разрешение принтера (например, 203 или 300 dpi)
-		sb.WriteString(fmt.Sprintf("DMATRIX 50,50,400,400,\"%s\"\r\n", cleanCode))
+		// Собираем мапу переменных для конкретной этикетки в пачке
+		fields := map[string]string{
+			fieldName:   cleanCode,                               // Динамическое поле (например, {{.DataMatrix}})
+			"INDEX":     strconv.Itoa(startIndex + successCount), // Сквозной индекс для контроля геометрии партии
+			"TIMESTAMP": time.Now().Format("15:04:05"),
+		}
 
-		// Дополнительно печатаем текстовое представление под кодом
-		sb.WriteString(fmt.Sprintf("TEXT 50,460,\"3\",0,1,1,\"%s\"\r\n", fieldName))
-
-		sb.WriteString("PRINT 1,1\r\n")
-
-		_, err := d.sendRaw(sb.String(), false)
+		// Рендерим и отправляем текущую этикетку
+		err := d.PrintTemplate(d.currentTemplateBody, fields)
 		if err != nil {
-			slog.Error("TSC PrintBatch Item Failed", "ip", d.Address, "err", err)
+			slog.Error("TSC PrintBatchIndexed Item Failed", "ip", d.Address, "err", err)
 			break
 		}
 		successCount++
@@ -220,66 +232,51 @@ func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
 	return successCount, nil
 }
 
-// PrintBatchIndexed осуществляет поштучную загрузку кодов (для совместимости с Pumper)
-func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
-	// Для TSC пока просто пробрасываем в обычный PrintBatch, так как TSPL не поддерживает Job ID нативно
-	return d.PrintBatch(fieldName, codes)
+func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
+	successCount := 0
+	for _, code := range codes {
+		var sb strings.Builder
+		sb.WriteString("CLS\r\n")
+		cleanCode := strings.ReplaceAll(code, "\x1d", "{FNC1}")
+		sb.WriteString(fmt.Sprintf("DMATRIX 50,50,400,400,\"%s\"\r\n", cleanCode))
+		sb.WriteString(fmt.Sprintf("TEXT 50,460,\"3\",0,1,1,\"%s\"\r\n", fieldName))
+		sb.WriteString("PRINT 1,1\r\n")
+
+		_, err := d.sendRaw(sb.String(), false)
+		if err != nil {
+			slog.Error("TSC PrintBatch Failed", "ip", d.Address, "err", err)
+			break
+		}
+		successCount++
+	}
+	return successCount, nil
 }
 
-func (d *Driver) GetLastPrintedIndex() (int, error) {
-	return 0, nil
-}
-
+// Фиктивный метод — TSC не возвращает список файлов по сети прозрачно, отдаем виртуальное имя из системы
 func (d *Driver) GetTemplates() ([]string, error) {
-	return []string{"DEFAULT.BAS"}, nil
+	if d.CurTemplate != "" {
+		return []string{d.CurTemplate}, nil
+	}
+	return []string{"TSPL_БД_МАКЕТ"}, nil
 }
 
-func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
-	return []string{"DataMatrix", "Text"}, nil
+func (d *Driver) ClearQueue() error {
+	_, err := d.sendRaw("CLS", false)
+	return err
 }
 
-func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
-	return "N/A", nil
-}
-
-func (d *Driver) GetBufferFreeSpace() (int, error) {
-	// Принтеры TSC обычно имеют небольшой входной буфер, возвращаем безопасное значение
-	return 10, nil
-}
-
-func (d *Driver) UpdateStaticFields(fields map[string]string) error {
-	// TSPL требует перерисовки всей этикетки, поэтому статика обычно зашита в PrintTemplate
-	return nil
-}
-
-func (d *Driver) InitSession(fieldName string, maxQueue int) error {
-	return d.ClearQueue()
-}
-
-// Заглушки под методы интерфейса Printer для обеспечения совместимости с аппаратной абстракцией
-
-func (d *Driver) GetRemainingRibbon() (string, error) {
-	// TSPL стандартно не возвращает точный % остатка ленты в цифровом виде
-	return "N/A", nil
-}
-
-func (d *Driver) GetPrintSpeed() (string, error) {
-	return "N/A", nil
-}
-
-func (d *Driver) GetCurrentPrintCount() (string, error) {
-	return "N/A", nil
-}
+func (d *Driver) GetBufferFreeSpace() (int, error)                  { return 10, nil }
+func (d *Driver) UpdateStaticFields(fields map[string]string) error { return nil }
+func (d *Driver) InitSession(fieldName string, maxQueue int) error  { return d.ClearQueue() }
+func (d *Driver) GetRemainingRibbon() (string, error)               { return "N/A", nil }
+func (d *Driver) GetPrintSpeed() (string, error)                    { return "N/A", nil }
+func (d *Driver) GetCurrentPrintCount() (string, error)             { return "N/A", nil }
+func (d *Driver) GetLastPrintedIndex() (int, error)                 { return 0, nil }
+func (d *Driver) GetQueueCapacity(queueName string) (string, error) { return "N/A", nil }
 
 func (d *Driver) GetCurrentTemplate() (string, error) {
 	if d.CurTemplate == "" {
 		return "N/A", nil
 	}
 	return d.CurTemplate, nil
-}
-
-func (d *Driver) ClearQueue() error {
-	// У TSC нет очереди в понимании Videojet, просто очищаем текущий буфер команд
-	_, err := d.sendRaw("CLS", false)
-	return err
 }
