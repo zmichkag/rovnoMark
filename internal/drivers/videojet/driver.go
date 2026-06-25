@@ -111,7 +111,7 @@ func (d *Driver) InitSession(fieldName string, maxQueue int) error {
 	}
 
 	//
-	if _, err := d.sendRaw("SID|0||"); err != nil {
+	if _, err := d.sendRaw("SID|0|0|"); err != nil {
 		return fmt.Errorf("Initial SID flush failed: %v", err)
 	}
 
