@@ -411,7 +411,7 @@ func main() {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
-				if err := p.InitSession(req.DynamicFieldName, 10); err != nil {
+				if err := p.InitSession(req.DynamicFieldName, 1000); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
 					return
 				}
