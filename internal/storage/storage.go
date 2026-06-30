@@ -561,14 +561,15 @@ func createTables(db *sql.DB) {
 
 	// Таблица кодов с расширенными статусами и индексами SID
 	db.Exec(`CREATE TABLE IF NOT EXISTS task_codes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        task_id INTEGER,
-        code TEXT NOT NULL,
-        status TEXT DEFAULT 'pending', -- 'pending', 'in_buffer', 'printed'
-        printer_index INTEGER,          -- Индекс, присвоенный в очереди принтера (SID)
-        printed_at DATETIME,
-        FOREIGN KEY(task_id) REFERENCES tasks(id)
-    );`)
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id INTEGER,
+		code TEXT NOT NULL,
+		status TEXT DEFAULT 'pending',
+		printer_id INTEGER,           
+		printer_index INTEGER,          
+		printed_at DATETIME,
+		FOREIGN KEY(task_id) REFERENCES tasks(id)
+	);`)
 
 	// Таблица периодических снимков состояния
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (
@@ -578,9 +579,10 @@ func createTables(db *sql.DB) {
 		cur_count TEXT,
 		ribbon TEXT,
 		status TEXT,
-		template TEXT, -- Добавлено для аналитики смен
+		template TEXT, 
 		FOREIGN KEY(printer_id) REFERENCES printers(id)
 	);`)
+
 	if err != nil {
 		log.Printf("[DB ERROR] Таблица телеметрии не создана: %v", err)
 	}
