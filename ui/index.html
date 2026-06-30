@@ -544,10 +544,10 @@
         }
     }
 
-    async function stopTask(id, lineId) {
+    async function stopTask(task_id, lineId) {
         if(!confirm('Остановить выполнение задачи?')) return;
         try {
-            const res = await fetch(`/api/task/stop?id=${id}&line_id=${lineId}`);
+            const res = await fetch(`/api/task/stop?task_id=${id}&line_id=${lineId}`);
             if (res.ok) fetchActiveTasks();
             else alert('Ошибка при остановке задачи:\n' + await res.text());
         } catch (e) {
