@@ -69,6 +69,14 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	}
 
 	go func() {
+		slog.Info("=== [PUMPER-RUN] Внутри горутины, проверяем запуск ===", "task_id", taskID)
+
+		defer func() {
+			tp.activeMu.Lock()
+			delete(tp.activeTasks, taskID)
+			tp.activeMu.Unlock()
+		}()
+
 		// Очищаем регистрацию, когда горутина завершит работу (при stop)
 		defer func() {
 			tp.activeMu.Lock()

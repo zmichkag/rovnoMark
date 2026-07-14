@@ -46,6 +46,17 @@ func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit
 	return err
 }
 
+// GetActiveTaskByLine возвращает ID активной или ожидающей задачи для линии
+func (s *Store) GetActiveTaskByLine(lineID int) (int, error) {
+	var taskID int
+	query := `SELECT id FROM tasks WHERE line_id = ? AND status IN ('active', 'ready') LIMIT 1`
+	err := s.db.QueryRow(query, lineID).Scan(&taskID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return taskID, err
+}
+
 func (s *Store) GetTaskStaticFieldsJSON(taskID int) (string, error) {
 	var staticJSON string
 	err := s.db.QueryRow("SELECT static_fields_json FROM tasks WHERE id = ?", taskID).Scan(&staticJSON)
@@ -150,17 +161,6 @@ func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}
 		})
 	}
 	return result, nil
-}
-
-// GetActiveTaskByLine возвращает ID активной или ожидающей задачи для линии
-func (s *Store) GetActiveTaskByLine(lineID int) (int, error) {
-	var taskID int
-	query := `SELECT id FROM tasks WHERE line_id = ? AND status IN ('active', 'ready') LIMIT 1`
-	err := s.db.QueryRow(query, lineID).Scan(&taskID)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	return taskID, err
 }
 
 // GetTaskStatus возвращает текущий статус задачи для контроля остановки накачки

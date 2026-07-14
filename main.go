@@ -70,6 +70,46 @@ func main() {
 	go manager.BackgroundPoller(store)
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
+	// АВТОЗАПУСК НАСОСОВ
+
+	activeTasks, err := store.GetActiveTasks(0, 0)
+	if err == nil && len(activeTasks) > 0 {
+		slog.Info("Обнаружены active задачи в БД. Восстанавливаем фоновые насосы...", "count", len(activeTasks))
+		for _, taskMap := range activeTasks {
+
+			var taskID int
+			var lineID int
+
+			// 1. Извлекаем task_id (в мапе он лежит как int)
+			if idVal, ok := taskMap["task_id"]; ok && idVal != nil {
+				idStr := fmt.Sprintf("%v", idVal)
+				if parsedID, errParse := strconv.Atoi(idStr); errParse == nil {
+					taskID = parsedID
+				}
+			}
+
+			// 2. Сразу извлекаем готовый line_id (чтобы не дергать БД лишний раз)
+			if lineVal, ok := taskMap["line_id"]; ok && lineVal != nil {
+				lineStr := fmt.Sprintf("%v", lineVal)
+				if parsedLineID, errParse := strconv.Atoi(lineStr); errParse == nil {
+					lineID = parsedLineID
+				}
+			}
+
+			// Проверка на валидность данных
+			if taskID == 0 || lineID == 0 {
+				slog.Warn("Пропущена задача при автозапуске: неверные ID", "task_id", taskID, "line_id", lineID)
+				continue
+			}
+
+			// 3. Запускаем фоновый насос
+			taskProcessor.StartPumping(lineID, taskID)
+			slog.Info("Фоновый насос успешно восстановлен при старте", "task_id", taskID, "line_id", lineID)
+		}
+	} else if err != nil {
+		slog.Error("Ошибка проверки активных задач при старте", "err", err)
+	}
+
 	// 2. API для добавления нового принтера
 	http.HandleFunc("/api/printers/add", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
