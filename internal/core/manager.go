@@ -1,11 +1,13 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,7 +18,6 @@ import (
 type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
-	PrintBatch(fieldName string, codes []string) (int, error)
 	PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error)
 	GetLastPrintedIndex() (int, error)
 	GetTemplates() ([]string, error)
@@ -107,8 +108,8 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 					continue
 				}
 
-				// 1. Устанавливаем желаемую планку буфера
-				maxBuffer := 10
+				// 1. Устанавливаем желаемую планку буфера (для промышленной стабильности ставим 50-100)
+				maxBuffer := 50
 
 				// 2. Узнаем, сколько свободных слотов осталось до лимита
 				freeSpace, err := p.GetBufferFreeSpace()
@@ -122,8 +123,6 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 					targetLoad = maxBuffer
 				}
 
-				// Меняем уровень лога с Info на Debug, чтобы не спамить каждые 5 секунд пустой информацией,
-				// но если место ЕСТЬ и мы РЕАЛЬНО что-то добавляем — выведем как Info ниже.
 				slog.Debug("Pumper: мониторинг буфера",
 					"printer", pCfg.Name,
 					"in_printer", maxBuffer-freeSpace,
@@ -142,28 +141,43 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				}
 
 				if len(pending) == 0 {
-					// Лог о том, что база пуста, тоже переводим в Debug, чтобы не засорять экран
 					slog.Debug("Pumper: Новые коды в базе данных отсутствуют (ожидание аппенда)", "task_id", taskID)
 					continue
 				}
 
-				// 4. Подготовка пачки
-				var codesOnly []string
+				// 4. Достаем сохраненные статические поля задачи из БД
+				staticJSONStr, errFields := tp.Store.GetTaskStaticFieldsJSON(taskID)
+				var staticFields map[string]string
+				if errFields == nil && staticJSONStr != "" {
+					_ = json.Unmarshal([]byte(staticJSONStr), &staticFields)
+				} else {
+					slog.Warn("Pumper: Статические поля не найдены в БД для задачи", "task_id", taskID, "err", errFields)
+				}
+
+				// 5. Подготовка пачки composite-данных для SID
+				var compositePayloads []string
+				var compositeFields string
+
 				for _, item := range pending {
-					codesOnly = append(codesOnly, item.Code)
+					// PrepareDynamicPipeline возвращает:
+					// compositeFields: "dm_data0;date01;date02"
+					// payload: "0104600840...|20.10.2026|20.10.3026"
+					fields, payload := PrepareDynamicPipeline(dynamicField, staticFields, item.Code)
+					compositeFields = fields // Поля одинаковы для всей пачки, просто сохраняем последнее
+					compositePayloads = append(compositePayloads, payload)
 				}
 
 				startIndex := pending[0].PrinterIndex
 
 				// Информационный лог перед отправкой в сокет
-				slog.Info("Pumper: Направляем пачку кодов в принтер",
+				slog.Info("Pumper: Направляем пачку кодов и статики в принтер",
 					"printer", pCfg.Name,
-					"count", len(codesOnly),
+					"count", len(compositePayloads),
 					"start_index", startIndex,
 				)
 
-				// 5. Отправка в принтер
-				loaded, err := p.PrintBatchIndexed(dynamicField, startIndex, codesOnly)
+				// 6. Отправка в принтер составной строки полей и полезной нагрузки
+				loaded, err := p.PrintBatchIndexed(compositeFields, startIndex, compositePayloads)
 
 				if err == nil && loaded > 0 {
 					slog.Info("Pumper: Пачка успешно загружена в память устройства", "printer", pCfg.Name, "loaded_count", loaded)
@@ -394,4 +408,30 @@ func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash s
 	state.LastTemplate = template
 	state.LastStaticHash = staticHash
 	pm.states[id] = state
+}
+
+func PrepareDynamicPipeline(dynamicFieldName string, staticFields map[string]string, czCode string) (string, string) {
+	// 1. Сортируем ключи статики по алфавиту для 100% стабильного порядка полей
+	var keys []string
+	for k := range staticFields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// 2. Собираем строку имен полей для InitSession (SHO) -> "dm_data0;date01;date02;text01"
+	fieldNames := []string{dynamicFieldName}
+	for _, k := range keys {
+		fieldNames = append(fieldNames, k)
+	}
+	compositeFields := strings.Join(fieldNames, ";")
+
+	// 3. Собираем строку значений для конкретной записи (SID) -> "01046...|20.10.2026|20.10.3026"
+	values := []string{czCode}
+	for _, k := range keys {
+		cleanVal := strings.ReplaceAll(staticFields[k], "|", "") // Экранируем разделитель протокола
+		values = append(values, cleanVal)
+	}
+	compositePayload := strings.Join(values, "|")
+
+	return compositeFields, compositePayload
 }

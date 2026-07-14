@@ -46,6 +46,12 @@ func (s *Store) UpdateCodeStatus(taskID int, status string, printerID int, limit
 	return err
 }
 
+func (s *Store) GetTaskStaticFieldsJSON(taskID int) (string, error) {
+	var staticJSON string
+	err := s.db.QueryRow("SELECT static_fields_json FROM tasks WHERE id = ?", taskID).Scan(&staticJSON)
+	return staticJSON, err
+}
+
 // GetPrintersByLine Показывает привязаные  принтеры
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	query := `

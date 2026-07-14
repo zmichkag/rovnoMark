@@ -1,7 +1,6 @@
 package videojet
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"log/slog"
@@ -90,34 +89,36 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 }
 
 // InitSession
-func (d *Driver) InitSession(fieldName string, maxQueue int) error {
-	// Вместо открытия нового соединения используем существующий механизм sendRaw
-	slog.Info("Проводим настройку прринтра")
+func (d *Driver) InitSession(compositeFields string, maxQueue int) error {
+	slog.Info("VIDEOJET: Инициализация динамической сессии", "fields", compositeFields, "max_queue", maxQueue)
 
-	// 1. Очистка буфера
+	// 1. Очищаем старый буфер сериализации
 	if _, err := d.sendRaw("SCB"); err != nil {
 		return fmt.Errorf("SCB failed: %v", err)
 	}
 
-	// 2. Установка лимита очереди
+	// 2. Устанавливаем лимит записей в очереди
 	if _, err := d.sendRaw(fmt.Sprintf("SMR|%d|", maxQueue)); err != nil {
 		return fmt.Errorf("SMR failed: %v", err)
 	}
 
-	// 3. Выбор поля
-	resp, err := d.sendRaw(fmt.Sprintf("SHO|%s|", fieldName))
+	// 3. Формируем команду SHO из составной строки полей
+	// Заменяем наш внутренний разделитель ";" на протокольный "|"
+	protocolFields := strings.ReplaceAll(compositeFields, ";", "|")
+	cmdSHO := fmt.Sprintf("SHO|%s|", protocolFields)
+
+	resp, err := d.sendRaw(cmdSHO)
 	if err != nil {
-		return fmt.Errorf("SHO failed: %v", err)
+		return fmt.Errorf("ошибка сокета при отправке SHO: %v", err)
 	}
-
-	//
-	if _, err := d.sendRaw("SID|0|0|"); err != nil {
-		return fmt.Errorf("Initial SID flush failed: %v", err)
-	}
-
 	if strings.Contains(resp, "ERR") {
-		return fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
+		return fmt.Errorf("принтер отклонил SHO (%s): %s", cmdSHO, resp)
 	}
+
+	// 4. Сбрасываем внутренний указатель принтера
+	//if _, err := d.sendRaw("SID|0|0|"); err != nil {
+	//	return fmt.Errorf("ошибка сброса SID: %v", err)
+	//}
 
 	return nil
 }
@@ -413,82 +414,29 @@ func (d *Driver) GetTemplates() ([]string, error) {
 	return templates, nil
 }
 
-// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
-func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
-	// Мьютекс не нужен, он уже есть внутри sendRaw
-	slog.Info("VIDEOJET Batch Start", "ip", d.Address, "field", fieldName, "count", len(codes), "start_idx", startIndex)
+// PrintBatchIndexed отправляет пачку данных с жесткой привязкой к индексам.
+func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes []string) (int, error) {
+	slog.Info("VIDEOJET: Загрузка пачки SID", "ip", d.Address, "count", len(codes), "start_idx", startIndex)
 
 	successCount := 0
-	for i, code := range codes {
-		codeWithGS := strings.ReplaceAll(code, "<GS>", "\u001D")
-		//cleanCode := strings.ReplaceAll(codeWithGS, "~1", "\u001D")
+	for i, payload := range codes {
+		// Подготовка GS1-разделителя (замена <GS> или \x1d на ASCII 29)
+		cleanPayload := strings.ReplaceAll(payload, "<GS>", "\u001D")
+		cleanPayload = strings.ReplaceAll(cleanPayload, "\x1d", "\u001D")
+
 		currIdx := startIndex + i
 
-		// Используем уже существующий механизм sendRaw!
-		cmd := fmt.Sprintf("SID|%d|%s|", currIdx, codeWithGS)
-		r, err := d.sendRaw(cmd)
+		// Формируем финальную строку: SID|Индекс|Значение1|Значение2|...|
+		cmdSID := fmt.Sprintf("SID|%d|%s|", currIdx, cleanPayload)
 
-		if err != nil || strings.Contains(r, "ERR") {
-			slog.Warn("VIDEOJET SID Item Failed", "ip", d.Address, "idx", currIdx, "err", err, "resp", r)
-			break
-		}
-		successCount++
-	}
-
-	slog.Info("VIDEOJET Batch Finished", "ip", d.Address, "loaded", successCount, "total", len(codes))
-	return successCount, nil
-}
-
-// PrintBatchIndexed загружает пачку кодов через SID (с индексами)
-func (d *Driver) PrintBatch(fieldName string, codes []string) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
-	if err != nil {
-		return 0, err
-	}
-	defer conn.Close()
-
-	reader := bufio.NewReader(conn)
-	conn.Write([]byte("\r")) // Сброс парсера
-
-	// 1. Очищаем старый буфер сериализации (команда SCB)
-	fmt.Fprint(conn, "SCB\r")
-	reader.ReadString('\r')
-	log.Printf("[VIDEOJET %s] raw >: %s, %s", d.Address, conn.RemoteAddr(), strings.Join(codes, "|"))
-
-	// 2. Устанавливаем лимит записей (например, до 2000), чтобы не упереться в память
-	fmt.Fprintf(conn, "SMR|%d|\r", 10)
-	reader.ReadString('\r')
-
-	// 3. Объявляем, для какого поля мы будем слать данные (команда SHO)
-	// Синтаксис: SHO | <имя_поля> |
-	fmt.Fprintf(conn, "SHO|%s|\r", fieldName)
-	resp, _ := reader.ReadString('\r')
-	if strings.Contains(resp, "ERR") {
-		return 0, fmt.Errorf("поле %s не поддерживает сериализацию", fieldName)
-	}
-
-	successCount := 0
-	for _, code := range codes {
-		// Подготовка кода для GS1 (замена \x1d на ~1)
-		cleanCode := strings.ReplaceAll(code, "\x1d", "~1")
-
-		// 4. Заливаем данные в буфер (команда SDO)
-		// Синтаксис: SDO | <данные> |
-		fmt.Fprintf(conn, "SDO|%s|\r", cleanCode)
-
-		// При успехе SDO возвращает количество свободного места (SFS)
-		resp, err := reader.ReadString('\r')
+		resp, err := d.sendRaw(cmdSID)
 		if err != nil || strings.Contains(resp, "ERR") {
-			log.Printf("[SERIAL %s] Ошибка загрузки кода %d", d.Address, successCount)
+			slog.Warn("VIDEOJET: Ошибка загрузки записи SID", "idx", currIdx, "payload", cleanPayload, "err", err, "resp", resp)
 			break
 		}
-		log.Printf("[VIDEOJET %s] RAW > %q", d.Address, resp)
 		successCount++
 	}
 
+	slog.Info("VIDEOJET: Пачка успешно загружена", "ip", d.Address, "loaded", successCount, "total", len(codes))
 	return successCount, nil
 }

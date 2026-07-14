@@ -406,17 +406,19 @@ func main() {
 					return
 				}
 			} else {
-				// нормальная работа с Чз
+				// Нормальная работа с ЧЗ
 				if err := p.SelectTemplate(req.TemplateName, nil); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
-				if err := p.InitSession(req.DynamicFieldName, 1000); err != nil {
+
+				// Генерируем составную строку полей для команды SHO
+				// Передаем пустую строку вместо кода ЧЗ, так как на этапе InitSession нам нужен только список полей (compositeFields)
+				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
+
+				// Инициализируем сессию, передавая compositeFields
+				if err := p.InitSession(compositeFields, 1000); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
-					return
-				}
-				if err := p.UpdateStaticFields(req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка статических полей (SCF) на %s: %v", pCfg.Name, err))
 					return
 				}
 			}
