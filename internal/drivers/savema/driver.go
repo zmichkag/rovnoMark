@@ -24,7 +24,7 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 	return nil
 }
 
-func (d *Driver) InitSession(fieldName string, maxQueue int) error {
+func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	//TODO implement me
 	panic("implement me")
 }

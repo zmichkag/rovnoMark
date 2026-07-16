@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"rovnoMark/internal/core"
+
 	"rovnoMark/internal/models"
 	"strconv"
 	"strings"
 	"time"
 
 	"rovnoMark/internal/drivers/savema"
+	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
 )
@@ -64,6 +66,8 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "videojet" {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		} else if cfg.DriverType == "valentine_nice" {
+			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.IP, cfg.Port))
 		}
 	}
 
@@ -132,6 +136,8 @@ func main() {
 			manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
 		case "videojet":
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
+		case "valentine_nice":
+			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.IP, cfg.Port))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
@@ -457,7 +463,7 @@ func main() {
 				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
 
 				// Инициализируем сессию, передавая compositeFields
-				if err := p.InitSession(compositeFields, 1000); err != nil {
+				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
 					return
 				}
