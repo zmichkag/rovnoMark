@@ -89,7 +89,7 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 }
 
 // InitSession
-func (d *Driver) InitSession(compositeFields string, maxQueue int) error {
+func (d *Driver) InitSession(compositeFields string, maxQueue int, staticFields map[string]string) error {
 	slog.Info("VIDEOJET: Инициализация динамической сессии", "fields", compositeFields, "max_queue", maxQueue)
 
 	// 1. Очищаем старый буфер сериализации
