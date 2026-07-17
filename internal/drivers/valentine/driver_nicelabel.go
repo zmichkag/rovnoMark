@@ -50,25 +50,34 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	}
 	d.mu.Unlock() // Освобождаем мьютекс, чтобы не блокировать поллер на время сетевых пауз
 
-	// Шаг 2: Короткое изолированное соединение для зачистки карт памяти принтера от старых хвостов
+	// --- 2. НИЗКОУРОВНЕВОЕ ФОРМАТИРОВАНИЕ НАКОПИТЕЛЯ ПРИНТЕРА ---
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	cleanupConn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
-		return fmt.Errorf("ошибка подключения для зачистки SD-карты: %w", err)
+		return fmt.Errorf("ошибка подключения для форматирования памяти: %w", err)
 	}
 
-	// Выставляем жесткий дедлайн на запись, чтобы не зависнуть в cleanup-сессии
-	cleanupConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	// Взводим жесткий дедлайн на запись
+	cleanupConn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 
-	cmdDelPrn := fmt.Sprintf("%cFMD---rA:\\Standard\\%s.prn%c", SOH, d.curTemplate, ETB)
-	cmdDelPcx := fmt.Sprintf("%cFMD---rA:\\Standard\\%s.pcx%c", SOH, d.curTemplate, ETB)
-	cmdClearQ := fmt.Sprintf("%c%c%c%c", SOH, ESC, 'C', ETB) // Мгновенный сброс буферов ОЗУ
+	var cleanupPayload bytes.Buffer
 
-	_, _ = cleanupConn.Write([]byte(cmdDelPrn + cmdDelPcx + cmdClearQ))
-	cleanupConn.Close() // Гарантированно закрываем сокет на стороне ОС
+	// А) Команда полного форматирования диска А (стирает все prn и graphics разом)
+	// Синтаксис строго по мануалу CVPL
+	cmdFormatDrive := fmt.Sprintf("%cFMD---rA:%c", SOH, ETB)
+	cleanupPayload.WriteString(cmdFormatDrive)
 
-	// Технологическая пауза: даем сетевой плате принтера Valentin сбросить буферы в Listen
-	time.Sleep(300 * time.Millisecond)
+	// Б) Реалтайм-команда мгновенной очистки очереди буфера ОЗУ принтера
+	cmdClearQ := fmt.Sprintf("%c%c%c%c", SOH, ESC, 'C', ETB)
+	cleanupPayload.WriteString(cmdClearQ)
+
+	// Отправляем пакет зачистки одним TCP-кадром и закрываем сессию
+	_, _ = cleanupConn.Write(cleanupPayload.Bytes())
+	cleanupConn.Close()
+
+	// ВНИМАНИЕ: Форматирование флеш-памяти — операция тяжелая для контроллера принтера.
+	// Увеличиваем технологическую паузу до 500мс, чтобы железка успела пересоздать таблицу FAT
+	time.Sleep(500 * time.Millisecond)
 
 	// Шаг 3: Передача управления на сторону NiceLabel Automation
 	staticDate, ok := staticFields["date01"]
