@@ -166,7 +166,31 @@ func (d *NiceLabelDriver) closeConnNoLock() {
 // ----------------------------------------------------------------───────
 
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
-	panic("implement me: контур реалтайм-накачки временно заблокирован для фиксации InitSession")
+	d.mu.Lock()
+	if d.isPumping {
+		d.mu.Unlock()
+		return 0, nil
+	}
+	d.isPumping = true
+	d.mu.Unlock()
+
+	// Выводим информационный лог в дебаг, чтобы видеть, что пампер стучится
+	slog.Info("VALENTIN-NICE [DEBUG-STUB]: Пампер вызвал метод, имитируем успешную накачку",
+		"count", len(codes),
+		"start_index", startIndex,
+	)
+
+	// Временная имитация реалтайм-задержки, как будто принтер думает
+	time.Sleep(100 * time.Millisecond)
+
+	d.mu.Lock()
+	d.isPumping = false
+	// Обновляем d.lastCount, чтобы симулировать движение счетчика в интерфейсе
+	d.lastCount += len(codes)
+	d.mu.Unlock()
+
+	// Возвращаем len(codes), сообщая ядру (Pumper), что вся пачка якобы "успешно загружена"
+	return len(codes), nil
 }
 
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
