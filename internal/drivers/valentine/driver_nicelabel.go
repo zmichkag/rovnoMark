@@ -327,6 +327,29 @@ func (d *NiceLabelDriver) GetLastPrintedIndex() (int, error) {
 	return d.lastCount, nil
 }
 
+func (d *NiceLabelDriver) reconnectNoLock() error {
+	if d.conn != nil {
+		return nil // Соединение живое
+	}
+
+	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+	if err != nil {
+		return err
+	}
+
+	d.conn = conn
+
+	// Взводим TCP KeepAlive на уровне ОС, чтобы сеть не дропала молчащие сессии
+	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	}
+
+	slog.Info("VALENTIN-NICE: Монопольный сокет 9100 успешно восстановлен в цикле накачки", "ip", d.Address)
+	return nil
+}
+
 func (d *NiceLabelDriver) UpdateStaticFields(fields map[string]string) error { return nil }
 func (d *NiceLabelDriver) PrintTemplate(t string, f map[string]string) error { return nil }
 func (d *NiceLabelDriver) GetTemplates() ([]string, error)                   { return []string{d.curTemplate}, nil }
