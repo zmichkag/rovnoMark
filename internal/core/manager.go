@@ -93,11 +93,8 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		for {
 			// 1. Проверяем, не остановлена ли задача (Graceful exit из горутины)
 			status, err := tp.Store.GetTaskStatus(taskID)
-			if err != nil || status != "active" {
-				slog.Info("=== [PUMPER] Работа завершена или принудительно остановлена, выключаем насос ===",
-					"task_id", taskID,
-					"final_status", status,
-				)
+			if err != nil || (status != "active" && status != "ready") {
+				slog.Info("=== [PUMPER] Выключаем насос ===", "task_id", taskID, "final_status", status)
 				return
 			}
 
