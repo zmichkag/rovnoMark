@@ -46,31 +46,32 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	d.mu.Lock()
 	slog.Info("VALENTIN-NICE: Инициализация сессии", "plu_template", d.curTemplate)
 
-	// 1. Если поллер или старая сессия держат сокет открытым — принудительно закрываем
+	// 1. Гарантированно рвем старую монопольную сессию
 	if d.conn != nil {
 		d.conn.Close()
 		d.conn = nil
 	}
-	d.mu.Unlock()
+	d.mu.Unlock() // Освобождаем мьютекс только после закрытия
 
-	// 2. Точечная зачистка старых файлов макета и графики на SD-карте принтера
-	// Открываем короткое соединение для отправки сервисных команд удаления
+	// 2. Короткий коннект для зачистки SD-карты
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	cleanupConn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
 		return fmt.Errorf("ошибка подключения для зачистки SD-карты: %w", err)
 	}
 
-	// Формируем команды удаления по маске имени шаблона (кода PLU)
+	// Взводим жесткий дедлайн на запись команд зачистки, чтобы не зависнуть тут навсегда
+	cleanupConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+
 	cmdDelPrn := fmt.Sprintf("%cFMD---rA:\\Standard\\%s.prn%c", SOH, d.curTemplate, ETB)
 	cmdDelPcx := fmt.Sprintf("%cFMD---rA:\\Standard\\%s.pcx%c", SOH, d.curTemplate, ETB)
-	cmdClearQ := fmt.Sprintf("%c%c%c%c", SOH, ESC, 'C', ETB) // Реалтайм очистка очереди буфера
+	cmdClearQ := fmt.Sprintf("%c%c%c%c", SOH, ESC, 'C', ETB)
 
-	cleanupConn.Write([]byte(cmdDelPrn + cmdDelPcx + cmdClearQ))
-	cleanupConn.Close()
+	_, _ = cleanupConn.Write([]byte(cmdDelPrn + cmdDelPcx + cmdClearQ))
+	cleanupConn.Close() // И СРАЗУ ЗАКРЫВАЕМ ФИЗИЧЕСКИ
 
-	// Технологическая пауза для завершения операций I/O контроллером принтера
-	time.Sleep(100 * time.Millisecond)
+	// Увеличиваем паузу до 300мс, чтобы сетевой стек принтера успел сбросить буферы
+	time.Sleep(300 * time.Millisecond)
 
 	// 3. Отправка XML-задания в HTTP-триггер NiceLabel Automation
 	// Используем имя шаблона (d.curTemplate) как код PLU номенклатуры
