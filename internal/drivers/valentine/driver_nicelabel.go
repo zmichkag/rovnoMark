@@ -168,10 +168,25 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 			d.mu.Unlock()
 			return successCount, nil
 		default:
+			// ПРОВЕРКА И РЕКОННЕКТ ПЕРЕД ОПРОСОМ
+			d.mu.Lock()
+			if d.conn == nil {
+				err := d.reconnectNoLock()
+				if err != nil {
+					d.mu.Unlock()
+					slog.Error("VALENTIN-NICE: Сбой автореконнекта, принтер недоступен", "err", err)
+					time.Sleep(1 * time.Second) // Даем сети отдохнуть
+					continue
+				}
+			}
+			d.mu.Unlock()
+
 			// Читаем текущее значение счетчика печатных циклов FBBC
 			countStr, err := d.GetCurrentPrintCount()
 			if err != nil {
-				slog.Error("VALENTIN-NICE IO Error: Сбой опроса счетчика, реконнект...", "err", err)
+				slog.Error("VALENTIN-NICE IO Error: Сбой опроса счетчика, сброс сокета...", "err", err)
+				// Важно: GetCurrentPrintCount сам обнулит d.conn при ошибке I/O,
+				// поэтому на следующем круге сработает наш reconnectNoLock
 				time.Sleep(1 * time.Second)
 				continue
 			}
