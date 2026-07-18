@@ -149,10 +149,10 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	}
 	resp.Body.Close()
 
-	// Оставляем технологическую паузу, чтобы файлы гарантированно записались на флешку принтера
+	// Оставляем технологическую паузу
 	time.Sleep(2 * time.Second)
 
-	//// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером «РОВНО»
+	//// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером
 	//d.mu.Lock()
 	//conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	//if err != nil {
@@ -161,13 +161,13 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	//}
 	//d.conn = conn
 	//
-	//// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера GEA
+	//// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера
 	//if tcpConn, ok := d.conn.(*net.TCPConn); ok {
 	//	_ = tcpConn.SetKeepAlive(true)
 	//	_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
 	//}
 	//
-	////// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти в текущее ОЗУ термоголовки
+	////// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти
 	////cmdLoadLayout := fmt.Sprintf("%cFMA---rA:\\Standard\\5580", SOH, d.curTemplate, ETB)
 	////if _, err := d.conn.Write([]byte(cmdLoadLayout)); err != nil {
 	////	d.closeConnNoLock()
