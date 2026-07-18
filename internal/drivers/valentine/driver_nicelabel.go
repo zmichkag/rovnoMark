@@ -98,7 +98,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
     <plu>%s</plu>
     <date>%s</date>
   </data>
-</LABEL>`, d.Name, d.curTemplate, staticDate)
+</LABEL>`, d.ID, d.curTemplate, staticDate)
 
 	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
 	if err != nil {
