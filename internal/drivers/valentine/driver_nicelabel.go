@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,34 +120,34 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	// Технологическая пауза: даем контроллеру Valentin время пересоздать таблицу FAT диска A:
 	time.Sleep(500 * time.Millisecond)
 
-	//	// --- 3. ИНТЕГРАЦИЯ С NICELABEL AUTOMATION ---
-	//	staticDate, ok := staticFields["date01"]
-	//	if !ok {
-	//		staticDate = time.Now().Format("02.01.2006")
-	//		slog.Warn("VALENTIN-NICE: Поле 'date01' не найдено, взвод текущей даты", "task", d.curTemplate)
-	//	}
-	//
-	//	// Явно приводим int к валидной строке "9" на уровне Go
-	//	printerIDStr := strconv.Itoa(d.ID)
-	//
-	//	// В маске %s теперь гарантированно будет чистая строка "9" без системных артефактов
-	//	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-	//<LABEL>
-	//  <action>
-	//    <PRINT>TRUE</PRINT>
-	//    <PRINTERNAME>%s</PRINTERNAME>
-	//  </action>
-	//  <data>
-	//    <plu>%s</plu>
-	//    <date>%s</date>
-	//  </data>
-	//</LABEL>`, printerIDStr, d.curTemplate, staticDate)
-	//
-	//	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
-	//	if err != nil {
-	//		return fmt.Errorf("ошибка отправки XML в триггер NiceLabel: %w", err)
-	//	}
-	//	resp.Body.Close()
+	// --- 3. ИНТЕГРАЦИЯ С NICELABEL AUTOMATION ---
+	staticDate, ok := staticFields["date01"]
+	if !ok {
+		staticDate = time.Now().Format("02.01.2006")
+		slog.Warn("VALENTIN-NICE: Поле 'date01' не найдено, взвод текущей даты", "task", d.curTemplate)
+	}
+
+	// Явно приводим int к валидной строке "9" на уровне Go
+	printerIDStr := strconv.Itoa(d.ID)
+
+	// В маске %s теперь гарантированно будет чистая строка "9" без системных артефактов
+	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+	<LABEL>
+	 <action>
+	   <PRINT>TRUE</PRINT>
+	   <PRINTERNAME>%s</PRINTERNAME>
+	 </action>
+	 <data>
+	   <plu>%s</plu>
+	   <date>%s</date>
+	 </data>
+	</LABEL>`, printerIDStr, d.curTemplate, staticDate)
+
+	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
+	if err != nil {
+		return fmt.Errorf("ошибка отправки XML в триггер NiceLabel: %w", err)
+	}
+	resp.Body.Close()
 
 	// Оставляем технологическую паузу, чтобы файлы гарантированно записались на флешку принтера
 	time.Sleep(2 * time.Second)
