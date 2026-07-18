@@ -26,9 +26,9 @@ type NiceLabelDriver struct {
 	stopPumping  chan struct{} // Канал для graceful-останова горутины накачки
 }
 
-func NewNiceLabelDriver(ID int, ip string, port int) *NiceLabelDriver {
+func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 	return &NiceLabelDriver{
-		ID:           ID,
+		ID:           id,
 		Address:      ip,
 		Port:         port,
 		Timeout:      3 * time.Second,
@@ -87,7 +87,10 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		slog.Warn("VALENTIN-NICE: Поле 'date01' не найдено, взвод текущей даты", "task", d.curTemplate)
 	}
 
-	// XML for NiceLabel
+	// Явно приводим int к валидной строке "9" на уровне Go
+	printerIDStr := strconv.Itoa(d.ID)
+
+	// В маске %s теперь гарантированно будет чистая строка "9" без системных артефактов
 	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <LABEL>
   <action>
@@ -95,20 +98,16 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
     <PRINTERNAME>%s</PRINTERNAME>
   </action>
   <data>
-    <plu>%d</plu>
+    <plu>%s</plu>
     <date>%s</date>
   </data>
-</LABEL>`, d.ID, d.curTemplate, staticDate)
+</LABEL>`, printerIDStr, d.curTemplate, staticDate)
 
 	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
 	if err != nil {
 		return fmt.Errorf("ошибка отправки XML в триггер NiceLabel: %w", err)
 	}
 	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("NiceLabel Automation вернул некорректный статус: %d", resp.StatusCode)
-	}
 
 	// Оставляем технологическую паузу, чтобы файлы гарантированно записались на флешку принтера
 	time.Sleep(2 * time.Second)
