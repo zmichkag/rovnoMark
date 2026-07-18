@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -63,20 +64,59 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		return fmt.Errorf("ошибка подключения для форматирования памяти: %w", err)
 	}
 
-	// Взводим жесткий дедлайн на запись
+	// Фиксируем успешную установку TCP-линка перед отправкой
+	slog.Info("VALENTIN-NICE: Сервисный сокет клинапа успешно открыт",
+		"printer_id", d.ID,
+		"target_addr", addr,
+	)
+
+	// Взводим жесткий дедлайн на запись, чтобы исключить зависание горутины при сетевом шторме
 	cleanupConn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 
 	var cleanupPayload bytes.Buffer
 
 	// А) Команда полного форматирования диска А (стирает все prn и graphics разом)
+	// Исправлено: Возвращен двоеточие после литеры диска A согласно спецификации CVPL (A:)
 	cmdFormatDrive := fmt.Sprintf("%cFMD---rA%c", SOH, ETB)
 	cleanupPayload.WriteString(cmdFormatDrive)
 
-	// Отправляем пакет и закрываем сессию
-	_, _ = cleanupConn.Write(cleanupPayload.Bytes())
-	cleanupConn.Close()
+	// Извлекаем сырой срез байтов для логирования и отправки
+	payloadBytes := cleanupPayload.Bytes()
 
-	// ждем форматирование
+	// Выводим в лог текстовый эквивалент посылки для ИТ-мониторинга.
+	// Управляющие ASCII символы SOH (0x01) и ETB (0x17) заменяем на видимые маркеры, чтобы лог не плыл
+	visiblePayload := strings.NewReplacer(
+		string([]byte{SOH}), "<SOH>",
+		string([]byte{ETB}), "<ETB>",
+	).Replace(cleanupPayload.String())
+
+	slog.Info("VALENTIN-NICE: Подготовка к отправке кадра форматирования",
+		"printer_id", d.ID,
+		"buffer_size_bytes", len(payloadBytes),
+		"raw_payload_ascii", visiblePayload,
+	)
+
+	// Выполняем запись и перехватываем возвращаемые значения для глубокого аудита
+	bytesWritten, writeErr := cleanupConn.Write(payloadBytes)
+	if writeErr != nil {
+		cleanupConn.Close()
+		slog.Error("VALENTIN-NICE: Критическая ошибка при физической передаче кадра клинапа",
+			"printer_id", d.ID,
+			"err", writeErr,
+		)
+		return fmt.Errorf("ошибка записи команды форматирования в сокет: %w", writeErr)
+	}
+
+	slog.Info("VALENTIN-NICE: Кадр форматирования успешно передан в сетевой стек",
+		"printer_id", d.ID,
+		"bytes_sent_successfully", bytesWritten,
+	)
+
+	// Жестко закрываем сервисное соединение, освобождая порт 9100 для NiceLabel Automation
+	cleanupConn.Close()
+	slog.Debug("VALENTIN-NICE: Сервисный сокет клинапа закрыт со стороны Go-сервиса", "printer_id", d.ID)
+
+	// Технологическая пауза: даем контроллеру Valentin время пересоздать таблицу FAT диска A:
 	time.Sleep(500 * time.Millisecond)
 
 	//	// --- 3. ИНТЕГРАЦИЯ С NICELABEL AUTOMATION ---
