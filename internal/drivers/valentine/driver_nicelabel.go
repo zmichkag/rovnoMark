@@ -119,7 +119,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	slog.Debug("VALENTIN-NICE: Сервисный сокет клинапа закрыт со стороны Go-сервиса", "printer_id", d.ID)
 
 	// Технологическая пауза: даем контроллеру Valentin время пересоздать таблицу FAT диска A:
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// --- 3. ИНТЕГРАЦИЯ С NICELABEL AUTOMATION ---
 	staticDate, ok := staticFields["data01"]
