@@ -69,7 +69,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	var cleanupPayload bytes.Buffer
 
 	// А) Команда полного форматирования диска А (стирает все prn и graphics разом)
-	cmdFormatDrive := fmt.Sprintf("%cFMD---rA:%c", SOH, ETB)
+	cmdFormatDrive := fmt.Sprintf("%cFMD---rA%c", SOH, ETB)
 	cleanupPayload.WriteString(cmdFormatDrive)
 
 	// Отправляем пакет и закрываем сессию
