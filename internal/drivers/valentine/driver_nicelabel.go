@@ -1,6 +1,7 @@
 package valentine
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"log/slog"
@@ -121,7 +122,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	time.Sleep(500 * time.Millisecond)
 
 	// --- 3. ИНТЕГРАЦИЯ С NICELABEL AUTOMATION ---
-	staticDate, ok := staticFields["date01"]
+	staticDate, ok := staticFields["data01"]
 	if !ok {
 		staticDate = time.Now().Format("02.01.2006")
 		slog.Warn("VALENTIN-NICE: Поле 'date01' не найдено, взвод текущей даты", "task", d.curTemplate)
@@ -152,39 +153,82 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	// Оставляем технологическую паузу
 	time.Sleep(2 * time.Second)
 
-	//// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером
-	//d.mu.Lock()
-	//conn, err := net.DialTimeout("tcp", addr, d.Timeout)
-	//if err != nil {
-	//	d.mu.Unlock()
-	//	return fmt.Errorf("ошибка монопольного перехвата порта 9100: %w", err)
-	//}
-	//d.conn = conn
-	//
-	//// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера
-	//if tcpConn, ok := d.conn.(*net.TCPConn); ok {
-	//	_ = tcpConn.SetKeepAlive(true)
-	//	_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
-	//}
-	//
-	////// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти
-	////cmdLoadLayout := fmt.Sprintf("%cFMA---rA:\\Standard\\5580", SOH, d.curTemplate, ETB)
-	////if _, err := d.conn.Write([]byte(cmdLoadLayout)); err != nil {
-	////	d.closeConnNoLock()
-	////	d.mu.Unlock()
-	////	return fmt.Errorf("ошибка активации макета из памяти принтера: %w", err)
-	////}
-	////d.mu.Unlock()
+	// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером
+	d.mu.Lock()
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+	if err != nil {
+		d.mu.Unlock()
+		return fmt.Errorf("ошибка монопольного перехвата порта 9100: %w", err)
+	}
+	d.conn = conn
 
-	//// Шаг 6: Считываем стартовую точку аппаратного счетчика для корректного дельта-контроля
-	//initCountStr, err := d.GetCurrentPrintCount()
-	//if err == nil {
-	//	if val, errConv := strconv.Atoi(initCountStr); errConv == nil {
-	//		d.mu.Lock()
-	//		d.lastCount = val
-	//		d.mu.Unlock()
-	//	}
-	//}
+	// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера
+	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	}
+
+	// --- Шаг 5: АКТИВАЦИЯ ШАБЛОНА В ОЗУ ПРИНТЕРА И ОБНОВЛЕНИЕ ЭКРАНА ---
+	d.mu.Lock()
+
+	// Защита: проверяем, что монопольный сокет 9100 жив
+	if d.conn == nil {
+		d.mu.Unlock()
+		return fmt.Errorf("ошибка активации макета: монопольное TCP-соединение не установлено")
+	}
+
+	// Взводим дедлайн на отправку команд конфигурации
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+
+	var layoutPayload bytes.Buffer
+	var visibleLayoutCmd string
+
+	// А) Динамическая команда выбора макета
+	cmdSelectLayout := fmt.Sprintf("%cFMB---r5080", SOH, d.curTemplate, ETB)
+	layoutPayload.WriteString(cmdSelectLayout)
+
+	// Б) Команда активации и обновления экрана принтера (FBC)
+	cmdActivateLayout := fmt.Sprintf("%cFBC---r--------%c", SOH, ETB)
+	layoutPayload.WriteString(cmdActivateLayout)
+
+	// Подготавливаем видимую строку для аудита в консоли бэкенда «РОВНО»
+	visibleLayoutCmd = strings.NewReplacer(
+		string([]byte{SOH}), "<SOH>",
+		string([]byte{ETB}), "<ETB>",
+	).Replace(layoutPayload.String())
+
+	slog.Info("VALENTIN-NICE: Отправка команд активации макета в ОЗУ",
+		"printer_id", d.ID,
+		"plu_template", d.curTemplate,
+		"raw_payload_ascii", visibleLayoutCmd,
+	)
+
+	// Физически проталкиваем обе команды одним пакетом.
+	// Переменные bytesWritten и writeErr переиспользуются из Шага 2, никаких повторных объявлений!
+	bytesWritten, writeErr = d.conn.Write(layoutPayload.Bytes())
+	if writeErr != nil {
+		d.closeConnNoLock() // Сбрасываем сокет в nil при любой ошибке ввода-вывода
+		d.mu.Unlock()
+		slog.Error("VALENTIN-NICE: Критический сбой при отправке кадров FMB/FBC", "printer_id", d.ID, "err", writeErr)
+		return fmt.Errorf("ошибка записи команд активации макета in сокет: %w", writeErr)
+	}
+
+	slog.Info("VALENTIN-NICE: Макет успешно активирован, экран принтера обновлен",
+		"printer_id", d.ID,
+		"bytes_sent", bytesWritten,
+	)
+
+	d.mu.Unlock()
+
+	// Шаг 6: Считываем стартовую точку аппаратного счетчика для корректного дельта-контроля
+	initCountStr, err := d.GetCurrentPrintCount()
+	if err == nil {
+		if val, errConv := strconv.Atoi(initCountStr); errConv == nil {
+			d.mu.Lock()
+			d.lastCount = val
+			d.mu.Unlock()
+		}
+	}
 
 	slog.Info("VALENTIN-NICE: Контур инициализации успешно зафиксирован. Принтер готов к накачке", "ip", d.Address)
 	return nil
@@ -234,9 +278,88 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	return len(codes), nil
 }
 
+// GetCurrentPrintCount осуществляет низкоуровневое чтение аппаратного регистра счетчика FBBC
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
-	// Временная безопасная заглушка для успешного прохождения Шага 6 инициализации
-	return "0", nil
+	d.mu.Lock()
+
+	// Если сокет не инициализирован или упал (после InitSession или сбоя сети)
+	// осуществляем атомарный автопереподключение прямо перед отправкой команды
+	if d.conn == nil {
+		slog.Warn("VALENTIN-NICE: Сокет закрыт, инициируем автопереподключение...", "printer_id", d.ID)
+		if err := d.reconnectNoLock(); err != nil {
+			d.mu.Unlock()
+			return "", fmt.Errorf("сокет принтера закрыт и реконнект провалился: %w", err)
+		}
+	}
+
+	// Выставляем жесткий дедлайн на сетевые операции ввода-вывода (I/O)
+	d.conn.SetDeadline(time.Now().Add(d.Timeout))
+
+	// Формируем команду чтения регистра FBBC по протоколу CVPL
+	// Запрос: <SOH>FBBC--w<ETB>
+	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
+
+	// Отправляем запрос счетчика в RAW-порт 9100
+	if _, err := d.conn.Write([]byte(cmd)); err != nil {
+		slog.Error("VALENTIN-NICE: Ошибка отправки команды FBBC в сокет", "printer_id", d.ID, "err", err)
+		d.closeConnNoLock() // Сбрасываем сокет в nil при сбое I/O для запуска реконнекта на следующем тике
+		d.mu.Unlock()
+		return "", err
+	}
+
+	// Для безопасного блокирующего чтения используем буферизированный ридер поверх сокета
+	reader := bufio.NewReader(d.conn)
+	d.mu.Unlock() // Отпускаем мьютекс перед долгим ожиданием ответа из сети, чтобы не лочить другие методы
+
+	// Ожидаем ответный кадр принтера, который жестко ограничен байтом окончания трансляции ETB
+	respBytes, err := reader.ReadBytes(byte(ETB))
+	if err != nil {
+		d.mu.Lock()
+		slog.Error("VALENTIN-NICE: Ошибка чтения ответа FBBC из сокета", "printer_id", d.ID, "err", err)
+		d.closeConnNoLock() // Маркируем сокет как мертвый
+		d.mu.Unlock()
+		return "", err
+	}
+
+	// Зачищаем служебные непечатные управляющие символы протокола и переносы строк вокруг полезного груза[cite: 1]
+	cleanResp := strings.Trim(string(respBytes), string([]byte{SOH, byte(ETB), '\r', '\n'}))
+
+	// Согласно мануалу Valentin, ответ на запрос считывания («w») приходит в формате: "A[значение]"[cite: 1]
+	// Например: "A00150" (где 150 — текущий счетчик отпечатанных этикеток)[cite: 1]
+	if strings.HasPrefix(cleanResp, "A") {
+		parts := strings.Split(cleanResp, "A")
+		if len(parts) > 1 {
+			// Возвращаем очищенное строковое ASCII-представление числа (например, "00150")[cite: 1]
+			return strings.TrimSpace(parts[1]), nil
+		}
+	}
+
+	return "", fmt.Errorf("получен некорректный формат ответа счетчика CVPL: %s", cleanResp)
+}
+
+// reconnectNoLock выполняет физическое переподключение к RAW-порту принтера 9100
+// Внимание: вызывающий поток должен удерживать мьютекс mu перед вызовом этого метода!
+func (d *NiceLabelDriver) reconnectNoLock() error {
+	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+
+	// Выполняем попытку подключения с жестким ограничением по времени[cite: 1]
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+	if err != nil {
+		slog.Error("VALENTIN-NICE: Не удалось поднять TCP-линк с принтером", "target_addr", addr, "err", err)
+		return err
+	}
+
+	d.conn = conn
+
+	// Активируем системный механизм Keep-Alive на уровне ядра ОС,
+	// чтобы линк не засыпал во время технологических простоев конвейера[cite: 1]
+	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	}
+
+	slog.Info("VALENTIN-NICE: Монопольный RAW TCP сокет успешно восстановлен", "printer_id", d.ID, "target_addr", addr)
+	return nil
 }
 
 func (d *NiceLabelDriver) ClearQueue() error {
@@ -260,10 +383,6 @@ func (d *NiceLabelDriver) GetBufferFreeSpace() (int, error) {
 
 func (d *NiceLabelDriver) GetLastPrintedIndex() (int, error) {
 	return d.lastCount, nil
-}
-
-func (d *NiceLabelDriver) reconnectNoLock() error {
-	panic("implement me: автореконнект заблокирован до стабилизации InitSession")
 }
 
 func (d *NiceLabelDriver) UpdateStaticFields(fields map[string]string) error { return nil }
