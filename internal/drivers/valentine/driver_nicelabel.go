@@ -13,6 +13,7 @@ import (
 
 type NiceLabelDriver struct {
 	Name         string        // Сетевое/системное имя принтера для NiceLabel (CFS)
+	ID           int           // ID принтера
 	Address      string        // IP-адрес принтера Валентин/GEA
 	Port         int           // Порт принтера (9100)
 	Timeout      time.Duration // Сетевой таймаут сокета
@@ -25,14 +26,18 @@ type NiceLabelDriver struct {
 	stopPumping  chan struct{} // Канал для graceful-останова горутины накачки
 }
 
-func NewNiceLabelDriver(name string, ip string, port int) *NiceLabelDriver {
+func NewNiceLabelDriver(ID int, ip string, port int) *NiceLabelDriver {
 	return &NiceLabelDriver{
-		Name:         name,
+		ID:           ID,
 		Address:      ip,
 		Port:         port,
 		Timeout:      3 * time.Second,
-		NiceLabelURL: "http://srv205:10000/", // Твой рабочий HTTP-триггер
+		NiceLabelURL: "http://srv205:10000/", // HTTP-триггер NiceLabel
+		conn:         nil,
+		mu:           sync.Mutex{},
+		curTemplate:  "",
 		lastCount:    -1,
+		isPumping:    false,
 		stopPumping:  make(chan struct{}),
 	}
 }
@@ -82,7 +87,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		slog.Warn("VALENTIN-NICE: Поле 'date01' не найдено, взвод текущей даты", "task", d.curTemplate)
 	}
 
-	// Передаем d.Name вместо IP-адреса. NiceLabel Automation подхватит именно системное имя принтера
+	// XML for NiceLabel
 	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <LABEL>
   <action>
