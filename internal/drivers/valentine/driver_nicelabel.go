@@ -12,6 +12,7 @@ import (
 )
 
 type NiceLabelDriver struct {
+	Name         string        // Сетевое/системное имя принтера для NiceLabel (например, "Валентин Мега")
 	Address      string        // IP-адрес принтера Валентин/GEA
 	Port         int           // Порт принтера (9100)
 	Timeout      time.Duration // Сетевой таймаут сокета
@@ -24,8 +25,9 @@ type NiceLabelDriver struct {
 	stopPumping  chan struct{} // Канал для graceful-останова горутины накачки
 }
 
-func NewNiceLabelDriver(ip string, port int) *NiceLabelDriver {
+func NewNiceLabelDriver(name string, ip string, port int) *NiceLabelDriver {
 	return &NiceLabelDriver{
+		Name:         name,
 		Address:      ip,
 		Port:         port,
 		Timeout:      3 * time.Second,
@@ -63,29 +65,24 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	var cleanupPayload bytes.Buffer
 
 	// А) Команда полного форматирования диска А (стирает все prn и graphics разом)
-	// Синтаксис строго по мануалу CVPL
 	cmdFormatDrive := fmt.Sprintf("%cFMD---rA:%c", SOH, ETB)
 	cleanupPayload.WriteString(cmdFormatDrive)
 
-	// Б) Реалтайм-команда мгновенной очистки очереди буфера ОЗУ принтера
-	cmdClearQ := fmt.Sprintf("%c%c%c%c", SOH, ESC, 'C', ETB)
-	cleanupPayload.WriteString(cmdClearQ)
-
-	// Отправляем пакет зачистки одним TCP-кадром и закрываем сессию
+	// Отправляем пакет и закрываем сессию
 	_, _ = cleanupConn.Write(cleanupPayload.Bytes())
 	cleanupConn.Close()
 
-	// ВНИМАНИЕ: Форматирование флеш-памяти — операция тяжелая для контроллера принтера.
-	// Увеличиваем технологическую паузу до 500мс, чтобы железка успела пересоздать таблицу FAT
+	// ждем форматирование
 	time.Sleep(500 * time.Millisecond)
 
-	// Шаг 3: Передача управления на сторону NiceLabel Automation
+	// --- 3. ИНТЕГРАЦИЯ С NICELABEL AUTOMATION ---
 	staticDate, ok := staticFields["date01"]
 	if !ok {
 		staticDate = time.Now().Format("02.01.2006")
 		slog.Warn("VALENTIN-NICE: Поле 'date01' не найдено, взвод текущей даты", "task", d.curTemplate)
 	}
 
+	// Передаем d.Name вместо IP-адреса. NiceLabel Automation подхватит именно системное имя принтера
 	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <LABEL>
   <action>
@@ -96,7 +93,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
     <plu>%s</plu>
     <date>%s</date>
   </data>
-</LABEL>`, d.Address, d.curTemplate, staticDate)
+</LABEL>`, d.Name, d.curTemplate, staticDate)
 
 	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
 	if err != nil {
@@ -108,42 +105,42 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		return fmt.Errorf("NiceLabel Automation вернул некорректный статус: %d", resp.StatusCode)
 	}
 
-	// Пауза ожидания: Найс рендерит этикетку, наливает .prn/.pcx файлы по сети и закрывает сокет 9100
+	// Оставляем технологическую паузу, чтобы файлы гарантированно записались на флешку принтера
 	time.Sleep(800 * time.Millisecond)
 
-	// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером «РОВНО»
-	d.mu.Lock()
-	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
-	if err != nil {
-		d.mu.Unlock()
-		return fmt.Errorf("ошибка монопольного перехвата порта 9100: %w", err)
-	}
-	d.conn = conn
-
-	// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера GEA
-	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
-		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
-	}
-
-	// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти в текущее ОЗУ термоголовки
-	cmdLoadLayout := fmt.Sprintf("%cFMA---rA:\\Standard\\%s%c", SOH, d.curTemplate, ETB)
-	if _, err := d.conn.Write([]byte(cmdLoadLayout)); err != nil {
-		d.closeConnNoLock()
-		d.mu.Unlock()
-		return fmt.Errorf("ошибка активации макета из памяти принтера: %w", err)
-	}
-	d.mu.Unlock()
-
-	// Шаг 6: Считываем стартовую точку аппаратного счетчика для корректного дельта-контроля
-	initCountStr, err := d.GetCurrentPrintCount()
-	if err == nil {
-		if val, errConv := strconv.Atoi(initCountStr); errConv == nil {
-			d.mu.Lock()
-			d.lastCount = val
-			d.mu.Unlock()
-		}
-	}
+	//// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером «РОВНО»
+	//d.mu.Lock()
+	//conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+	//if err != nil {
+	//	d.mu.Unlock()
+	//	return fmt.Errorf("ошибка монопольного перехвата порта 9100: %w", err)
+	//}
+	//d.conn = conn
+	//
+	//// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера GEA
+	//if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+	//	_ = tcpConn.SetKeepAlive(true)
+	//	_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	//}
+	//
+	//// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти в текущее ОЗУ термоголовки
+	//cmdLoadLayout := fmt.Sprintf("%cFMA---rA:\\Standard\\%s%c", SOH, d.curTemplate, ETB)
+	//if _, err := d.conn.Write([]byte(cmdLoadLayout)); err != nil {
+	//	d.closeConnNoLock()
+	//	d.mu.Unlock()
+	//	return fmt.Errorf("ошибка активации макета из памяти принтера: %w", err)
+	//}
+	//d.mu.Unlock()
+	//
+	//// Шаг 6: Считываем стартовую точку аппаратного счетчика для корректного дельта-контроля
+	//initCountStr, err := d.GetCurrentPrintCount()
+	//if err == nil {
+	//	if val, errConv := strconv.Atoi(initCountStr); errConv == nil {
+	//		d.mu.Lock()
+	//		d.lastCount = val
+	//		d.mu.Unlock()
+	//	}
+	//}
 
 	slog.Info("VALENTIN-NICE: Контур инициализации успешно зафиксирован. Принтер готов к накачке", "ip", d.Address)
 	return nil

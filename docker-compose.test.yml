@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  rovnomark-test:
+    build: .
+    container_name: rovnomark-app-test
+    # Переопределяем команду: прокидываем флаг порта 8090 и включаем debug для подробных логов
+    command: ["/bin/marking-service", "--port", "8090", "--debug"]
+    ports:
+      - "8090:8090"
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      # Маппим созданную изолированную папку, чтобы тест не тер прод-базу
+      - ./data-test:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+
+# Loki и Promtail использовать здесь не нужно, чтобы не забивать прод-метрики тестовым мусором.
+# Логи будем смотреть напрямую из контейнера.
