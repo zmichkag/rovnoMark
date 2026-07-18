@@ -3,7 +3,7 @@ services:
   rovnomark:
     build: .
     container_name: rovnomark-app-test
-    command: ["/bin/marking-service", "--port", "8080", "--debug"]
+    command: ["/bin/marking-service", "--port", "8000", "--debug"]
     ports:
       - "8000:8000"
     environment:
