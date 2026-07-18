@@ -2,10 +2,10 @@
 services:
   rovnomark:
     build: .
-    container_name: rovnomark-app
-    command: ["/bin/marking-service", "--debug"]
+    container_name: rovnomark-app-test
+    command: ["/bin/marking-service", "--port", "8080", "--debug"]
     ports:
-      - "8080:8080"
+      - "8000:8000"
     environment:
       - TZ=Europe/Moscow
     volumes:
@@ -15,19 +15,3 @@ services:
       options:
         tag: "{{.Name}}" # Это поможет Promtail найти логи приложения
 
-  loki:
-    image: grafana/loki:latest
-    ports:
-      - "3100:3100" # Твоя локальная Графана постучится сюда
-    command: -config.file=/etc/loki/local-config.yaml
-
-  promtail:
-    image: grafana/promtail:latest
-    user: root # Даем права на чтение сокета и папок с логами
-    volumes:
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro # ЭТОГО НЕ ХВАТАЛО
-      - ./promtail-config.yaml:/etc/promtail/config.yaml
-    command: -config.file=/etc/promtail/config.yaml
-    depends_on:
-      - loki
