@@ -67,7 +67,7 @@ func main() {
 		} else if cfg.DriverType == "videojet" {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "valentine_nice" {
-			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.Name, cfg.IP, cfg.Port))
+			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		}
 	}
 
@@ -137,7 +137,7 @@ func main() {
 		case "videojet":
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		case "valentine_nice":
-			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.Name, cfg.IP, cfg.Port))
+			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
