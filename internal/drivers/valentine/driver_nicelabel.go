@@ -152,30 +152,30 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	// Оставляем технологическую паузу, чтобы файлы гарантированно записались на флешку принтера
 	time.Sleep(2 * time.Second)
 
-	//// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером «РОВНО»
-	//d.mu.Lock()
-	//conn, err := net.DialTimeout("tcp", addr, d.Timeout)
-	//if err != nil {
-	//	d.mu.Unlock()
-	//	return fmt.Errorf("ошибка монопольного перехвата порта 9100: %w", err)
-	//}
-	//d.conn = conn
-	//
-	//// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера GEA
-	//if tcpConn, ok := d.conn.(*net.TCPConn); ok {
-	//	_ = tcpConn.SetKeepAlive(true)
-	//	_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
-	//}
-	//
-	//// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти в текущее ОЗУ термоголовки
-	//cmdLoadLayout := fmt.Sprintf("%cFMA---rA:\\Standard\\%s%c", SOH, d.curTemplate, ETB)
-	//if _, err := d.conn.Write([]byte(cmdLoadLayout)); err != nil {
-	//	d.closeConnNoLock()
-	//	d.mu.Unlock()
-	//	return fmt.Errorf("ошибка активации макета из памяти принтера: %w", err)
-	//}
-	//d.mu.Unlock()
-	//
+	// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером «РОВНО»
+	d.mu.Lock()
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+	if err != nil {
+		d.mu.Unlock()
+		return fmt.Errorf("ошибка монопольного перехвата порта 9100: %w", err)
+	}
+	d.conn = conn
+
+	// Настраиваем системные Keep-Alive, чтобы линк не засыпал при простоях конвейера GEA
+	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	}
+
+	// Шаг 5: Вызов отрендеренного Найсом макета из флеш-памяти в текущее ОЗУ термоголовки
+	cmdLoadLayout := fmt.Sprintf("%cFMA---rA:\\Standard\\5580", SOH, d.curTemplate, ETB)
+	if _, err := d.conn.Write([]byte(cmdLoadLayout)); err != nil {
+		d.closeConnNoLock()
+		d.mu.Unlock()
+		return fmt.Errorf("ошибка активации макета из памяти принтера: %w", err)
+	}
+	d.mu.Unlock()
+
 	//// Шаг 6: Считываем стартовую точку аппаратного счетчика для корректного дельта-контроля
 	//initCountStr, err := d.GetCurrentPrintCount()
 	//if err == nil {
