@@ -95,7 +95,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
     <PRINTERNAME>%s</PRINTERNAME>
   </action>
   <data>
-    <plu>%s</plu>
+    <plu>%d</plu>
     <date>%s</date>
   </data>
 </LABEL>`, d.ID, d.curTemplate, staticDate)
