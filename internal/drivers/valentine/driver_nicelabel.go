@@ -12,7 +12,7 @@ import (
 )
 
 type NiceLabelDriver struct {
-	Name         string        // Сетевое/системное имя принтера для NiceLabel (например, "Валентин Мега")
+	Name         string        // Сетевое/системное имя принтера для NiceLabel (CFS)
 	Address      string        // IP-адрес принтера Валентин/GEA
 	Port         int           // Порт принтера (9100)
 	Timeout      time.Duration // Сетевой таймаут сокета
@@ -106,7 +106,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	}
 
 	// Оставляем технологическую паузу, чтобы файлы гарантированно записались на флешку принтера
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	//// Шаг 4: Монопольный перехват и удержание RAW-сокета драйвером «РОВНО»
 	//d.mu.Lock()
