@@ -103,33 +103,37 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	d.curTemplate = template
 
-	// --- ШАГ 1: ЖЕСТКОЕ ТОТАЛЬНОЕ ФОРМАТИРОВАНИЕ НАКОПИТЕЛЯ ---
+	// Взводим флаг pumping, чтобы фоновый поллер счетчика даже не пытался сунуться в сокет во время инициализации
 	d.mu.Lock()
-	if d.conn == nil {
-		var err error
-		d.conn, err = net.DialTimeout("tcp", addr, d.Timeout)
-		if err != nil {
-			d.mu.Unlock()
-			return fmt.Errorf("ошибка подключения для форматирования: %w", err)
-		}
+	d.isPumping = true
+
+	if d.conn != nil {
+		d.conn.Close()
+		d.conn = nil
+	}
+
+	// --- ШАГ 1: ЖЕСТКОЕ ФОРМАТИРОВАНИЕ НАКОПИТЕЛЯ ---
+	var err error
+	d.conn, err = net.DialTimeout("tcp", addr, d.Timeout)
+	if err != nil {
+		d.isPumping = false
+		d.mu.Unlock()
+		return fmt.Errorf("ошибка подключения для форматирования: %w", err)
 	}
 
 	slog.Info("VALENTIN-MANAGED: Выполнение принудительного форматирования накопителя А:...")
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	cmdFormat := fmt.Sprintf("%cFMD---rA:%c", SOH, ETB)
-	if _, err := d.conn.Write([]byte(cmdFormat)); err != nil {
+	if _, err = d.conn.Write([]byte(cmdFormat)); err != nil {
 		d.closeConnNoLock()
+		d.isPumping = false
 		d.mu.Unlock()
 		return fmt.Errorf("ошибка отправки кадра FMD: %w", err)
 	}
 
-	// Жесткое технологическое окно: даем контроллеру принтера 2 секунды
-	// на физическую очистку секторов Flash-памяти и пересоздание FAT
-	time.Sleep(2000 * time.Millisecond)
-
-	// Разрываем сокет, полностью освобождая порт 9100 для NiceLabel Automation
+	time.Sleep(2000 * time.Millisecond) // Окно на очистку Flash-памяти принтера
 	d.closeConnNoLock()
-	d.mu.Unlock()
+	d.mu.Unlock() // Полностью освобождаем порт 9100 наружу
 
 	// --- ШАГ 2: ВЫЗОВ HTTP-ТРИГГЕРА NICELABEL AUTOMATION ---
 	staticDate, ok := staticFields["data01"]
@@ -141,34 +145,69 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 
 	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
 	if err != nil {
+		d.mu.Lock()
+		d.isPumping = false
+		d.mu.Unlock()
 		return fmt.Errorf("ошибка отправки XML в NiceLabel: %w", err)
 	}
 	resp.Body.Close()
 
-	slog.Info("VALENTIN-MANAGED: Шаблон отправлен в Найс. Ожидание 3 секунды для гарантированного трансфера файлов...")
-	time.Sleep(3000 * time.Millisecond) // Увеличили паузу, чтобы Найс успел полностью пролить графику в чистый диск
+	slog.Info("VALENTIN-MANAGED: Шаблон отправлен в Найс. Переход к динамическому перехвату порта...")
 
-	// --- ШАГ 3: ПЕРЕХВАТ СОКЕТА И АКТИВАЦИЯ МАКЕТА В ОЗУ ---
-	d.mu.Lock()
-	d.conn, err = net.DialTimeout("tcp", addr, d.Timeout)
-	if err != nil {
-		d.mu.Unlock()
-		return fmt.Errorf("ошибка монопольного перехвата порта 9100 после Найса: %w", err)
+	// --- ШАГ 3: УМНЫЙ ДИНАМИЧЕСКИЙ ПЕРЕХВАТ ПОРТА 9100 (RETRY-ЦИКЛ) ---
+	var conn net.Conn
+	maxRetries := 6
+	retryInterval := 1000 * time.Millisecond
+
+	for i := 1; i <= maxRetries; i++ {
+		// Пытаемся подключиться с коротким таймаутом в 1 секунду
+		conn, err = net.DialTimeout("tcp", addr, 1*time.Second)
+		if err == nil {
+			// Успешно подключились! NiceLabel освободил сокет.
+			break
+		}
+
+		slog.Warn("VALENTIN-MANAGED: Порт 9100 занят Найсом, ожидание освобождения линии...",
+			"try", i,
+			"max", maxRetries,
+			"err", err.Error(),
+		)
+		time.Sleep(retryInterval)
 	}
 
+	// Если после серии попыток сокет так и не открылся — отдаем честный развернутый лог
+	if err != nil {
+		d.mu.Lock()
+		d.isPumping = false
+		d.mu.Unlock()
+		return fmt.Errorf("NiceLabel Automation не освободил порт 9100 за отведенное время: %w", err)
+	}
+
+	// Зажимаем контекст драйвера для финального взвода макета
+	d.mu.Lock()
+	d.conn = conn
+	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	}
+
+	// АКТИВАЦИЯ МАКЕТА
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	var layoutPayload bytes.Buffer
-	// Загружаем макет по имени PLU (Найс кладет его на диск А под этим же именем)
 	layoutPayload.WriteString(fmt.Sprintf("%cFMB---r%s%c", SOH, d.curTemplate, ETB))
 	layoutPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
 
 	if _, err = d.conn.Write(layoutPayload.Bytes()); err != nil {
 		d.closeConnNoLock()
+		d.isPumping = false
 		d.mu.Unlock()
 		return fmt.Errorf("ошибка отправки команд взвода макета FMB/FBC: %w", err)
 	}
 
-	slog.Info("VALENTIN-MANAGED: Линейная подготовка завершена. Линия готова к накачке кодов.", "layout", d.curTemplate)
+	slog.Info("VALENTIN-MANAGED: Линейная подготовка завершена. Сокет удерживается монопольно.", "layout", d.curTemplate)
+
+	// Снимаем блокировку, разрешая памперу и поллеру легитимную работу
+	d.isPumping = false
 	d.mu.Unlock()
 	return nil
 }
