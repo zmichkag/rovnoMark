@@ -313,6 +313,86 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	return len(codes), nil
 }
 
+func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
+	d.mu.Lock()
+
+	// Автопереподключение: если сокет упал или был закрыт после InitSession
+	if d.conn == nil {
+		slog.Warn("VALENTIN-NICE: Сокет закрыт при поллинге счетчика, инициируем реконнект...", "printer_id", d.ID)
+		if err := d.reconnectNoLock(); err != nil {
+			d.mu.Unlock()
+			return "", fmt.Errorf("сокет принтера закрыт и реконнект провалился: %w", err)
+		}
+	}
+
+	// Взводим дедлайн на сетевую операцию I/O
+	d.conn.SetDeadline(time.Now().Add(d.Timeout))
+
+	// Формируем CVPL фрейм запроса счетчика
+	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
+
+	if _, err := d.conn.Write([]byte(cmd)); err != nil {
+		slog.Error("VALENTIN-NICE: Сбой отправки команды FBBC", "printer_id", d.ID, "err", err)
+		d.closeConnNoLock()
+		d.mu.Unlock()
+		return "", err
+	}
+
+	d.mu.Unlock() // Отпускаем лок перед блокирующим сетевым чтением
+
+	// Читаем сырой ответ из сокета фиксированным буфером
+	buf := make([]byte, 64)
+	n, err := d.conn.Read(buf)
+	if err != nil {
+		d.mu.Lock()
+		slog.Error("VALENTIN-NICE: Ошибка физического чтения ответа FBBC", "printer_id", d.ID, "err", err)
+		d.closeConnNoLock()
+		d.mu.Unlock()
+		return "", err
+	}
+
+	// Зачищаем служебные маркеры протокола вокруг полезного груза
+	cleanResp := strings.Trim(string(buf[:n]), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+
+	// Валидируем префикс Valentin (формат ответа: "A00150")
+	if strings.HasPrefix(cleanResp, "A") {
+		parts := strings.Split(cleanResp, "A")
+		if len(parts) > 1 {
+			return strings.TrimSpace(parts[1]), nil
+		}
+	}
+
+	return "", fmt.Errorf("получен некорректный формат ответа счетчика CVPL: %s", cleanResp)
+}
+
+func (d *NiceLabelDriver) reconnectNoLock() error {
+	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+
+	// Попытка установки TCP-соединения с жестким ограничением по времени
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+	if err != nil {
+		slog.Error("VALENTIN-NICE: Не удалось поднять TCP-линк с принтером при реконнекте",
+			"target_addr", addr,
+			"err", err,
+		)
+		return err
+	}
+
+	d.conn = conn
+
+	// Активируем Keep-Alive механизм, чтобы сокет не дропался при простоях линии
+	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
+	}
+
+	slog.Info("VALENTIN-NICE: Монопольный RAW TCP сокет успешно восстановлен поллером",
+		"printer_id", d.ID,
+		"target_addr", addr,
+	)
+	return nil
+}
+
 // Заглушки совместимости интерфейса
 func (d *NiceLabelDriver) ClearQueue() error                                 { return nil }
 func (d *NiceLabelDriver) GetStatus() (string, error)                        { return "ГОТОВ", nil }
