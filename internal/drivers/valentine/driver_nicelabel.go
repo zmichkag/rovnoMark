@@ -69,9 +69,9 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		return fmt.Errorf("ошибка отправки команды FMS: %w", err)
 	}
 
-	// Читаем строго фиксированный ответ статуса (ожидаем <SOH>AA2<ETB>)
+	// Читаем ответ статуса (ожидаем кадр, начинающийся с AA2)
 	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	buf := make([]byte, 16)
+	buf := make([]byte, 32) // Увеличили буфер, чтобы гарантированно вместить все дефисы ответа
 	n, err := d.conn.Read(buf)
 	if err != nil {
 		d.closeConnNoLock()
@@ -79,15 +79,18 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		return fmt.Errorf("ошибка чтения статуса диска FMS: %w", err)
 	}
 
+	// Отрезаем маркеры SOH/ETB и пробельные символы
 	statusResp := strings.Trim(string(buf[:n]), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
-	if statusResp != "AA2" {
+
+	// ИСПРАВЛЕНО: Переходим со строгого равенства на валидацию префикса готовности
+	if !strings.HasPrefix(statusResp, "AA2") {
 		d.closeConnNoLock()
 		d.mu.Unlock()
 		slog.Error("VALENTIN-MANAGED: Накопитель не в режиме готовности", "got", statusResp)
-		return fmt.Errorf("критический статус накопителя принтера: %s (ожидалось AA2)", statusResp)
+		return fmt.Errorf("критический статус накопителя принтера: %s (ожидался префикс AA2)", statusResp)
 	}
 
-	slog.Info("VALENTIN-MANAGED: Накопитель в адеквате (AA2). Запускаем контур подготовки макета.")
+	slog.Info("VALENTIN-MANAGED: Накопитель успешно прошел валидацию готовности", "raw_status", statusResp)
 	d.mu.Unlock()
 
 	// Передаем управление в SelectTemplate. Локи внутри него теперь полностью независимы.
