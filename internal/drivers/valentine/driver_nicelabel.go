@@ -160,8 +160,8 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
 	}
 
-	// --- 5. АКТИВАЦИЯ ШАБЛОНА В ОЗУ ПРИНТЕРА И ОБНОВЛЕНИЕ ЭКРАНА ---
-	// ИСПРАВЛЕНО: Убран дублирующий d.mu.Lock(), провоцировавший deadlock
+	// --- Шаг 5: АКТИВАЦИЯ ШАБЛОНА В ОЗУ ПРИНТЕРА И ОБНОВЛЕНИЕ ЭКРАНА ---
+	// ВНИМАНИЕ: Дублирующий d.mu.Lock() отсюда УБРАН, так как мы уже находимся под локом
 
 	if d.conn == nil {
 		d.mu.Unlock()
@@ -173,10 +173,11 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	var layoutPayload bytes.Buffer
 	var visibleLayoutCmd string
 
-	// ИСПРАВЛЕНО: Убран хардкод 5080, макет выбирается динамически на базе d.curTemplate
+	// А) Динамическая команда выбора макета
 	cmdSelectLayout := fmt.Sprintf("%cFMB---r5080", SOH, d.curTemplate, ETB)
 	layoutPayload.WriteString(cmdSelectLayout)
 
+	// Б) Команда активации и обновления экрана принтера (FBC)
 	cmdActivateLayout := fmt.Sprintf("%cFBC---r--------%c", SOH, ETB)
 	layoutPayload.WriteString(cmdActivateLayout)
 
@@ -191,20 +192,25 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		"raw_payload_ascii", visibleLayoutCmd,
 	)
 
-	bytesWritten, writeErr = d.conn.Write(layoutPayload.Bytes())
-	if writeErr != nil {
+	// ЯВНО ИЗОЛИРУЕМ переменные для этого шага через var, чтобы исключить
+	// переиспользование и наложение контекста ошибок из Шага 2
+	var nWritten int
+	var nErr error
+
+	nWritten, nErr = d.conn.Write(layoutPayload.Bytes())
+	if nErr != nil {
 		d.closeConnNoLock()
 		d.mu.Unlock()
-		slog.Error("VALENTIN-NICE: Критический сбой при отправке кадров FMB/FBC", "printer_id", d.ID, "err", writeErr)
-		return fmt.Errorf("ошибка записи команд активации макета в сокет: %w", writeErr)
+		slog.Error("VALENTIN-NICE: Критический сбой при отправке кадров FMB/FBC", "printer_id", d.ID, "err", nErr)
+		return fmt.Errorf("ошибка записи команд активации макета в сокет: %w", nErr)
 	}
 
 	slog.Info("VALENTIN-NICE: Макет успешно активирован, экран принтера обновлен",
 		"printer_id", d.ID,
-		"bytes_sent", bytesWritten,
+		"bytes_sent", nWritten,
 	)
 
-	d.mu.Unlock() // ИСПРАВЛЕНО: Освобождаем блокировку строго перед вызовом других методов структуры
+	d.mu.Unlock() // ОСВОБОЖДАЕМ мьютекс строго перед переходом к открытым операциям.
 
 	// --- 6. ЧТЕНИЕ СТАРТОВОЙ ТОЧКИ АППАРАТНОГО СЧЕТЧИКА ---
 	initCountStr, err := d.GetCurrentPrintCount()
