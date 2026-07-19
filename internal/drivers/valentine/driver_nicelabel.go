@@ -57,9 +57,9 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		d.conn.Close()
 		d.conn = nil
 	}
-	d.mu.Unlock() // Освобождаем мьютекс, чтобы не блокировать поллер на время сетевых пауз
+	d.mu.Unlock() // Освобождаем мьютекс.
 
-	// --- 2. НИЗКОУРОВНЕВОЕ ФОРМАТИРОВАНИЕ НАКОПИТЕЛЯ ПРИНТЕРА ---
+	// --- 2. ФОРМАТИРОВАНИЕ НАКОПИТЕЛЯ ПРИНТЕРА ---
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	cleanupConn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
@@ -167,6 +167,8 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		_ = tcpConn.SetKeepAlive(true)
 		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
 	}
+
+	d.mu.Unlock()
 
 	// --- Шаг 5: АКТИВАЦИЯ ШАБЛОНА В ОЗУ ПРИНТЕРА И ОБНОВЛЕНИЕ ЭКРАНА ---
 	d.mu.Lock()
