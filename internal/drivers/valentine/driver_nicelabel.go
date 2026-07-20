@@ -126,7 +126,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 
 	slog.Info("VALENTIN-MANAGED: Выполнение принудительного форматирования накопителя А:...")
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	cmdFormat := fmt.Sprintf("%cFMD---rA:%c", SOH, ETB)
+	cmdFormat := fmt.Sprintf("%cFMD---rA%c", SOH, ETB)
 	if _, err = d.conn.Write([]byte(cmdFormat)); err != nil {
 		d.closeConnNoLock()
 		d.isPumping = false
