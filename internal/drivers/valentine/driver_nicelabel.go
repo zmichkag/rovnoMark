@@ -338,7 +338,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	slog.Info("VALENTIN-PUMPER: Запуск накачки кодов в Block Mode", "printer_id", d.ID, "count", len(codes))
 
 	for _, code := range codes {
-		// КРИТИЧЕСКИЙ ФИКС: Жестко зашиваем только индекс поля [19],
+
 		// полностью игнорируя мусорные строки, прилетающие из внешней конфигурации.
 		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, code, ETB))
 
