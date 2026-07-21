@@ -309,97 +309,72 @@ func (d *NiceLabelDriver) closeConnNoLock() {
 	}
 }
 
-// PrintBatchIndexed осуществляет поштучную накачку уникальных кодов по схеме BM с жестким хардкодом поля 19
+// PrintBatchIndexed осуществляет загрузку кодов в буфер принтера без авто-старта печати на каждый код
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
 	}
 
 	d.mu.Lock()
-	if d.isPumping {
-		d.mu.Unlock()
-		return 0, fmt.Errorf("ошибка пампера: драйвер уже занят накачкой кодов")
-	}
-	d.isPumping = true
-
-	// Проверка и авто-восстановление сокета
 	if d.conn == nil {
-		slog.Warn("VALENTIN-PUMPER: Восстановление монопольного линка перед заливкой кодов...", "printer_id", d.ID)
+		slog.Warn("VALENTIN-PUMPER: Сокет закрыт, выполняем авто-реконнект...", "printer_id", d.ID)
 		if err := d.reconnectNoLock(); err != nil {
-			d.isPumping = false
 			d.mu.Unlock()
-			return 0, fmt.Errorf("ошибка пампера: авто-реконнект провалился: %w", err)
+			return 0, fmt.Errorf("ошибка пампера: не удалось восстановить сокет: %w", err)
 		}
 	}
 	d.mu.Unlock()
 
 	var batchPayload bytes.Buffer
 
-	slog.Info("VALENTIN-PUMPER: Запуск накачки кодов в Block Mode", "printer_id", d.ID, "count", len(codes))
-
-	slog.Info("VALENTIN-PUMPER: Запуск накачки кодов в Block Mode с фильтрацией метаданных", "printer_id", d.ID, "count", len(codes))
+	slog.Info("VALENTIN-PUMPER: Накачка пачки кодов в буфер", "printer_id", d.ID, "count", len(codes))
 
 	for _, code := range codes {
-
 		cleanCode := code
 		if idx := strings.Index(cleanCode, "|"); idx != -1 {
 			cleanCode = cleanCode[:idx]
 		}
-		// Зачищаем возможные паразитные пробелы на стыке строк
 		cleanCode = strings.TrimSpace(cleanCode)
 
-		// Формируем идеально чистый блок для графического ядра принтера
+		// 1. Загружаем чистый код в блок 19
 		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, cleanCode, ETB))
 
-		// Установка тиража на 1 штуку для текущего очищенного ШК
+		// 2. Задаем тираж 1 шт. для данного кода (без принудительного FBC внутри цикла!)
 		batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
-
-		// Взвод триггера ожидания датчика продукта на конвейере
-		batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
 	}
 
-	// Монопольный захват сокета для записи в физический порт 9100
+	// 3. ЕДИНОРАЗОВО взводим режим ожидания датчика в конце всей пачки
+	batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
+
 	d.mu.Lock()
-	defer func() {
-		d.isPumping = false
-		d.mu.Unlock()
-	}()
+	defer d.mu.Unlock()
 
 	if d.conn == nil {
-		return 0, fmt.Errorf("ошибка пампера: сокет упал непосредственно перед отправкой пакета")
+		return 0, fmt.Errorf("ошибка пампера: сокет закрыт перед записью")
 	}
 
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 
-	// Выводим точную трассировку того, что реально уходит в принтер
-	d.traceCommand(fmt.Sprintf("PUMPER BM BATCH (Проливка кодов, count: %d)", len(codes)), batchPayload.Bytes()[:min(batchPayload.Len(), 128)])
+	d.traceCommand(fmt.Sprintf("PUMPER BM BATCH (Загрузка пачки: %d)", len(codes)), batchPayload.Bytes()[:min(batchPayload.Len(), 128)])
 
 	if _, err := d.conn.Write(batchPayload.Bytes()); err != nil {
-		slog.Error("VALENTIN-PUMPER: Критический сбой отправки пакета BM в сокет", "printer_id", d.ID, "err", err)
+		slog.Error("VALENTIN-PUMPER: Ошибка записи пачки кодов в сокет", "printer_id", d.ID, "err", err)
 		d.closeConnNoLock()
 		return 0, err
 	}
 
-	slog.Info("VALENTIN-PUMPER: Насос успешно пролил чистые коды в Valentin.", "printer_id", d.ID, "count", len(codes))
+	slog.Info("VALENTIN-PUMPER: Пачка кодов успешно помещена в буфер принтера", "printer_id", d.ID, "count", len(codes))
 	return len(codes), nil
 }
 
 // GetCurrentPrintCount — жесткий шлюз от спама поллера ядра
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
-
-	// КРИТИЧЕСКИЙ ФИКС: Если драйвер занят накачкой или подготовкой макета,
-	// поллер ядра мгновенно отваливается без сетевой активности!
-	if d.isPumping || d.curTemplate == "" {
-		d.mu.Unlock()
-		return "0", nil // Возвращаем дефолт, не трогая сокет
-	}
+	defer d.mu.Unlock()
 
 	if d.conn == nil {
-		slog.Warn("VALENTIN-NICE: Сокет закрыт при поллинге счетчика, инициируем реконнект...", "printer_id", d.ID)
 		if err := d.reconnectNoLock(); err != nil {
-			d.mu.Unlock()
-			return "", fmt.Errorf("сокет принтера закрыт и реконнект провалился: %w", err)
+			return "0", fmt.Errorf("сокет закрыт: %w", err)
 		}
 	}
 
@@ -407,28 +382,18 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
 
 	if _, err := d.conn.Write([]byte(cmd)); err != nil {
-		slog.Error("VALENTIN-NICE: Сбой отправки команды FBBC", "printer_id", d.ID, "err", err)
 		d.closeConnNoLock()
-		d.mu.Unlock()
-		return "", err
+		return "0", err
 	}
-
-	d.mu.Unlock() // Отпускаем сеть
 
 	buf := make([]byte, 64)
 	n, err := d.conn.Read(buf)
 	if err != nil {
-		d.mu.Lock()
-		slog.Error("VALENTIN-NICE: Ошибка физического чтения ответа FBBC", "printer_id", d.ID, "err", err)
-
-		// НЕ рвем сокет, если это обычный таймаут занятого принтера
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			d.mu.Unlock()
 			return "0", nil
 		}
 		d.closeConnNoLock()
-		d.mu.Unlock()
-		return "", err
+		return "0", err
 	}
 
 	cleanResp := strings.Trim(string(buf[:n]), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
