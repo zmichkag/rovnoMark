@@ -337,12 +337,21 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 
 	slog.Info("VALENTIN-PUMPER: Запуск накачки кодов в Block Mode", "printer_id", d.ID, "count", len(codes))
 
+	slog.Info("VALENTIN-PUMPER: Запуск накачки кодов в Block Mode с фильтрацией метаданных", "printer_id", d.ID, "count", len(codes))
+
 	for _, code := range codes {
 
-		// полностью игнорируя мусорные строки, прилетающие из внешней конфигурации.
-		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, code, ETB))
+		cleanCode := code
+		if idx := strings.Index(cleanCode, "|"); idx != -1 {
+			cleanCode = cleanCode[:idx]
+		}
+		// Зачищаем возможные паразитные пробелы на стыке строк
+		cleanCode = strings.TrimSpace(cleanCode)
 
-		// Установка тиража на 1 штуку для текущего ШК
+		// Формируем идеально чистый блок для графического ядра принтера
+		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, cleanCode, ETB))
+
+		// Установка тиража на 1 штуку для текущего очищенного ШК
 		batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
 
 		// Взвод триггера ожидания датчика продукта на конвейере
