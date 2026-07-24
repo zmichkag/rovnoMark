@@ -201,6 +201,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 }
 
 // PrintBatchIndexed осуществляет мягкую загрузку кодов в буфер принтера без лишних разрывов
+// PrintBatchIndexed осуществляет синхронную отправку строго 1 кода по сигналу сдвига счетчика
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -209,40 +210,48 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// Страховка сокета
 	if d.conn == nil {
 		if err := d.reconnectNoLock(); err != nil {
 			return 0, fmt.Errorf("ошибка пампера: не удалось восстановить сокет: %w", err)
 		}
 	}
 
-	var batchPayload bytes.Buffer
-	for _, code := range codes {
-		cleanCode := code
-		if idx := strings.Index(cleanCode, "|"); idx != -1 {
-			cleanCode = cleanCode[:idx]
-		}
-		cleanCode = strings.TrimSpace(cleanCode)
+	// ЖЕСТКИЙ СИНХРОННЫЙ ТАКТ: Берем СТРОГО 1 код из пачки для исключения непрерывной печати
+	targetCode := codes[0]
 
-		// МЯГКАЯ НАКАЧКА: Убираем промежуточный FD----r0, чтобы не перегружать процессор Valentin.
-		// Загружаем код в блок 19 и даем команду печати 1 этикетки
-		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, cleanCode, ETB))
-		batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
+	// Очистка криптохвоста от возможных метаданных
+	cleanCode := targetCode
+	if idx := strings.Index(cleanCode, "|"); idx != -1 {
+		cleanCode = cleanCode[:idx]
 	}
+	cleanCode = strings.TrimSpace(cleanCode)
 
-	// Единоразовый взвод триггера в конце сформированного пакета
+	var batchPayload bytes.Buffer
+
+	// 1. Загружаем чистый Datamatrix в блок 19
+	batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, cleanCode, ETB))
+
+	// 2. Выставляем тираж строго 1 штука
+	batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
+
+	// 3. Взводим ожидание физического датчика конвейера
 	batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
 
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 
-	d.traceCommand(fmt.Sprintf("PUMPER BM BATCH (Загрузка: %d)", len(codes)), batchPayload.Bytes()[:protoMin(batchPayload.Len(), 128)])
+	d.traceCommand(fmt.Sprintf("PUMPER SYNC TACT (Код КМ: %d)", startIndex), batchPayload.Bytes()[:protoMin(batchPayload.Len(), 128)])
 
 	if _, err := d.conn.Write(batchPayload.Bytes()); err != nil {
-		slog.Error("VALENTIN-PUMPER: Ошибка записи в сокет, выполняем сброс", "printer_id", d.ID, "err", err)
+		slog.Error("VALENTIN-PUMPER: Критический сбой отправки синхронного кадра", "printer_id", d.ID, "err", err)
 		d.closeConnNoLock()
 		return 0, err
 	}
 
-	return len(codes), nil
+	slog.Info("VALENTIN-PUMPER: Код взведен на датчик, ожидание прохода продукта", "printer_id", d.ID, "index", startIndex)
+
+	// Возвращаем 1 — мы обработали строго один код
+	return 1, nil
 }
 
 // GetCurrentPrintCount — безопасный опрос счетчика без лишних разрывов сокета
