@@ -144,6 +144,8 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 }
 
 // PrintBatchIndexed отправляет строго минимальный реактивный кадр с кодом маркировки (BM[20])
+// PrintBatchIndexed осуществляет поштучную (1 в 1) реактивную подкачку кодов маркировки
+// с явным указанием макета в ОЗУ и атомарной отправкой кадров по TCP
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -152,43 +154,71 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// 1. Проверка и восстановление TCP-сокета
 	if d.conn == nil {
 		if err := d.reconnectNoLock(); err != nil {
 			return 0, fmt.Errorf("ошибка сокета перед реактивным тактом: %w", err)
 		}
 	}
 
-	// Берем строго 1 код из входящей пачки (режим 1 в 1)
+	// 2. Берем строго 1 код из пачки для соблюдения синхронного такта
 	targetCode := codes[0]
 
-	// Фильтрация чистейшего криптохвоста от лишних метаданных
+	// 3. Зачищаем криптохвост от внешних метаданных (|20.07.2026|4716|...)
 	cleanCode := targetCode
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	var batchPayload bytes.Buffer
+	if d.curTemplate == "" {
+		return 0, fmt.Errorf("ошибка пампера: не выбран активный макет (curTemplate пуст)")
+	}
 
-	// 1. Обновляем ТОЛЬКО динамический блок 20 (Честный Знак / DataMatrix)
-	batchPayload.WriteString(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
+	// --- АТОМАРНАЯ ПОКОМАНДНАЯ ОТПРАВКА ---
 
-	// 2. Выставляем тираж строго 1 шт.
-	batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
+	// ШАГ A: Явное указание активного макета в ОЗУ принтера (FMB)
+	cmdFMB := []byte(fmt.Sprintf("%cFMB---r%s%c", SOH, d.curTemplate, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/3]: Select Layout (FMB)", startIndex), cmdFMB)
+	if _, err := d.conn.Write(cmdFMB); err != nil {
+		slog.Error("VALENTIN-DIRECT: Ошибка записи FMB в реактивном такте", "printer_id", d.ID, "err", err)
+		d.closeConnNoLock()
+		return 0, err
+	}
+	time.Sleep(10 * time.Millisecond) // Микро-пауза на привязку макета в RAM
 
-	// 3. Взводим триггер ожидания фотодатчика на конвейере
-	batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
+	// ШАГ B: Подстановка чистого DataMatrix в динамический блок 20 (BM[20])
+	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set DataMatrix (BM[20])", startIndex), cmdBM20)
+	if _, err := d.conn.Write(cmdBM20); err != nil {
+		slog.Error("VALENTIN-DIRECT: Ошибка записи BM[20] в сокет", "printer_id", d.ID, "err", err)
+		d.closeConnNoLock()
+		return 0, err
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	// ШАГ C: Установка тиража (FD----r1) и взвод триггера на фотодатчик (FBC)
+	var cmdArm bytes.Buffer
+	cmdArm.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
+	cmdArm.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
 
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER MINIMAL TACT (Индекс: %d)", startIndex), batchPayload.Bytes())
-
-	if _, err := d.conn.Write(batchPayload.Bytes()); err != nil {
-		slog.Error("VALENTIN-DIRECT: Сбой отправки минимального кадра", "printer_id", d.ID, "err", err)
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [3/3]: Set Quantity & Arm (FD+FBC)", startIndex), cmdArm.Bytes())
+	if _, err := d.conn.Write(cmdArm.Bytes()); err != nil {
+		slog.Error("VALENTIN-DIRECT: Ошибка взвода триггера FD+FBC", "printer_id", d.ID, "err", err)
 		d.closeConnNoLock()
 		return 0, err
 	}
 
-	slog.Info("VALENTIN-DIRECT: Код BM[20] взведен на датчик", "printer_id", d.ID, "index", startIndex)
+	slog.Info("VALENTIN-DIRECT: Реактивный кадр успешно взведен на датчик",
+		"printer_id", d.ID,
+		"index", startIndex,
+		"template", d.curTemplate,
+	)
+
+	// Возвращаем 1 — обработан ровно один код из пачки
 	return 1, nil
 }
 
