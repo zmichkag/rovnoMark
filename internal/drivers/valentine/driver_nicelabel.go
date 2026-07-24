@@ -37,30 +37,30 @@ func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 	}
 }
 
-// InitSession проверяет и держит монопольный сокет
+// InitSession открывает монопольный сокет и СРАЗУ активирует шаблон с датами
 func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
-	if d.conn != nil {
-		slog.Info("VALENTIN-DIRECT: Сессия активна, сокет удерживается", "printer_id", d.ID)
-		return nil
+	// 1. Поднимаем/проверяем сокет
+	if d.conn == nil {
+		addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+		conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+		if err != nil {
+			d.mu.Unlock()
+			return fmt.Errorf("ошибка подключения к принтеру %s: %w", addr, err)
+		}
+		d.optimizeSocket(conn)
+		d.conn = conn
+		slog.Info("VALENTIN-DIRECT: Монопольный TCP-сокет успешно открыт", "printer_id", d.ID, "addr", addr)
 	}
 
-	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
-	if err != nil {
-		return fmt.Errorf("ошибка подключения к принтеру %s: %w", addr, err)
-	}
+	d.mu.Unlock()
 
-	d.optimizeSocket(conn)
-	d.conn = conn
-
-	slog.Info("VALENTIN-DIRECT: Монопольный TCP-сокет успешно открыт", "printer_id", d.ID, "addr", addr)
-	return nil
+	// 2. СРАЗУ активируем шаблон и проливаем статические даты (18 и 19)
+	return d.SelectTemplate(d.Name, staticFields)
 }
 
-// SelectTemplate вызывается при старте задачи — выбирает шаблон с Flash и взводит его в ОЗУ
+// SelectTemplate загружает макет из Flash в ОЗУ и атомарно (покомандно) записывает поля 18 и 19
 func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -77,25 +77,64 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		}
 	}
 
-	slog.Info("VALENTIN-DIRECT: Активация шаблона из Flash-памяти", "printer_id", d.ID, "template", d.curTemplate)
-
-	// Формируем команды прямым вызовом по имени шаблона
-	cmdSelectLayout := fmt.Sprintf("%cFMB---r%s%c", SOH, d.curTemplate, ETB)
-	cmdActivateLayout := fmt.Sprintf("%cFBC---r--------%c", SOH, ETB)
-
-	var layoutPayload bytes.Buffer
-	layoutPayload.WriteString(cmdSelectLayout)
-	layoutPayload.WriteString(cmdActivateLayout)
-
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("FMB+FBC (Активация шаблона)", layoutPayload.Bytes())
-
-	if _, err := d.conn.Write(layoutPayload.Bytes()); err != nil {
-		d.closeConnNoLock()
-		return fmt.Errorf("сбой отправки команд активации макета: %w", err)
+	// Извлекаем даты из staticFields или ставим дефолт текущего дня
+	dateProd, ok := staticFields["data01"]
+	if !ok || dateProd == "" {
+		dateProd = time.Now().Format("02.01.2006")
 	}
 
-	slog.Info("VALENTIN-DIRECT: Шаблон успешно загружен в ОЗУ и взведен", "printer_id", d.ID, "template", d.curTemplate)
+	dateExp, ok := staticFields["data02"]
+	if !ok || dateExp == "" {
+		dateExp = time.Now().AddDate(0, 1, 0).Format("02.01.2006")
+	}
+
+	slog.Info("VALENTIN-DIRECT: Покомандная активация макета и запись дат",
+		"printer_id", d.ID,
+		"template", d.curTemplate,
+		"date_prod", dateProd,
+		"date_exp", dateExp,
+	)
+
+	// --- ШАГ 1: Выбираем макет из Flash (FMB) ---
+	cmdFMB := []byte(fmt.Sprintf("%cFMB---r%s%c", SOH, d.curTemplate, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand("STEP 1: Select Layout (FMB)", cmdFMB)
+	if _, err := d.conn.Write(cmdFMB); err != nil {
+		d.closeConnNoLock()
+		return fmt.Errorf("сбой отправки FMB: %w", err)
+	}
+	time.Sleep(20 * time.Millisecond) // Микро-пауза на монтирование макета в RAM
+
+	// --- ШАГ 2: Фиксируем дату производства в поле 18 (BM[18]) ---
+	cmdBM18 := []byte(fmt.Sprintf("%cBM[18]%s%c", SOH, dateProd, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand("STEP 2: Field 18 DateProd (BM)", cmdBM18)
+	if _, err := d.conn.Write(cmdBM18); err != nil {
+		d.closeConnNoLock()
+		return fmt.Errorf("сбой отправки BM[18]: %w", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	// --- ШАГ 3: Фиксируем дату годности в поле 19 (BM[19]) ---
+	cmdBM19 := []byte(fmt.Sprintf("%cBM[19]%s%c", SOH, dateExp, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand("STEP 3: Field 19 DateExp (BM)", cmdBM19)
+	if _, err := d.conn.Write(cmdBM19); err != nil {
+		d.closeConnNoLock()
+		return fmt.Errorf("сбой отправки BM[19]: %w", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	// --- ШАГ 4: Первичный взвод в режим ожидания датчика (FBC) ---
+	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand("STEP 4: Arm Printer (FBC)", cmdFBC)
+	if _, err := d.conn.Write(cmdFBC); err != nil {
+		d.closeConnNoLock()
+		return fmt.Errorf("сбой отправки FBC: %w", err)
+	}
+
+	slog.Info("VALENTIN-DIRECT: Инициализация завершена, макет и даты зафиксированы в ОЗУ", "printer_id", d.ID)
 	return nil
 }
 
