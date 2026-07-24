@@ -13,18 +13,18 @@ import (
 )
 
 type NiceLabelDriver struct {
-	Name         string        // Сетевое/системное имя принтера для NiceLabel (CFS)
+	Name         string        // Сетевое/системное имя принтера для NiceLabel
 	ID           int           // ID принтера из базы данных
-	Address      string        // IP-адрес принтера Валентин/GEA
+	Address      string        // IP-адрес принтера
 	Port         int           // Порт принтера (9100)
 	Timeout      time.Duration // Сетевой таймаут сокета
 	NiceLabelURL string        // Адрес HTTP-триггера NiceLabel Automation
 	conn         net.Conn      // Активная монопольная TCP-сессия
-	mu           sync.Mutex    // Мьютекс для защиты сокета при многопоточном обращении
-	curTemplate  string        // Текущий активный макет (он же код PLU)
+	mu           sync.Mutex    // Мьютекс для защиты сокета
+	curTemplate  string        // Текущий активный макет (код PLU)
 	lastCount    int           // Последнее валидное значение счетчика FBBC
 	isPumping    bool          // Флаг активности реалтайм-насоса кодов
-	stopPumping  chan struct{} // Канал для graceful-останова горутины накачки
+	stopPumping  chan struct{} // Канал останова
 }
 
 func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
@@ -35,7 +35,6 @@ func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 		Timeout:      3 * time.Second,
 		NiceLabelURL: "http://srv205:10000/",
 		conn:         nil,
-		mu:           sync.Mutex{},
 		curTemplate:  "",
 		lastCount:    -1,
 		isPumping:    false,
@@ -43,28 +42,27 @@ func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 	}
 }
 
-// InitSession проверяет готовность. Если сокет уже удерживается — просто выходим, задача уже решена!
+// InitSession проверяет готовность линии и удерживает активный сокет
 func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
-	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-
 	d.mu.Lock()
-	// ИСПРАВЛЕНО: Если сокет живой, значит макет уже залит и взведен.
-	// Просто возвращаем nil наружу, прерывая дублирующий контур!
 	if d.conn != nil {
-		slog.Info("VALENTIN-MANAGED: Сессия уже активна, сокет удерживается. Повторная подготовка не требуется.", "printer_id", d.ID)
+		slog.Info("VALENTIN-MANAGED: Сессия уже активна, сокет удерживается.", "printer_id", d.ID)
 		d.mu.Unlock()
 		return nil
 	}
 
-	var err error
-	d.conn, err = net.DialTimeout("tcp", addr, d.Timeout)
+	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
 		d.mu.Unlock()
 		return fmt.Errorf("ошибка первичного подключения к порту: %w", err)
 	}
 
+	d.optimizeSocket(conn)
+	d.conn = conn
+
 	// Запрашиваем аппаратный статус диска А
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.conn.SetDeadline(time.Now().Add(d.Timeout))
 	if _, err = d.conn.Write([]byte{SOH, 'F', 'M', 'S', '-', '-', '-', 'w', 'A', ETB}); err != nil {
 		d.closeConnNoLock()
 		d.mu.Unlock()
@@ -87,45 +85,35 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 	}
 
 	d.mu.Unlock()
-
-	// Вызываем подготовку шаблона ТОЛЬКО при первичном холодном запуске соединения!
 	return d.SelectTemplate(d.Name, staticFields)
 }
 
-// SelectTemplate выполняет форматирование, интеграцию с NiceLabel и детально логирует отправку команд
+// SelectTemplate выполняет мягкий цикл смены шаблона и взаимодействия с NiceLabel
 func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 
-	// Защита от пустого PLУ из 1С при повторном чихе
 	if template != "" {
 		d.curTemplate = template
 	} else if d.curTemplate == "" {
-		return fmt.Errorf("критическая ошибка: передан пустой код макета (PLU), и нет сохраненного значения в сессии")
+		return fmt.Errorf("критическая ошибка: передан пустой код макета (PLU)")
 	}
 
-	// Жестко блокируем поллер счетчика
 	d.mu.Lock()
 	d.isPumping = true
-
-	if d.conn != nil {
-		d.conn.Close()
-		d.conn = nil
-	}
+	d.closeConnNoLock() // Плавно закрываем старый сокет перед передачей управления NiceLabel
 
 	// --- ШАГ 1: ПОДКЛЮЧЕНИЕ И ФОРМАТИРОВАНИЕ ---
-	var err error
-	d.conn, err = net.DialTimeout("tcp", addr, d.Timeout)
+	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
 		d.isPumping = false
 		d.mu.Unlock()
 		return fmt.Errorf("ошибка подключения для форматирования: %w", err)
 	}
+	d.optimizeSocket(conn)
+	d.conn = conn
 
-	slog.Info("VALENTIN-MANAGED: Выполнение принудительного форматирования накопителя А...", "printer_id", d.ID)
-
+	slog.Info("VALENTIN-MANAGED: Форматирование накопителя А...", "printer_id", d.ID)
 	cmdFormat := fmt.Sprintf("%cFMD---rA%c", SOH, ETB)
-
-	// ЛОГ ТРАССИРОВКИ КОМАНДЫ FMD
 	d.traceCommand("FMD (Форматирование диска)", []byte(cmdFormat))
 
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
@@ -136,9 +124,10 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		return fmt.Errorf("ошибка отправки кадра FMD: %w", err)
 	}
 
-	time.Sleep(5000 * time.Millisecond) // Технологическая пауза Flash-памяти
-	d.closeConnNoLock()
-	d.mu.Unlock() // Освобождаем порт для NiceLabel Automation
+	// Даем контроллеру 2 секунды на очистку FAT вместо жесткой 5-секундной блокировки
+	time.Sleep(2000 * time.Millisecond)
+	d.closeConnNoLock() // Освобождаем порт для NiceLabel Automation
+	d.mu.Unlock()
 
 	// --- ШАГ 2: ВЫЗОВ HTTP-ТРИГГЕРА NICELABEL AUTOMATION ---
 	staticDate, ok := staticFields["data01"]
@@ -146,13 +135,9 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		staticDate = time.Now().Format("02.01.2006")
 	}
 	printerIDStr := strconv.Itoa(d.ID)
-	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<LABEL><action><PRINT>TRUE</PRINT>
-<PRINTERNAME>%s</PRINTERNAME></action>
-<data><plu>%s</plu><date>%s</date>
-</data></LABEL>`, printerIDStr, d.curTemplate, staticDate)
+	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?><LABEL><action><PRINT>TRUE</PRINT><PRINTERNAME>%s</PRINTERNAME></action><data><plu>%s</plu><date>%s</date></data></LABEL>`, printerIDStr, d.curTemplate, staticDate)
 
-	slog.Info("VALENTIN-MANAGED: Отправка XML-триггера в NiceLabel Automation", "printer_id", d.ID, "target_url", d.NiceLabelURL)
+	slog.Info("VALENTIN-MANAGED: Отправка XML-триггера в NiceLabel Automation", "printer_id", d.ID)
 	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
 	if err != nil {
 		d.mu.Lock()
@@ -162,21 +147,19 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	}
 	resp.Body.Close()
 
-	slog.Info("VALENTIN-MANAGED: Шаблон отправлен в Найс. Ожидание освобождения порта...")
+	// --- ШАГ 3: МЯГКИЙ RETRY-ЦИКЛ ПЕРЕХВАТА ПОРТА ---
+	// Пауза 2 секунды, чтобы NiceLabel успел отстрелять и закрыть свой сокет
+	time.Sleep(2000 * time.Millisecond)
 
-	time.Sleep(5000 * time.Millisecond)
-
-	// --- ШАГ 3: RETRY-ЦИКЛ ПЕРЕХВАТА ПОРТА 9100 ---
-	var conn net.Conn
-	maxRetries := 6
-	retryInterval := 1000 * time.Millisecond
+	var newConn net.Conn
+	maxRetries := 10
+	retryInterval := 500 * time.Millisecond
 
 	for i := 1; i <= maxRetries; i++ {
-		conn, err = net.DialTimeout("tcp", addr, 1*time.Second)
+		newConn, err = net.DialTimeout("tcp", addr, 2*time.Second)
 		if err == nil {
 			break
 		}
-		slog.Warn("VALENTIN-MANAGED: Порт занят Найсом, ожидание освобождения линии...", "try", i, "err", err.Error())
 		time.Sleep(retryInterval)
 	}
 
@@ -184,26 +167,21 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		d.mu.Lock()
 		d.isPumping = false
 		d.mu.Unlock()
-		return fmt.Errorf("NiceLabel Automation не освободил порт 9100 за отведенное время: %w", err)
+		return fmt.Errorf("NiceLabel Automation не освободил порт 9100: %w", err)
 	}
 
 	d.mu.Lock()
-	d.conn = conn
-	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
-		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
-	}
+	d.optimizeSocket(newConn)
+	d.conn = newConn
 
-	// --- ШАГ 4: ОТПРАВКА КОМАНД АКТИВАЦИИ МАКЕТА В ОЗУ ПРИНТЕРА ---
+	// --- ШАГ 4: ВЗВОД МАКЕТА В ОЗУ ---
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 
-	// Собираем команды воедино
 	cmdSelectLayout := fmt.Sprintf("%cFMB---r5580%c", SOH, ETB)
 	cmdActivateLayout := fmt.Sprintf("%cFBC---r--------%c", SOH, ETB)
 
-	// ЛОГ ТРАССИРОВКИ КОМАНД АКТИВАЦИИ
 	d.traceCommand("FMB (Выбор макета)", []byte(cmdSelectLayout))
-	d.traceCommand("FBC (Взвод макета на печать)", []byte(cmdActivateLayout))
+	d.traceCommand("FBC (Взвод макета)", []byte(cmdActivateLayout))
 
 	var layoutPayload bytes.Buffer
 	layoutPayload.WriteString(cmdSelectLayout)
@@ -213,167 +191,61 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		d.closeConnNoLock()
 		d.isPumping = false
 		d.mu.Unlock()
-		return fmt.Errorf("ошибка отправки команд взвода макета FMB/FBC: %w", err)
+		return fmt.Errorf("ошибка отправки команд FMB/FBC: %w", err)
 	}
 
-	slog.Info("VALENTIN-MANAGED: Подготовка завершена. Сокет зафиксирован.", "layout", d.curTemplate)
-
+	slog.Info("VALENTIN-MANAGED: Подготовка завершена. Монопольный сокет зафиксирован.", "layout", d.curTemplate)
 	d.isPumping = false
 	d.mu.Unlock()
 	return nil
 }
 
-// traceCommand форматирует управляющие байты CVPL в человекочитаемый вид для логов
-func (d *NiceLabelDriver) traceCommand(desc string, data []byte) {
-	view := string(data)
-	view = strings.ReplaceAll(view, string([]byte{SOH}), "[SOH]")
-	view = strings.ReplaceAll(view, string([]byte{ETB}), "[ETB]")
-	view = strings.ReplaceAll(view, "\r", "[CR]")
-	view = strings.ReplaceAll(view, "\n", "[LF]")
-
-	slog.Info("VALENTIN-TRACE [КОМАНДА В ПОРТ]: "+desc,
-		"printer_id", d.ID,
-		"ascii_payload", view,
-		"hex_dump", fmt.Sprintf("%x", data),
-	)
-}
-
-// Вспомогательные методы сетевого обмена и парсинга
-func (d *NiceLabelDriver) writeCVPL(cmd string) error {
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	_, err := d.conn.Write([]byte(cmd))
-	return err
-}
-
-func (d *NiceLabelDriver) readRawResponse() (string, error) {
-	d.conn.SetReadDeadline(time.Now().Add(d.Timeout))
-	buf := make([]byte, 8192)
-	n, err := d.conn.Read(buf)
-	if err != nil {
-		return "", err
-	}
-	// Зачищаем управляющие маркеры протокола для чистого строкового анализа
-	return strings.Trim(string(buf[:n]), string([]byte{SOH, byte(ETB), '\r', '\n', ' '})), nil
-}
-
-func (d *NiceLabelDriver) isDriveDirty(listing string) bool {
-	lines := strings.Split(listing, string([]byte{ETB}))
-	for _, line := range lines {
-		clean := strings.Trim(line, string([]byte{SOH, '\r', '\n', ' '}))
-		if clean == "" {
-			continue
-		}
-		// Если находим старые .prn макеты или графику — диск требует очистки
-		if strings.Contains(clean, ".prn") || strings.Contains(clean, ".png") || strings.Contains(clean, "_graphics") {
-			return true
-		}
-	}
-	return false
-}
-
-func (d *NiceLabelDriver) extractTemplateName(listing string) string {
-	lines := strings.Split(listing, string([]byte{ETB}))
-	for _, line := range lines {
-		clean := strings.Trim(line, string([]byte{SOH, '\r', '\n', ' '}))
-		if clean == "" {
-			continue
-		}
-
-		// Жесткие исключения: пропускаем директории и системный мусор
-		if strings.Contains(clean, "<DIR>") ||
-			strings.Contains(clean, "System Volume Information") ||
-			strings.Contains(clean, "WPSettings") ||
-			strings.Contains(clean, "IndexerVolumeGuid") ||
-			strings.Contains(clean, "$RECYCLE.BIN") ||
-			strings.Contains(clean, "desktop.ini") ||
-			strings.Contains(clean, "_graphics") { // Отсекаем файлы графики макета
-			continue
-		}
-
-		// Ищем строку, которая содержит информацию о размере файла в байтах,
-		// например: "5580(2942Byte) -----A"
-		if strings.Contains(clean, "Byte)") && strings.Contains(clean, "-----A") {
-			parts := strings.Split(clean, "(")
-			if len(parts) > 0 {
-				// Вытаскиваем имя до скобки и зачищаем пробелы. Получим строго "5580"
-				detected := strings.TrimSpace(parts[0])
-				if detected != "" {
-					return detected
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func (d *NiceLabelDriver) closeConnNoLock() {
-	if d.conn != nil {
-		d.conn.Close()
-		d.conn = nil
-	}
-}
-
-// PrintBatchIndexed осуществляет загрузку кодов в буфер принтера без авто-старта печати на каждый код
+// PrintBatchIndexed осуществляет мягкую загрузку кодов в буфер принтера без лишних разрывов
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
 	}
 
 	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if d.conn == nil {
-		slog.Warn("VALENTIN-PUMPER: Сокет закрыт, выполняем авто-реконнект...", "printer_id", d.ID)
 		if err := d.reconnectNoLock(); err != nil {
-			d.mu.Unlock()
 			return 0, fmt.Errorf("ошибка пампера: не удалось восстановить сокет: %w", err)
 		}
 	}
-	d.mu.Unlock()
 
 	var batchPayload bytes.Buffer
-
-	slog.Info("VALENTIN-PUMPER: Накачка пачки кодов в буфер", "printer_id", d.ID, "count", len(codes))
-
 	for _, code := range codes {
 		cleanCode := code
 		if idx := strings.Index(cleanCode, "|"); idx != -1 {
 			cleanCode = cleanCode[:idx]
 		}
 		cleanCode = strings.TrimSpace(cleanCode)
-		//Ставим на паузу
-		batchPayload.WriteString(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
 
-		// Загружаем чистый код в блок 19
+		// МЯГКАЯ НАКАЧКА: Убираем промежуточный FD----r0, чтобы не перегружать процессор Valentin.
+		// Загружаем код в блок 19 и даем команду печати 1 этикетки
 		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, cleanCode, ETB))
-
-		// печатаем
 		batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
 	}
 
-	// ЕДИНОРАЗОВО взводим режим ожидания датчика в конце всей пачки
+	// Единоразовый взвод триггера в конце сформированного пакета
 	batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if d.conn == nil {
-		return 0, fmt.Errorf("ошибка пампера: сокет закрыт перед записью")
-	}
 
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 
-	d.traceCommand(fmt.Sprintf("PUMPER BM BATCH (Загрузка пачки: %d)", len(codes)), batchPayload.Bytes()[:min(batchPayload.Len(), 128)])
+	d.traceCommand(fmt.Sprintf("PUMPER BM BATCH (Загрузка: %d)", len(codes)), batchPayload.Bytes()[:protoMin(batchPayload.Len(), 128)])
 
 	if _, err := d.conn.Write(batchPayload.Bytes()); err != nil {
-		slog.Error("VALENTIN-PUMPER: Ошибка записи пачки кодов в сокет", "printer_id", d.ID, "err", err)
+		slog.Error("VALENTIN-PUMPER: Ошибка записи в сокет, выполняем сброс", "printer_id", d.ID, "err", err)
 		d.closeConnNoLock()
 		return 0, err
 	}
 
-	slog.Info("VALENTIN-PUMPER: Пачка кодов успешно помещена в буфер принтера", "printer_id", d.ID, "count", len(codes))
 	return len(codes), nil
 }
 
-// GetCurrentPrintCount — жесткий шлюз от спама поллера ядра
+// GetCurrentPrintCount — безопасный опрос счетчика без лишних разрывов сокета
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -388,6 +260,7 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
 
 	if _, err := d.conn.Write([]byte(cmd)); err != nil {
+		slog.Warn("VALENTIN-NICE: Ошибка записи FBBC, инициируем переподключение", "printer_id", d.ID)
 		d.closeConnNoLock()
 		return "0", err
 	}
@@ -395,6 +268,7 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	buf := make([]byte, 64)
 	n, err := d.conn.Read(buf)
 	if err != nil {
+		// При таймауте не рвем сокет сразу, даем контроллеру завершить такт
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return "0", nil
 		}
@@ -413,35 +287,47 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	return "0", nil
 }
 
+// Вспомогательный метод тонкой настройки сетевого стека Go
+func (d *NiceLabelDriver) optimizeSocket(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)   // Отключаем алгоритм Nagle для мгновенной отправки пакетов
+		_ = tcpConn.SetKeepAlive(true) // Включаем Keep-Alive
+		_ = tcpConn.SetKeepAlivePeriod(5 * time.Second)
+	}
+}
+
 func (d *NiceLabelDriver) reconnectNoLock() error {
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-
-	// Попытка установки TCP-соединения с жестким ограничением по времени
 	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
-		slog.Error("VALENTIN-NICE: Не удалось поднять TCP-линк с принтером при реконнекте",
-			"target_addr", addr,
-			"err", err,
-		)
 		return err
 	}
-
+	d.optimizeSocket(conn)
 	d.conn = conn
-
-	// Активируем Keep-Alive механизм, чтобы сокет не дропался при простоях линии
-	if tcpConn, ok := d.conn.(*net.TCPConn); ok {
-		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(10 * time.Second)
-	}
-
-	slog.Info("VALENTIN-NICE: Монопольный RAW TCP сокет успешно восстановлен поллером",
-		"printer_id", d.ID,
-		"target_addr", addr,
-	)
 	return nil
 }
 
-// Вспомогательная функция для безопасного лога среза байт
+func (d *NiceLabelDriver) closeConnNoLock() {
+	if d.conn != nil {
+		d.conn.Close()
+		d.conn = nil
+	}
+}
+
+func (d *NiceLabelDriver) traceCommand(desc string, data []byte) {
+	view := string(data)
+	view = strings.ReplaceAll(view, string([]byte{SOH}), "[SOH]")
+	view = strings.ReplaceAll(view, string([]byte{ETB}), "[ETB]")
+	view = strings.ReplaceAll(view, "\r", "[CR]")
+	view = strings.ReplaceAll(view, "\n", "[LF]")
+
+	slog.Info("VALENTIN-TRACE [КОМАНДА В ПОРТ]: "+desc,
+		"printer_id", d.ID,
+		"ascii_payload", view,
+		"hex_dump", fmt.Sprintf("%x", data),
+	)
+}
+
 func protoMin(a, b int) int {
 	if a < b {
 		return a
@@ -449,7 +335,7 @@ func protoMin(a, b int) int {
 	return b
 }
 
-// Заглушки совместимости интерфейса
+// Заглушки интерфейса
 func (d *NiceLabelDriver) ClearQueue() error                                 { return nil }
 func (d *NiceLabelDriver) GetStatus() (string, error)                        { return "ГОТОВ", nil }
 func (d *NiceLabelDriver) GetBufferFreeSpace() (int, error)                  { return 1, nil }
