@@ -146,7 +146,11 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		staticDate = time.Now().Format("02.01.2006")
 	}
 	printerIDStr := strconv.Itoa(d.ID)
-	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?><LABEL><action><PRINT>TRUE</PRINT><PRINTERNAME>%s</PRINTERNAME></action><data><plu>%s</plu><date>%s</date></data></LABEL>`, printerIDStr, d.curTemplate, staticDate)
+	xmlPayload := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<LABEL><action><PRINT>TRUE</PRINT>
+<PRINTERNAME>%s</PRINTERNAME></action>
+<data><plu>%s</plu><date>%s</date>
+</data></LABEL>`, printerIDStr, d.curTemplate, staticDate)
 
 	slog.Info("VALENTIN-MANAGED: Отправка XML-триггера в NiceLabel Automation", "printer_id", d.ID, "target_url", d.NiceLabelURL)
 	resp, err := http.Post(d.NiceLabelURL, "application/xml", bytes.NewBufferString(xmlPayload))
@@ -335,15 +339,17 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 			cleanCode = cleanCode[:idx]
 		}
 		cleanCode = strings.TrimSpace(cleanCode)
+		//Ставим на паузу
+		batchPayload.WriteString(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
 
-		// 1. Загружаем чистый код в блок 19
+		// Загружаем чистый код в блок 19
 		batchPayload.WriteString(fmt.Sprintf("%cBM[19]%s%c", SOH, cleanCode, ETB))
 
-		// 2. Задаем тираж 1 шт. для данного кода (без принудительного FBC внутри цикла!)
+		// печатаем
 		batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
 	}
 
-	// 3. ЕДИНОРАЗОВО взводим режим ожидания датчика в конце всей пачки
+	// ЕДИНОРАЗОВО взводим режим ожидания датчика в конце всей пачки
 	batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
 
 	d.mu.Lock()
