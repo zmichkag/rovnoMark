@@ -57,6 +57,7 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 }
 
 // SelectTemplate атомарно (покомандно) загружает макет из Flash в ОЗУ и записывает поля 18 и 19
+// SelectTemplate атомарно загружает макет и записывает статические поля ровно в том виде, как их отдала 1С
 func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -73,18 +74,19 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		}
 	}
 
-	// Извлекаем даты из staticFields или формируем дефолты текущего дня
-	dateProd, ok := staticFields["data01"]
-	if !ok || dateProd == "" {
-		dateProd = time.Now().Format("02.01.2006")
+	// 1. ИЗВЛЕКАЕМ ДАТЫ СТРОГО ИЗ 1С (Без вычислений time.Now)
+	dateProd, ok1 := staticFields["data01"]
+	dateExp, ok2 := staticFields["data02"]
+
+	// ВАЛИДАЦИЯ: Если 1С не передала обязательные поля — жестко бракуем запуск!
+	if !ok1 || strings.TrimSpace(dateProd) == "" {
+		return fmt.Errorf("ошибка валидации 1С: поле дата производства 'data01' не заполнено")
+	}
+	if !ok2 || strings.TrimSpace(dateExp) == "" {
+		return fmt.Errorf("ошибка валидации 1С: поле дата годности 'data02' не заполнено")
 	}
 
-	dateExp, ok := staticFields["data02"]
-	if !ok || dateExp == "" {
-		dateExp = time.Now().AddDate(0, 1, 0).Format("02.01.2006") // +1 месяц по умолчанию
-	}
-
-	slog.Info("VALENTIN-DIRECT: Покомандная активация макета и запись дат",
+	slog.Info("VALENTIN-DIRECT: Покомандная активация макета и запись точных дат из 1С",
 		"printer_id", d.ID,
 		"template", d.curTemplate,
 		"date_prod", dateProd,
@@ -101,7 +103,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	}
 	time.Sleep(20 * time.Millisecond) // Пауза на переключение графического буфера в RAM
 
-	// --- ШАГ 2: Фиксируем дату производства в поле 18 (BM[18]) ---
+	// --- ШАГ 2: Записываем точную дату производства в поле 18 (BM[18]) ---
 	cmdBM18 := []byte(fmt.Sprintf("%cBM[18]%s%c", SOH, dateProd, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	d.traceCommand("STEP 2: Field 18 DateProd (BM)", cmdBM18)
@@ -111,7 +113,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	}
 	time.Sleep(10 * time.Millisecond)
 
-	// --- ШАГ 3: Фиксируем дату годности в поле 19 (BM[19]) ---
+	// --- ШАГ 3: Записываем точную дату годности в поле 19 (BM[19]) ---
 	cmdBM19 := []byte(fmt.Sprintf("%cBM[19]%s%c", SOH, dateExp, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	d.traceCommand("STEP 3: Field 19 DateExp (BM)", cmdBM19)
@@ -130,10 +132,9 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		return fmt.Errorf("сбой отправки FBC: %w", err)
 	}
 
-	// Сбрасываем физическую засечку, так как FMB обнуляет внутренний FBBC
 	d.lastRawFBBC = 0
 
-	slog.Info("VALENTIN-DIRECT: Инициализация завершена, макет и даты зафиксированы в ОЗУ", "printer_id", d.ID)
+	slog.Info("VALENTIN-DIRECT: Инициализация завершена, оригинальные даты 1С зафиксированы в ОЗУ", "printer_id", d.ID)
 	return nil
 }
 
