@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"log/slog"
 	"rovnoMark/internal/models"
@@ -506,6 +507,42 @@ func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status
 func (s *Store) SetTaskStatus(taskID int, status string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err
+}
+
+// GetPendingCodes извлекает заданное количество неотпечатанных кодов для конкретной задачи
+func (s *Store) GetPendingCodes(taskID int, limit int) ([]models.TaskCode, error) {
+	query := `
+		SELECT id, task_id, code, status, COALESCE(printer_id, 0), COALESCE(printer_index, 0) 
+		FROM task_codes 
+		WHERE task_id = ? AND status = 'pending' 
+		ORDER BY id ASC 
+		LIMIT ?`
+
+	rows, err := s.db.Query(query, taskID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выборки pending кодов из БД: %w", err)
+	}
+	defer rows.Close()
+
+	var codes []models.TaskCode
+	for rows.Next() {
+		var c models.TaskCode
+		if err := rows.Scan(&c.ID, &c.TaskID, &c.Code, &c.Status, &c.PrinterID, &c.PrinterIndex); err != nil {
+			return nil, fmt.Errorf("ошибка сканирования строки task_codes: %w", err)
+		}
+		codes = append(codes, c)
+	}
+	return codes, nil
+}
+
+// UpdateCodeStatusByID атомарно обновляет статус и индекс конкретного кода по его уникальному ID (для Valentin)
+func (s *Store) UpdateCodeStatusByID(id int, status string, printerIndex int) error {
+	query := `UPDATE task_codes SET status = ?, printer_index = ? WHERE id = ?`
+	_, err := s.db.Exec(query, status, printerIndex, id)
+	if err != nil {
+		return fmt.Errorf("сбой обновления статуса кода ID=%d: %w", id, err)
+	}
+	return nil
 }
 
 // createTables Создает таблички которых не хватает

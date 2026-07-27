@@ -547,7 +547,7 @@
     async function stopTask(task_id, lineId) {
         if(!confirm('Остановить выполнение задачи?')) return;
         try {
-            const res = await fetch(`/api/task/stop?task_id=${id}`);
+            const res = await fetch(`/api/task/stop?task_id=${task_id}`);
             if (res.ok) fetchActiveTasks();
             else alert('Ошибка при остановке задачи:\n' + await res.text());
         } catch (e) {
