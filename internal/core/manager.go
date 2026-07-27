@@ -1,10 +1,11 @@
 package core
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
 	"log/slog"
+	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
 	"sort"
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-// Printer - расширенный контракт для железа
+// Printer - расширенный контракт для промышленного оборудования
 type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
@@ -34,166 +35,203 @@ type Printer interface {
 	SelectTemplate(template string, fields map[string]string) error
 }
 
-// TaskProcessor Добавляем возможность управления задачами
+// TaskProcessor управляет фоновыми потоками отправки данных в маркираторы
 type TaskProcessor struct {
 	Store       *storage.Store
 	Manager     *PrinterManager
 	activeMu    sync.Mutex
-	activeTasks map[int]bool // Тут храним ID задач, у которых насос УЖЕ крутится
+	activeTasks map[int]bool // Реестр активных задач, чтобы не плодить дублирующие горутины
 }
 
+// StartPumping инициализирует и запускает правильный тип насоса под конкретное железо линии
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	tp.activeMu.Lock()
 	if tp.activeTasks == nil {
 		tp.activeTasks = make(map[int]bool)
 	}
-	// Если насос для этой задачи уже запущен — тихо выходим, не плодим горутины!
+
 	if tp.activeTasks[taskID] {
 		tp.activeMu.Unlock()
 		slog.Debug("Pumper: Насос для этой задачи уже работает, дублирование проигнорировано", "task_id", taskID)
 		return
 	}
-	// Регистрируем запуск
+
 	tp.activeTasks[taskID] = true
 	tp.activeMu.Unlock()
 
-	// Достаем имя динамического поля для этой задачи ИЗ БАЗЫ
-	dynamicField, err := tp.Store.GetTaskDynamicField(taskID)
-	if err != nil || dynamicField == "" {
-		slog.Error("Накачка отменена: не найдено или пустое динамическое поле", "task_id", taskID)
-
-		tp.activeMu.Lock()
-		delete(tp.activeTasks, taskID) // Снимаем регистрацию при ошибке
-		tp.activeMu.Unlock()
+	// 1. Получаем список принтеров, привязанных к линии
+	printers, err := tp.Store.GetPrintersByLine(lineID)
+	if err != nil || len(printers) == 0 {
+		slog.Error("Pumper: Не найдены принтеры для линии", "line_id", lineID, "err", err)
+		tp.stopTaskTracking(taskID)
 		return
 	}
 
-	go func() {
-		slog.Info("=== [PUMPER-RUN] Внутри горутины, проверяем запуск ===", "task_id", taskID)
+	pCfg := printers[0]
+	pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 
-		defer func() {
-			tp.activeMu.Lock()
-			delete(tp.activeTasks, taskID)
-			tp.activeMu.Unlock()
-		}()
+	if pPrinter == nil {
+		slog.Error("Pumper: Принтер не найден в реестре менеджера", "printer_id", pCfg.ID)
+		tp.stopTaskTracking(taskID)
+		return
+	}
 
-		// Очищаем регистрацию, когда горутина завершит работу (при stop)
-		defer func() {
-			tp.activeMu.Lock()
-			delete(tp.activeTasks, taskID)
-			tp.activeMu.Unlock()
-		}()
+	ctx := context.Background()
 
-		slog.Info("=== [PUMPER] Насос кодов успешно запущен в фоне ===",
-			"task_id", taskID,
-			"line_id", lineID,
-			"dynamic_field", dynamicField,
-		)
+	// 2. ВЕТВЛЕНИЕ СТРАТЕГИЙ ПОДКАЧКИ
+	if pCfg.DriverType == "valentine_nice" {
+		if vDriver, ok := pPrinter.(*valentine.NiceLabelDriver); ok {
+			slog.Info("Pumper: Запуск реактивного насоса Valentin Fast Loop", "line_id", lineID, "task_id", taskID)
+			go tp.RunValentinFastPumper(ctx, lineID, taskID, vDriver)
+			return
+		}
+	}
 
-		for {
-			// 1. Проверяем, не остановлена ли задача (Graceful exit из горутины)
-			status, err := tp.Store.GetTaskStatus(taskID)
-			if err != nil || (status != "active" && status != "ready") {
-				slog.Info("=== [PUMPER] Выключаем насос ===", "task_id", taskID, "final_status", status)
-				return
-			}
+	// Для всех остальных типов (Videojet, Savema, TSC) запускаем штатный пачечный насос
+	slog.Info("Pumper: Запуск штатного пачечного насоса (Default)", "line_id", lineID, "task_id", taskID)
+	go tp.RunDefaultPumper(ctx, lineID, taskID, pPrinter)
+}
 
-			// 2. Получаем активные принтеры на линии
-			printers, err := tp.Store.GetPrintersByLine(lineID)
+// RunValentinFastPumper — изолированный реактивный насос для Carl Valentin (Fast Loop 1-в-1)
+func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
+	defer tp.stopTaskTracking(taskID)
+	slog.Info("VALENTIN-PUMPER: Активен реактивный цикл (50ms)", "line_id", lineID, "task_id", taskID)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastPrintedCount int = -1
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("VALENTIN-PUMPER: Фоновый насос остановлен по контексту", "task_id", taskID)
+			return
+
+		case <-ticker.C:
+			// 1. Опрос виртуального счетчика из драйвера Valentin
+			countStr, err := vDriver.GetCurrentPrintCount()
 			if err != nil {
-				slog.Error("Pumper: Ошибка получения принтеров из БД", "line_id", lineID, "err", err)
-				time.Sleep(2 * time.Second)
+				slog.Warn("VALENTIN-PUMPER: Ошибка чтения FBBC", "task_id", taskID, "err", err)
 				continue
 			}
 
-			for _, pCfg := range printers {
-				p := tp.Manager.GetPrinter(pCfg.ID)
-				if p == nil {
-					slog.Warn("Pumper: Принтер привязан к линии, но отсутствует в менеджере (оффлайн)", "printer", pCfg.Name)
-					continue
+			currentCount, _ := strconv.Atoi(countStr)
+
+			// 2. Первичная засечка при старте
+			if lastPrintedCount == -1 {
+				lastPrintedCount = currentCount
+				if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+					slog.Error("VALENTIN-PUMPER: Сбой первичного взвода КМ", "task_id", taskID, "err", err)
 				}
-
-				// 1. Устанавливаем желаемую планку буфера (для промышленной стабильности ставим 50-100)
-				maxBuffer := 50
-
-				// 2. Узнаем, сколько свободных слотов осталось до лимита
-				freeSpace, err := p.GetBufferFreeSpace()
-				if err != nil {
-					slog.Warn("Pumper: Не удалось получить свободное место в буфере принтера", "printer", pCfg.Name, "err", err)
-					continue
-				}
-
-				targetLoad := freeSpace
-				if targetLoad > maxBuffer {
-					targetLoad = maxBuffer
-				}
-
-				slog.Debug("Pumper: мониторинг буфера",
-					"printer", pCfg.Name,
-					"in_printer", maxBuffer-freeSpace,
-					"free_space", freeSpace,
-				)
-
-				// 3. Если место есть — забираем коды из базы
-				if targetLoad <= 0 {
-					continue // Буфер полон
-				}
-
-				pending, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
-				if err != nil {
-					slog.Error("Pumper: Ошибка БД при выборке кодов", "task_id", taskID, "err", err)
-					continue
-				}
-
-				if len(pending) == 0 {
-					slog.Debug("Pumper: Новые коды в базе данных отсутствуют (ожидание аппенда)", "task_id", taskID)
-					continue
-				}
-
-				// 4. Достаем сохраненные статические поля задачи из БД
-				staticJSONStr, errFields := tp.Store.GetTaskStaticFieldsJSON(taskID)
-				var staticFields map[string]string
-				if errFields == nil && staticJSONStr != "" {
-					_ = json.Unmarshal([]byte(staticJSONStr), &staticFields)
-				} else {
-					slog.Warn("Pumper: Статические поля не найдены в БД для задачи", "task_id", taskID, "err", errFields)
-				}
-
-				// 5. Подготовка пачки composite-данных для SID
-				var compositePayloads []string
-				var compositeFields string
-
-				for _, item := range pending {
-					// PrepareDynamicPipeline возвращает:
-					// compositeFields: "dm_data0;date01;date02"
-					// payload: "0104600840...|20.10.2026|20.10.3026"
-					fields, payload := PrepareDynamicPipeline(dynamicField, staticFields, item.Code)
-					compositeFields = fields // Поля одинаковы для всей пачки, просто сохраняем последнее
-					compositePayloads = append(compositePayloads, payload)
-				}
-
-				startIndex := pending[0].PrinterIndex
-
-				// Информационный лог перед отправкой в сокет
-				slog.Info("Pumper: Направляем пачку кодов и статики в принтер",
-					"printer", pCfg.Name,
-					"count", len(compositePayloads),
-					"start_index", startIndex,
-				)
-
-				// 6. Отправка в принтер составной строки полей и полезной нагрузки
-				loaded, err := p.PrintBatchIndexed(compositeFields, startIndex, compositePayloads)
-
-				if err == nil && loaded > 0 {
-					slog.Info("Pumper: Пачка успешно загружена в память устройства", "printer", pCfg.Name, "loaded_count", loaded)
-				} else if err != nil {
-					slog.Error("Pumper: Критическая ошибка отправки SID пакета в сокет", "printer", pCfg.Name, "err", err)
-				}
+				continue
 			}
 
-			time.Sleep(5 * time.Second)
+			// 3. РЕАКТИВНАЯ РЕАКЦИЯ: Если продукт сошел с печатной головки
+			if currentCount > lastPrintedCount {
+				delta := currentCount - lastPrintedCount
+				slog.Info("VALENTIN-PUMPER: Фиксируем печать этикетки", "delta", delta, "total", currentCount)
+
+				if _, err := tp.Store.MarkAsPrinted(taskID, currentCount); err != nil {
+					slog.Error("VALENTIN-PUMPER: Ошибка обновления статуса в БД", "err", err)
+				}
+
+				lastPrintedCount = currentCount
+
+				if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+					slog.Error("VALENTIN-PUMPER: Ошибка подкачки очередного КМ", "task_id", taskID, "err", err)
+				}
+			}
 		}
-	}()
+	}
+}
+
+// pushSingleValentinCode берет 1 pending код из базы и передает драйверу на атомарную отправку
+func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
+	codes, err := tp.Store.GetPendingCodes(taskID, 1)
+	if err != nil || len(codes) == 0 {
+		return nil
+	}
+
+	codeObj := codes[0]
+	cleanCode := codeObj.Code
+	if idx := strings.Index(cleanCode, "|"); idx != -1 {
+		cleanCode = cleanCode[:idx]
+	}
+	cleanCode = strings.TrimSpace(cleanCode)
+
+	_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "in_buffer", codeObj.ID)
+
+	_, err = vDriver.PrintBatchIndexed("20", codeObj.ID, []string{cleanCode})
+	if err != nil {
+		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
+		return fmt.Errorf("сбой отправки КМ в Valentin: %w", err)
+	}
+
+	return nil
+}
+
+// RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC
+func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID int, p Printer) {
+	defer tp.stopTaskTracking(taskID)
+	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл подкачки", "line_id", lineID, "task_id", taskID)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("DEFAULT-PUMPER: Остановлен по контексту", "task_id", taskID)
+			return
+		case <-ticker.C:
+			status, err := tp.Store.GetTaskStatus(taskID)
+			if err != nil || status == "stopped" || status == "completed" {
+				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID, "status", status)
+				return
+			}
+
+			printers, err := tp.Store.GetPrintersByLine(lineID)
+			if err != nil || len(printers) == 0 {
+				continue
+			}
+			pCfg := printers[0]
+
+			freeSpace, err := p.GetBufferFreeSpace()
+			if err != nil || freeSpace <= 0 {
+				continue
+			}
+
+			batchSize := freeSpace
+			if batchSize > 50 {
+				batchSize = 50
+			}
+
+			codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
+			if err != nil || len(codes) == 0 {
+				continue
+			}
+
+			var payload []string
+			for _, c := range codes {
+				payload = append(payload, c.Code)
+			}
+
+			startIndex := codes[0].PrinterIndex
+			_, err = p.PrintBatchIndexed("20", startIndex, payload)
+			if err != nil {
+				slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
+			} else {
+				slog.Info("DEFAULT-PUMPER: Пачка успешно загружена в принтер", "printer", pCfg.Name, "count", len(payload), "start_idx", startIndex)
+			}
+		}
+	}
+}
+
+func (tp *TaskProcessor) stopTaskTracking(taskID int) {
+	tp.activeMu.Lock()
+	delete(tp.activeTasks, taskID)
+	tp.activeMu.Unlock()
 }
 
 type PrinterManager struct {
@@ -244,7 +282,6 @@ func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []mod
 	return statesCopy, logsCopy
 }
 
-// StartTelemetryCollector запускает фоновый процесс сбора статистики
 func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -266,6 +303,7 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 	}()
 }
 
+// BackgroundPoller ведет фоновый опрос железа с изоляцией реактивных принтеров
 func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
 	for {
@@ -275,6 +313,8 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 			ids = append(ids, id)
 		}
 		pm.mu.RUnlock()
+
+		lineMap, _ := store.GetPrinterLineMap()
 
 		for _, id := range ids {
 			pm.mu.RLock()
@@ -304,9 +344,9 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 				curTemplate, _ = p.GetCurrentTemplate()
 
 				// ==================== ЖИВАЯ СИНХРОНИЗАЦИЯ ПЕЧАТИ ====================
-				// Обращаемся напрямую к store
-				lineMap, errMap := store.GetPrinterLineMap()
-				if errMap == nil {
+				// ИЗОЛЯЦИЯ VALENTIN: Если работает Valentin, его синхронизирует FastPumper.
+				// Поллер сюда не лезет, чтобы не создавать Race Condition в БД и сокете!
+				if cfg.DriverType != "valentine_nice" && lineMap != nil {
 					if lineID, ok := lineMap[id]; ok {
 						activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
 						if errTask == nil && activeTaskID > 0 {
@@ -334,6 +374,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 			if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
 				pm.addLogNoLock(strconv.Itoa(id), fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
 			}
+
 			newState := models.PrinterState{
 				LastTemplate:   oldState.LastTemplate,
 				LastStaticHash: oldState.LastStaticHash,
@@ -396,15 +437,12 @@ func (pm *PrinterManager) addLog(printer, event string) {
 	pm.addLogNoLock(printer, event)
 }
 
-// GetPrinterState возвращает копию текущего состояния принтера
 func (pm *PrinterManager) GetPrinterState(id int) models.PrinterState {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.states[id]
 }
 
-// UpdatePrinterDeltaState сохраняет последние успешно отправленные параметры
-// Это нужно, чтобы алгоритм Delta понимал, что данные в принтере уже обновлены
 func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -416,24 +454,21 @@ func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash s
 }
 
 func PrepareDynamicPipeline(dynamicFieldName string, staticFields map[string]string, czCode string) (string, string) {
-	// 1. Сортируем ключи статики по алфавиту для 100% стабильного порядка полей
 	var keys []string
 	for k := range staticFields {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
-	// 2. Собираем строку имен полей для InitSession (SHO) -> "dm_data0;date01;date02;text01"
 	fieldNames := []string{dynamicFieldName}
 	for _, k := range keys {
 		fieldNames = append(fieldNames, k)
 	}
 	compositeFields := strings.Join(fieldNames, ";")
 
-	// 3. Собираем строку значений для конкретной записи (SID) -> "01046...|20.10.2026|20.10.3026"
 	values := []string{czCode}
 	for _, k := range keys {
-		cleanVal := strings.ReplaceAll(staticFields[k], "|", "") // Экранируем разделитель протокола
+		cleanVal := strings.ReplaceAll(staticFields[k], "|", "")
 		values = append(values, cleanVal)
 	}
 	compositePayload := strings.Join(values, "|")
