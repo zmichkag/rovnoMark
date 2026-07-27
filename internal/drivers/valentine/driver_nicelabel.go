@@ -1,7 +1,6 @@
 package valentine
 
 import (
-	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
@@ -42,24 +41,19 @@ func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 // InitSession проверяет/поднимает монопольный сокет и запускает первичную подготовку макета
 func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	// 1. Проверяем или поднимаем монопольное TCP-соединение
+	// Только поднимаем сокет, если закрыт. Повторно SelectTemplate НЕ ВЫЗЫВАЕМ!
 	if d.conn == nil {
 		addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 		conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 		if err != nil {
-			d.mu.Unlock()
 			return fmt.Errorf("ошибка подключения к принтеру %s: %w", addr, err)
 		}
 		d.optimizeSocket(conn)
 		d.conn = conn
-		slog.Info("VALENTIN-DIRECT: Монопольный TCP-сокет успешно открыт", "printer_id", d.ID, "addr", addr)
 	}
-
-	d.mu.Unlock()
-
-	// 2. Сразу переводим принтер на указанный макет и записываем статические даты
-	return d.SelectTemplate(d.Name, staticFields)
+	return nil
 }
 
 // SelectTemplate атомарно (покомандно) загружает макет из Flash в ОЗУ и записывает поля 18 и 19
@@ -144,7 +138,6 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 }
 
 // PrintBatchIndexed осуществляет отправку строго динамического блока BM[20] (Честный Знак)
-// Статика и выбор макета FMB выполняются СТРОГО ЕДИНОРАЗОВО в SelectTemplate!
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -153,56 +146,53 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// 1. Восстановление TCP-сокета при необходимости
 	if d.conn == nil {
 		if err := d.reconnectNoLock(); err != nil {
 			return 0, fmt.Errorf("ошибка сокета перед реактивным тактом: %w", err)
 		}
 	}
 
-	// 2. Страховка curTemplate: если пуст, берем системное имя d.Name
-	if d.curTemplate == "" {
-		if d.Name != "" {
-			d.curTemplate = d.Name
-		} else {
-			// Крайний фоллбек на дефолтный PLU
-			d.curTemplate = "4716"
-		}
-		slog.Warn("VALENTIN-DIRECT: curTemplate был пуст, принудительно подставлен фоллбек", "printer_id", d.ID, "fallback", d.curTemplate)
-	}
-
-	// 3. Берем строго 1 код из пачки (тактирование 1 в 1)
 	targetCode := codes[0]
-
-	// 4. Очистка криптохвоста от внешних разделителей
 	cleanCode := targetCode
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	// --- МИНИМАЛЬНЫЙ РЕАКТИВНЫЙ КАДР (БЕЗ ПОВТОРНОЙ СТАТИКИ) ---
-	var batchPayload bytes.Buffer
-
-	// a) Обновляем ТОЛЬКО динамическое поле 20 (DataMatrix)
-	batchPayload.WriteString(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
-
-	// б) Выставляем тираж 1 шт.
-	batchPayload.WriteString(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
-
-	// в) Взвод триггера на фотодатчик линии
-	batchPayload.WriteString(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
-
+	// --- ШАГ 1: Обновляем динамический DataMatrix BM[20] ---
+	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT (Индекс: %d)", startIndex), batchPayload.Bytes())
-
-	if _, err := d.conn.Write(batchPayload.Bytes()); err != nil {
-		slog.Error("VALENTIN-DIRECT: Сбой отправки минимального кадра BM[20]", "printer_id", d.ID, "err", err)
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/3]: Set DataMatrix (BM20)", startIndex), cmdBM20)
+	if _, err := d.conn.Write(cmdBM20); err != nil {
 		d.closeConnNoLock()
-		return 0, err
+		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
 	}
 
-	slog.Info("VALENTIN-DIRECT: Код BM[20] взведен на датчик", "printer_id", d.ID, "index", startIndex)
+	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
+	time.Sleep(15 * time.Millisecond)
+
+	// --- ШАГ 2: Выставляем тираж 1 шт (FD) ---
+	cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Quantity (FD)", startIndex), cmdFD)
+	if _, err := d.conn.Write(cmdFD); err != nil {
+		d.closeConnNoLock()
+		return 0, fmt.Errorf("сбой отправки FD: %w", err)
+	}
+
+	// 🛑 ВАЖНО: Пауза 10мс перед взводом
+	time.Sleep(10 * time.Millisecond)
+
+	// --- ШАГ 3: Взвод триггера на фотодатчик (FBC) ---
+	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [3/3]: Arm Trigger (FBC)", startIndex), cmdFBC)
+	if _, err := d.conn.Write(cmdFBC); err != nil {
+		d.closeConnNoLock()
+		return 0, fmt.Errorf("сбой отправки FBC: %w", err)
+	}
+
+	slog.Info("VALENTIN-DIRECT: Код BM[20] успешно взведен на датчик", "printer_id", d.ID, "index", startIndex)
 	return 1, nil
 }
 
