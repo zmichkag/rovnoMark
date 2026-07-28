@@ -27,6 +27,11 @@ import (
 //go:embed ui/*
 var uiFS embed.FS
 
+// 1. Добавляем embed для нового интерфейса dev-ветки
+//
+//go:embed ui2/*
+var ui2FS embed.FS
+
 // sendJSONError отправляет стандартизированный JSON-ответ с ошибкой
 func sendJSONError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -761,10 +766,18 @@ func main() {
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))
 
+	// 3. Монтируем новый UI на отдельный эндпоинт /frontend2
+	content2, err := fs.Sub(ui2FS, "ui2")
+	if err != nil {
+		slog.Error("Ошибка монтирования ui2", "err", err)
+	} else {
+		http.Handle("/frontend2/", http.StripPrefix("/frontend2/", http.FileServer(http.FS(content2))))
+		slog.Info("Развернут Dev Frontend v1.5", "url", "http://localhost:8080/frontend2/")
+	}
+
 	addr := fmt.Sprintf(":%d", *port)
 	slog.Info("HTTP сервер запущен", "address", "http://localhost"+addr)
 
-	// Теперь ошибка сервера будет выводиться структурированно
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		slog.Error("Критическая ошибка сервера", "err", err)
 		os.Exit(1)
