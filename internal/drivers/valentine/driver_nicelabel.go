@@ -75,8 +75,8 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	}
 
 	// 1. ИЗВЛЕКАЕМ ДАТЫ СТРОГО ИЗ 1С (Без вычислений time.Now)
-	dateProd, ok1 := staticFields["data01"]
-	dateExp, ok2 := staticFields["data02"]
+	dateProd, ok1 := staticFields["date01"]
+	dateExp, ok2 := staticFields["date02"]
 
 	// ВАЛИДАЦИЯ: Если 1С не передала обязательные поля — жестко бракуем запуск!
 	if !ok1 || strings.TrimSpace(dateProd) == "" {
