@@ -453,7 +453,7 @@ func main() {
 					return
 				}
 			} else {
-				if err := p.SelectTemplate(req.TemplateName, nil); err != nil {
+				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
