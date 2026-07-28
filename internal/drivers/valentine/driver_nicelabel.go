@@ -80,7 +80,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		}
 	}
 
-	// 1. ИЗВЛЕКАЕМ ДАТЫ СТРОГО ИЗ 1С (Без вычислений time.Now)
+	// 1. ИЗВЛЕКАЕМ ДАТЫ СТРОГО ИЗ 1С
 	dateProd, ok1 := staticFields["date01"]
 	dateExp, ok2 := staticFields["date02"]
 
