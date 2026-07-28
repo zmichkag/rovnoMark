@@ -62,6 +62,12 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	slog.Info("VALENTIN-INIT: Получены данные статики от 1С",
+		"printer_id", d.ID,
+		"template", template,
+		"raw_static_fields", staticFields,
+	)
+
 	if template != "" {
 		d.curTemplate = template
 	} else if d.curTemplate == "" {
