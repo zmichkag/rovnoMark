@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"rovnoMark/internal/core"
+	"rovnoMark/internal/drivers/markem"
 
 	"rovnoMark/internal/models"
 	"strconv"
@@ -69,6 +70,8 @@ func main() {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "valentine_nice" {
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
+		} else if cfg.DriverType == "markem" {
+			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 		}
 	}
 
@@ -139,6 +142,8 @@ func main() {
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		case "valentine_nice":
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
+		case "markem":
+			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
