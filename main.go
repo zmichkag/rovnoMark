@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -359,7 +360,7 @@ func main() {
 			return
 		}
 
-		// 1. Читаем line_id из Query-параметров URL, как просил Ваге
+		// 1. Валидация Query-параметра line_id
 		lineIDStr := r.URL.Query().Get("line_id")
 		lineID, err := strconv.Atoi(lineIDStr)
 		if err != nil || lineID <= 0 {
@@ -367,6 +368,20 @@ func main() {
 			return
 		}
 
+		// 2. Вычитывание и логирование сырого Body от 1С
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			slog.Error("TASK-CREATE: Ошибка чтения Body от 1С", "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+
+		slog.Info("TASK-CREATE [RAW JSON FROM 1C]:",
+			"line_id", lineID,
+			"raw_body", string(bodyBytes),
+		)
+
+		// 3. Декодирование структуры из прочитанных байт
 		var req struct {
 			TemplateName     string            `json:"template_name"`
 			DynamicFieldName string            `json:"dynamic_field_name"`
@@ -374,12 +389,13 @@ func main() {
 			RndText          string            `json:"rnd_text"`
 		}
 
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			sendJSONError(w, http.StatusBadRequest, "Invalid JSON")
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			slog.Warn("TASK-CREATE: Ошибка парсинга JSON от 1С", "raw", string(bodyBytes), "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Invalid JSON structure")
 			return
 		}
 
-		// 0. Проверяем, не занята ли линия другой задачей
+		// 4. Проверка состояния линии (активные задачи)
 		activeID, err := store.GetActiveTaskByLine(lineID)
 		if err != nil {
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
@@ -390,14 +406,19 @@ func main() {
 			return
 		}
 
-		// 1. Проверяем принтеры
+		// 5. Проверка наличия принтеров на линии
 		printersInLine, err := store.GetPrintersByLine(lineID)
 		if err != nil || len(printersInLine) == 0 {
 			sendJSONError(w, http.StatusNotFound, "Линия пуста или не найдена")
 			return
 		}
 
-		// 2. Выполняем Handshake и проверку связи с принтерами
+		// 6. Handshake, проверку статусов и подготовка оборудования
+		badStatuses := []string{
+			"TIMEOUT", "INITIALIZING", "STARTING",
+			"ОФФЛАЙН", "OFFLINE", "ОШИБКА", "ERROR", "REFUSED",
+		}
+
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
@@ -405,11 +426,7 @@ func main() {
 				return
 			}
 
-			// Свежий опрос статуса
-			// Пытаемся получить статус «здесь и сейчас»
 			status, err := p.GetStatus()
-
-			// Собираем всё в одну строку для анализа (и ошибку сокета, и текстовый статус)
 			var checkString string
 			if err != nil {
 				checkString = strings.ToUpper(err.Error())
@@ -417,52 +434,31 @@ func main() {
 				checkString = strings.ToUpper(status)
 			}
 
-			// Словарь (массив) «плохих» статусов, при которых работать нельзя
-			badStatuses := []string{
-				"TIMEOUT",      // Сетевой таймаут сокета
-				"INITIALIZING", // Инициализация (в вашем случае — застрявший оффлайн)
-				"STARTING",     // Запуск устройства
-				"ОФФЛАЙН",      //
-				"OFFLINE",
-				"ОШИБКА", //
-				"ERROR",
-				"REFUSED", // Сброс соединения сокетом
-			}
-
-			// Бежим по словарю и проверяем, не поймали ли мы проблему
 			for _, bad := range badStatuses {
 				if strings.Contains(checkString, bad) {
 					slog.Warn("Принтер забракован перед стартом задачи", "printer", pCfg.Name, "detected_status", status, "err", err)
-
 					sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
 						"Принтер %s не готов к работе (Текущее состояние: %s). Проверьте питание, сеть или устраните ошибку на устройстве.",
-						pCfg.Name,
-						status,
+						pCfg.Name, status,
 					))
-					return // Полностью прерываем создание задачи, Ваге получает от ворот поворот
+					return
 				}
 			}
 
-			// Если принтер успешно прошел сетевой и логический чек — только тогда применяем шаблон
+			// Конфигурация печати в зависимости от режима (ЧЗ / Статика)
 			if req.DynamicFieldName == "" {
-				// Если динамические поля не заданы
 				p.ClearQueue()
 				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона (SLA) на %s: %v", pCfg.Name, err))
 					return
 				}
 			} else {
-				// Нормальная работа с ЧЗ
 				if err := p.SelectTemplate(req.TemplateName, nil); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
 
-				// Генерируем составную строку полей для команды SHO
-				// Передаем пустую строку вместо кода ЧЗ, так как на этапе InitSession нам нужен только список полей (compositeFields)
 				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
-
-				// Инициализируем сессию, передавая compositeFields
 				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
 					return
@@ -471,7 +467,7 @@ func main() {
 			manager.UpdatePrinterDeltaState(pCfg.ID, req.TemplateName, fmt.Sprintf("%v", req.StaticFields))
 		}
 
-		// 3. Сохраняем задачу
+		// 7. Фиксация задачи в БД
 		staticBytes, _ := json.Marshal(req.StaticFields)
 		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
 		if err != nil {
@@ -479,8 +475,9 @@ func main() {
 			return
 		}
 
+		// 8. Ответ кливеру 1С
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Отвечаем 1С, что задача ГОТОВА к приему кодов
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":   "ready",
 			"task_id":  taskID,
