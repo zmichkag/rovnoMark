@@ -94,8 +94,9 @@ func (d *Driver) closeConn() {
 	}
 }
 
-// sendSOAP отправляет XML-команду и вычитывает поток до закрывающего тега </Envelope>
-func (d *Driver) sendSOAP(bodyXML string) (string, error) {
+// sendSOAPWaitACK отправляет XML и дожидается РЕАЛЬНОГО выполнения (CmdOK / CmdFailed),
+// автоматически игнорируя промежуточные сообщения CmdPending от прошивки Маркема.
+func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -116,7 +117,7 @@ func (d *Driver) sendSOAP(bodyXML string) (string, error) {
 		d.SenderName, d.ActorName, formattedBody)
 
 	payload := encodeUTF16LE(soapMsg)
-	_ = d.conn.SetDeadline(time.Now().Add(d.Timeout))
+	_ = d.conn.SetDeadline(time.Now().Add(5 * time.Second)) // Увеличенный таймаут для загрузки макета
 
 	slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
 
@@ -125,9 +126,12 @@ func (d *Driver) sendSOAP(bodyXML string) (string, error) {
 		return "", fmt.Errorf("socket write error: %w", err)
 	}
 
-	// Читаем ответ из сокета в цикле (защита от склейки пакетов и CmdPending)
+	// Цикл ожидающего вычитывания
 	var buffer bytes.Buffer
 	chunk := make([]byte, 4096)
+	actTagSingle := fmt.Sprintf("act='%d'", act)
+	actTagDouble := fmt.Sprintf("act=\"%d\"", act)
+
 	for {
 		n, err := d.conn.Read(chunk)
 		if err != nil {
@@ -137,12 +141,22 @@ func (d *Driver) sendSOAP(bodyXML string) (string, error) {
 		buffer.Write(chunk[:n])
 
 		decoded := decodeUTF16LE(buffer.Bytes())
-		if strings.Contains(decoded, "</Envelope>") {
-			// Проверяем на наличие ошибок в теле SOAP
-			if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
-				slog.Warn("MARKEM Rejected Command", "ip", d.Address, "resp", decoded)
-				return decoded, fmt.Errorf("printer rejected command (CmdFailed/Fault)")
+
+		// Проверяем, пришел ли ответ ИМЕННО на нашу команду
+		if strings.Contains(decoded, actTagSingle) || strings.Contains(decoded, actTagDouble) {
+			// Если пришел CmdPending — принтер еще собирает макет, продолжаем слушать сокет!
+			if strings.Contains(decoded, "CmdPending") {
+				slog.Debug("MARKEM Pending...", "ip", d.Address, "act", act)
+				continue
 			}
+
+			// Если отбил ошибкой
+			if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
+				slog.Warn("MARKEM Command Failed", "ip", d.Address, "resp", decoded)
+				return decoded, fmt.Errorf("printer rejected command (CmdFailed)")
+			}
+
+			// Успешное завершение!
 			return decoded, nil
 		}
 	}
@@ -150,28 +164,26 @@ func (d *Driver) sendSOAP(bodyXML string) (string, error) {
 
 // --- РЕАЛИЗАЦИЯ КОНТРАКТА core.Printer ---
 
-// 1. ВЫЗОВ ИЗ ПАМЯТИ ПО PLU / ИМЕНИ + 2. ПЕРЕДАЧА СТАТИЧЕСКИХ ДАТ
+// SelectTemplate последовательно выбирает макет, ДОЖИДАЕТСЯ CmdOK и только потом шлет статику
 func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
 	slog.Info("MARKEM: Выбор шаблона и загрузка статики", "ip", d.Address, "template", template, "fields", len(fields))
 
-	// Обеспечиваем расширение .job, если 1С прислала просто имя
 	jobName := template
 	if !strings.HasSuffix(strings.ToLower(jobName), ".job") {
 		jobName += ".job"
 	}
 
-	// Шаг 1: Вызов макета из памяти принтера
+	// 1. Активируем макет и ЖДЕМ полного CmdOK от Маркема
 	cmdSelect := `<SelectLocalJob act="%d"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
-	if _, err := d.sendSOAP(cmdSelect); err != nil {
+	if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
 		return fmt.Errorf("ошибка активации задания %s: %w", jobName, err)
 	}
 	d.curTemplate = template
 
-	// Сброс виртуальной очереди при смене задания
-	d.totalSent = 0
-	d.totalPrinted = 0
+	// Небольшая пауза 50мс для стабилизации графического контекста в железе
+	time.Sleep(50 * time.Millisecond)
 
-	// Шаг 2: Если есть статические поля (даты) — сразу шлем их в макет
+	// 2. Только ТЕПЕРЬ безопасно отправляем статические поля
 	if len(fields) > 0 {
 		return d.UpdateStaticFields(fields)
 	}
@@ -185,16 +197,32 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 
 	var sb strings.Builder
 	sb.WriteString(`<UpdateSelectedJob act="%d">`)
+
 	for name, val := range fields {
+		// Очищаем значение от управляющих символов
+		cleanVal := strings.ReplaceAll(val, "|", "")
+		cleanVal = escapeXML(cleanVal)
+
+		// Добавляем поле в запрос
 		sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData>`,
-			escapeXML(name), escapeXML(val)))
+			escapeXML(name), cleanVal))
+
+		// Если 1С прислала DATE01 в верхнем регистре, продублируем в нижнем (date01) для гарантии совпадения с макетом
+		lowerName := strings.ToLower(name)
+		if lowerName != name {
+			sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData>`,
+				escapeXML(lowerName), cleanVal))
+		}
 	}
 	sb.WriteString(`</UpdateSelectedJob>`)
 
-	_, err := d.sendSOAP(sb.String())
+	slog.Info("MARKEM: Отправка пакета статики", "ip", d.Address, "payload_xml", sb.String())
+
+	_, err := d.sendSOAPWaitACK(sb.String())
 	if err != nil {
 		return fmt.Errorf("ошибка передачи статических полей: %w", err)
 	}
+
 	slog.Info("MARKEM: Статические даты успешно применены", "ip", d.Address, "count", len(fields))
 	return nil
 }
@@ -221,7 +249,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	}
 	sb.WriteString(`</QueuePackData>`)
 
-	_, err := d.sendSOAP(sb.String())
+	_, err := d.sendSOAPWaitACK(sb.String())
 	if err != nil {
 		slog.Error("MARKEM: Сбой загрузки очереди", "ip", d.Address, "err", err)
 		return 0, err
@@ -262,7 +290,7 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 
 // 4. ПОДКАЧКА ПО СЧЕТЧИКУ (RequestCounts -> тег Batch)
 func (d *Driver) GetCurrentPrintCount() (string, error) {
-	resp, err := d.sendSOAP(`<RequestCounts act="%d"/>`)
+	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="%d"/>`)
 	if err != nil {
 		return strconv.Itoa(d.totalPrinted), err
 	}
@@ -286,7 +314,7 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 
 // GetStatus для BackgroundPoller
 func (d *Driver) GetStatus() (string, error) {
-	resp, err := d.sendSOAP(`<RequestPackMLStatus act="%d"/>`)
+	resp, err := d.sendSOAPWaitACK(`<RequestPackMLStatus act="%d"/>`)
 	if err != nil {
 		return "ОФФЛАЙН", err
 	}
@@ -310,7 +338,7 @@ func (d *Driver) GetStatus() (string, error) {
 // ClearQueue сброс буфера кодов (при остановке линии в 1С / MES)
 func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
-	_, err := d.sendSOAP(`<ClearPackDataQueue act="%d"/>`)
+	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="%d"/>`)
 	if err == nil {
 		d.totalSent = 0
 		d.totalPrinted = 0
@@ -327,7 +355,7 @@ func (d *Driver) PrintTemplate(template string, fields map[string]string) error 
 }
 
 func (d *Driver) GetTemplates() ([]string, error) {
-	resp, err := d.sendSOAP(`<RequestFileDirectoryListing act="%d"><Filter>job</Filter></RequestFileDirectoryListing>`)
+	resp, err := d.sendSOAPWaitACK(`<RequestFileDirectoryListing act="%d"><Filter>job</Filter></RequestFileDirectoryListing>`)
 	if err != nil {
 		return nil, err
 	}
