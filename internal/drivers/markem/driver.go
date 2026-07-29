@@ -231,12 +231,10 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, nil
 	}
 
-	// Защита: Если 1С просит напечатать в "Field7" или "DATAMATRIX_2",
-	// принудительно направляем поток в "DATAMATRIX", как зашито в макете
-	targetField := fieldName
-	if fieldName == "" || fieldName == "Field7" {
-		targetField = "DATAMATRIX"
-	}
+	targetField := "DATAMATRIX"
+	//if fieldName == "" {
+	//	targetField = "DATAMATRIX"
+	//}
 
 	slog.Info("MARKEM: Отправка пачки в буфер (QueuePackData)", "ip", d.Address, "field", targetField, "count", len(codes))
 
