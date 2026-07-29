@@ -14,13 +14,13 @@ import (
 )
 
 const (
-	MaxQueueLimit = 200 // Аппаратный лимит буфера кодов SmartDate
+	MaxQueueLimit = 200 // Аппаратный лимит буфера кодов SmartDate X60
 )
 
 type Driver struct {
 	Address     string
 	Port        int
-	ActorName   string // Имя принтера в DCP (обычно "Actor1" или "SmartDate5")
+	ActorName   string // Имя принтера в DCP ("Actor1")
 	SenderName  string // Наше имя ("RovnoMarkGo")
 	Timeout     time.Duration
 	mu          sync.Mutex
@@ -35,14 +35,14 @@ type Driver struct {
 
 func New(ip string, port int, actorName string) *Driver {
 	if actorName == "" {
-		actorName = "Actor1" // Дефолт, подтвержденный на практике
+		actorName = "Actor1"
 	}
 	return &Driver{
 		Address:    ip,
 		Port:       port,
 		ActorName:  actorName,
 		SenderName: "RovnoMarkGo",
-		Timeout:    3 * time.Second,
+		Timeout:    5 * time.Second,
 		actCounter: 50000,
 	}
 }
@@ -95,7 +95,7 @@ func (d *Driver) closeConn() {
 }
 
 // sendSOAPWaitACK отправляет XML и дожидается РЕАЛЬНОГО выполнения (CmdOK / CmdFailed),
-// автоматически игнорируя промежуточные сообщения CmdPending от прошивки Маркема.
+// автоматически игнорируя промежуточные сообщения CmdPending и фоновые события принтера.
 func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -113,11 +113,11 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 	act := d.getNextAct()
 	formattedBody := fmt.Sprintf(bodyXML, act)
 
-	soapMsg := fmt.Sprintf(`<Envelope><Header sender="%s" receiver="%s"/><Body>%s</Body></Envelope>`,
+	soapMsg := fmt.Sprintf(`<?xml version="1.0" encoding="utf-16"?><Envelope><Header sender="%s" receiver="%s"/><Body>%s</Body></Envelope>`,
 		d.SenderName, d.ActorName, formattedBody)
 
 	payload := encodeUTF16LE(soapMsg)
-	_ = d.conn.SetDeadline(time.Now().Add(5 * time.Second)) // Увеличенный таймаут для загрузки макета
+	_ = d.conn.SetDeadline(time.Now().Add(8 * time.Second))
 
 	slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
 
@@ -126,13 +126,13 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 		return "", fmt.Errorf("socket write error: %w", err)
 	}
 
-	// Цикл ожидающего вычитывания
 	var buffer bytes.Buffer
 	chunk := make([]byte, 4096)
 	actTagSingle := fmt.Sprintf("act='%d'", act)
 	actTagDouble := fmt.Sprintf("act=\"%d\"", act)
 
 	for {
+		_ = d.conn.SetDeadline(time.Now().Add(5 * time.Second)) // Продляем таймаут при чтении
 		n, err := d.conn.Read(chunk)
 		if err != nil {
 			d.closeConn()
@@ -144,19 +144,19 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 
 		// Проверяем, пришел ли ответ ИМЕННО на нашу команду
 		if strings.Contains(decoded, actTagSingle) || strings.Contains(decoded, actTagDouble) {
-			// Если пришел CmdPending — принтер еще собирает макет, продолжаем слушать сокет!
+			// Если пришел CmdPending — принтер рендерит макет, продолжаем слушать сокет!
 			if strings.Contains(decoded, "CmdPending") {
 				slog.Debug("MARKEM Pending...", "ip", d.Address, "act", act)
 				continue
 			}
 
-			// Если отбил ошибкой
+			// Если сбой выполнения
 			if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
 				slog.Warn("MARKEM Command Failed", "ip", d.Address, "resp", decoded)
 				return decoded, fmt.Errorf("printer rejected command (CmdFailed)")
 			}
 
-			// Успешное завершение!
+			// Успешно!
 			return decoded, nil
 		}
 	}
@@ -164,7 +164,6 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 
 // --- РЕАЛИЗАЦИЯ КОНТРАКТА core.Printer ---
 
-// SelectTemplate последовательно выбирает макет, ДОЖИДАЕТСЯ CmdOK и только потом шлет статику
 func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
 	slog.Info("MARKEM: Выбор шаблона и загрузка статики", "ip", d.Address, "template", template, "fields", len(fields))
 
@@ -173,17 +172,16 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 		jobName += ".job"
 	}
 
-	// 1. Активируем макет и ЖДЕМ полного CmdOK от Маркема
+	// 1. Активируем макет
 	cmdSelect := `<SelectLocalJob act="%d"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
 	if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
 		return fmt.Errorf("ошибка активации задания %s: %w", jobName, err)
 	}
 	d.curTemplate = template
 
-	// Небольшая пауза 50мс для стабилизации графического контекста в железе
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // Стабилизация графического контекста
 
-	// 2. Только ТЕПЕРЬ безопасно отправляем статические поля
+	// 2. Отправляем статические поля
 	if len(fields) > 0 {
 		return d.UpdateStaticFields(fields)
 	}
@@ -199,19 +197,20 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	sb.WriteString(`<UpdateSelectedJob act="%d">`)
 
 	for name, val := range fields {
-		// Очищаем значение от управляющих символов
 		cleanVal := strings.ReplaceAll(val, "|", "")
 		cleanVal = escapeXML(cleanVal)
 
-		// Добавляем поле в запрос
+		// 1. Отправляем поле в оригинальном виде (например, PLU)
 		sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData>`,
 			escapeXML(name), cleanVal))
 
-		// Если 1С прислала DATE01 в верхнем регистре, продублируем в нижнем (date01) для гарантии совпадения с макетом
-		lowerName := strings.ToLower(name)
-		if lowerName != name {
-			sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData>`,
-				escapeXML(lowerName), cleanVal))
+		// 2. АЛИАСЫ ДЛЯ ДАТ 1С: Автоматический перевод DATE01/DATE02 -> date1/date2
+		upper := strings.ToUpper(name)
+		if upper == "DATE01" || upper == "DATE1" {
+			sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>date1</FieldName><FieldValue>%s</FieldValue></FieldData>`, cleanVal))
+		}
+		if upper == "DATE02" || upper == "DATE2" {
+			sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>date2</FieldName><FieldValue>%s</FieldValue></FieldData>`, cleanVal))
 		}
 	}
 	sb.WriteString(`</UpdateSelectedJob>`)
@@ -227,25 +226,33 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	return nil
 }
 
-// 3. НАКАЧКА ПАЧКАМИ ДО 200 ШТУК (QueuePackData)
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
 	}
 
-	slog.Info("MARKEM: Отправка пачки в буфер (QueuePackData)", "ip", d.Address, "field", fieldName, "count", len(codes))
+	// Защита: Если 1С просит напечатать в "Field7" или "DATAMATRIX_2",
+	// принудительно направляем поток в "DATAMATRIX", как зашито в макете
+	targetField := fieldName
+	if fieldName == "" || fieldName == "Field7" {
+		targetField = "DATAMATRIX"
+	}
+
+	slog.Info("MARKEM: Отправка пачки в буфер (QueuePackData)", "ip", d.Address, "field", targetField, "count", len(codes))
 
 	var sb strings.Builder
 	sb.WriteString(`<QueuePackData act="%d">`)
 
 	for _, code := range codes {
-		// Подготовка GS1 (замена символа Group Separator \x1d на стандартный ASCII 29 / &#x1D;)
-		cleanCode := strings.ReplaceAll(code, "<GS>", "&#x1D;")
+		// 1. Сначала экранируем XML (<, >, &...)
+		cleanCode := escapeXML(code)
+		// 2. ТЕПЕРЬ подменяем спецсимволы GS1 на сущность &#x1D;
+		cleanCode = strings.ReplaceAll(cleanCode, "&lt;GS&gt;", "&#x1D;")
+		cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "&#x1D;")
 		cleanCode = strings.ReplaceAll(cleanCode, "\x1d", "&#x1D;")
-		cleanCode = escapeXML(cleanCode)
 
 		sb.WriteString(fmt.Sprintf(`<PackData><FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData></PackData>`,
-			escapeXML(fieldName), cleanCode))
+			escapeXML(targetField), cleanCode))
 	}
 	sb.WriteString(`</QueuePackData>`)
 
@@ -255,14 +262,11 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, err
 	}
 
-	// Увеличиваем счетчик успешно закинутых в буфер кодов
 	d.totalSent += len(codes)
 	return len(codes), nil
 }
 
-// 4. КОНТРОЛЬ БУФЕРА (ЗАЩИТА ОТ ПЕРЕПОЛНЕНИЯ 200 ШТ)
 func (d *Driver) GetBufferFreeSpace() (int, error) {
-	// Актуализируем текущее количество отпечатанных кодов
 	countStr, err := d.GetCurrentPrintCount()
 	if err != nil {
 		return 0, err
@@ -273,7 +277,6 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 		d.totalPrinted = printed
 	}
 
-	// Сколько кодов сейчас физически лежит в буфере принтера
 	inBuffer := d.totalSent - d.totalPrinted
 	if inBuffer < 0 {
 		inBuffer = 0
@@ -288,21 +291,18 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 	return freeSpace, nil
 }
 
-// 4. ПОДКАЧКА ПО СЧЕТЧИКУ (RequestCounts -> тег Batch)
 func (d *Driver) GetCurrentPrintCount() (string, error) {
 	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="%d"/>`)
 	if err != nil {
 		return strconv.Itoa(d.totalPrinted), err
 	}
 
-	// Ищем тег <Batch><Value>123</Value></Batch> или <Total>
 	re := regexp.MustCompile(`<Batch>.*?<Value>(\d+)</Value>.*?</Batch>`)
 	matches := re.FindStringSubmatch(resp)
 	if len(matches) > 1 {
 		return matches[1], nil
 	}
 
-	// Фоллбэк на Total, если Batch пуст
 	reTotal := regexp.MustCompile(`<Total>.*?<Value>(\d+)</Value>.*?</Total>`)
 	matchesTotal := reTotal.FindStringSubmatch(resp)
 	if len(matchesTotal) > 1 {
@@ -312,7 +312,6 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	return strconv.Itoa(d.totalPrinted), nil
 }
 
-// GetStatus для BackgroundPoller
 func (d *Driver) GetStatus() (string, error) {
 	resp, err := d.sendSOAPWaitACK(`<RequestPackMLStatus act="%d"/>`)
 	if err != nil {
@@ -335,7 +334,6 @@ func (d *Driver) GetStatus() (string, error) {
 	return "ОНЛАЙН", nil
 }
 
-// ClearQueue сброс буфера кодов (при остановке линии в 1С / MES)
 func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
 	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="%d"/>`)
@@ -371,8 +369,7 @@ func (d *Driver) GetTemplates() ([]string, error) {
 }
 
 func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
-	// Возвращаем стандартные имена для разметки (в CoLOS их называют именно так)
-	return []string{"DATAMATRIX", "date01", "date02", "BATCH"}, nil
+	return []string{"DATAMATRIX", "date1", "date2", "PLU"}, nil
 }
 
 func (d *Driver) GetRemainingRibbon() (string, error) { return "N/A", nil }
