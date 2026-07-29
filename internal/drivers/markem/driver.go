@@ -372,6 +372,7 @@ func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
 	return []string{"DATAMATRIX", "date1", "date2", "PLU"}, nil
 }
 
+// заглушки
 func (d *Driver) GetRemainingRibbon() (string, error) { return "N/A", nil }
 func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	return strconv.Itoa(MaxQueueLimit), nil
