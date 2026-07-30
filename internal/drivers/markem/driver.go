@@ -123,7 +123,7 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 			d.conn = conn
 		}
 
-		_ = d.conn.SetDeadline(time.Now().Add(8 * time.Second))
+		_ = d.conn.SetDeadline(time.Now().Add(4 * time.Second))
 		slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
 
 		if _, err := d.conn.Write(payload); err != nil {
