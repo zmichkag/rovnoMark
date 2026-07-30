@@ -14,7 +14,9 @@ import (
 )
 
 const (
-	MaxQueueLimit = 200 // Аппаратный лимит буфера кодов SmartDate X60
+	MaxQueueLimit  = 200 // Аппаратный лимит буфера кодов SmartDate X60
+	SafeQueueLimit = 50  // Безопасный лимит для программного контроля буфера
+
 )
 
 type Driver struct {
@@ -228,8 +230,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, nil
 	}
 
-	// Жестко форсируем DATAMATRIX, чтобы избежать "Syntax error parsing command"
-	targetField := "DATAMATRIX"
+	targetField := "DATAMATRIX" // Жестко фиксируем для Маркема
 
 	var sb strings.Builder
 	sb.WriteString(`<QueuePackData act="%d">`)
@@ -251,7 +252,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, err
 	}
 
-	// Безопасно обновляем счетчик отправленных кодов
+	// Увеличиваем счетчик ТОЛЬКО после успешной отправки
 	d.stateMu.Lock()
 	d.totalSent += len(codes)
 	d.stateMu.Unlock()
@@ -280,35 +281,38 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	return "0", nil
 }
 
+// Полностью переписываем GetBufferFreeSpace под софтверный расчет
 func (d *Driver) GetBufferFreeSpace() (int, error) {
+	// 1. Узнаем, сколько принтер напечатал на данный момент
 	countStr, err := d.GetCurrentPrintCount()
 	if err != nil {
 		return 0, err
 	}
-
 	hwCount, _ := strconv.Atoi(countStr)
 
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
-	// Вычисляем, сколько РЕАЛЬНО напечатано с момента инициализации (InitSession)
+	// 2. Сколько реально отпечатано в рамках текущего задания
 	printedSinceStart := hwCount - d.baseCount
 	if printedSinceStart < 0 {
-		printedSinceStart = 0 // На случай сброса счетчиков на самом принтере
+		printedSinceStart = 0 // Защита, если на принтере руками сбросили счетчик
 	}
 
-	// Вычисляем, сколько кодов сейчас висит в буфере принтера
+	// 3. Вычисляем, сколько кодов сейчас висит в ОЗУ принтера
 	inBuffer := d.totalSent - printedSinceStart
 	if inBuffer < 0 {
 		inBuffer = 0
 	}
 
-	freeSpace := MaxQueueLimit - inBuffer
+	// 4. Считаем, сколько еще можно докинуть
+	freeSpace := SafeQueueLimit - inBuffer
 	if freeSpace < 0 {
 		freeSpace = 0
 	}
 
-	slog.Debug("MARKEM Buffer", "ip", d.Address, "in_buffer", inBuffer, "free_space", freeSpace, "total_sent", d.totalSent, "printed", printedSinceStart)
+	slog.Debug("MARKEM Software Buffer", "ip", d.Address, "sent", d.totalSent, "printed", printedSinceStart, "in_buffer", inBuffer, "free_space", freeSpace)
+
 	return freeSpace, nil
 }
 
@@ -351,7 +355,19 @@ func (d *Driver) ClearQueue() error {
 }
 
 func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
-	return d.ClearQueue() // Очистка очереди автоматически сбрасывает счетчики расчета буфера
+	d.ClearQueue()
+
+	// Получаем текущий физический счетчик принтера ДО начала печати
+	countStr, _ := d.GetCurrentPrintCount()
+	hwCount, _ := strconv.Atoi(countStr)
+
+	d.stateMu.Lock()
+	d.baseCount = hwCount
+	d.totalSent = 0
+	d.stateMu.Unlock()
+
+	slog.Info("MARKEM: Сессия инициализирована", "ip", d.Address, "baseCount", hwCount)
+	return nil
 }
 
 func (d *Driver) PrintTemplate(template string, fields map[string]string) error {

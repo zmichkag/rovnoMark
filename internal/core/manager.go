@@ -181,8 +181,9 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 // RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC
 func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID int, p Printer) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл подкачки", "line_id", lineID, "task_id", taskID)
+	slog.Info("DEFAULT-PUMPER: Запущен умный пачечный цикл", "line_id", lineID, "task_id", taskID)
 
+	// Опрашиваем раз в 2 секунды. Этого достаточно, чтобы конвейер не простаивал.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -192,9 +193,10 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 			slog.Info("DEFAULT-PUMPER: Остановлен по контексту", "task_id", taskID)
 			return
 		case <-ticker.C:
+			// 1. Проверяем статус задачи
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
-				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID, "status", status)
+				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID)
 				return
 			}
 
@@ -204,16 +206,21 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 			}
 			pCfg := printers[0]
 
+			// 2. Считаем свободное место математикой драйвера
 			freeSpace, err := p.GetBufferFreeSpace()
 			if err != nil || freeSpace <= 0 {
+				// Места нет, ждем следующего тика (принтер пока печатает то, что есть)
 				continue
 			}
 
+			// 3. Дробим отправку. Даже если места много, шлем не больше 15 за раз.
+			// Это спасает слабые мозги Маркема от переполнения XML-парсера.
 			batchSize := freeSpace
-			if batchSize > 50 {
-				batchSize = 50
+			if batchSize > 15 {
+				batchSize = 15
 			}
 
+			// 4. Достаем коды из БД
 			codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
 			if err != nil || len(codes) == 0 {
 				continue
@@ -224,12 +231,15 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				payload = append(payload, c.Code)
 			}
 
+			// 5. Отправляем в принтер
 			startIndex := codes[0].PrinterIndex
-			_, err = p.PrintBatchIndexed("20", startIndex, payload)
+			_, err = p.PrintBatchIndexed("DATAMATRIX", startIndex, payload)
 			if err != nil {
+				// Если принтер отбил ошибку - в идеале вернуть статусы кодов в 'pending'
+				// но пока просто логируем
 				slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
 			} else {
-				slog.Info("DEFAULT-PUMPER: Пачка успешно загружена в принтер", "printer", pCfg.Name, "count", len(payload), "start_idx", startIndex)
+				slog.Info("DEFAULT-PUMPER: Пачка отправлена", "printer", pCfg.Name, "count", len(payload), "free_space_left", freeSpace-len(payload))
 			}
 		}
 	}
