@@ -301,7 +301,6 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 
 // Полностью переписываем GetBufferFreeSpace под софтверный расчет
 func (d *Driver) GetBufferFreeSpace() (int, error) {
-	// 1. Узнаем, сколько принтер напечатал на данный момент
 	countStr, err := d.GetCurrentPrintCount()
 	if err != nil {
 		return 0, err
@@ -311,25 +310,28 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
-	// 2. Сколько реально отпечатано в рамках текущего задания
 	printedSinceStart := hwCount - d.baseCount
 	if printedSinceStart < 0 {
-		printedSinceStart = 0 // Защита, если на принтере руками сбросили счетчик
+		printedSinceStart = 0
 	}
 
-	// 3. Вычисляем, сколько кодов сейчас висит в ОЗУ принтера
 	inBuffer := d.totalSent - printedSinceStart
 	if inBuffer < 0 {
 		inBuffer = 0
 	}
 
-	// 4. Считаем, сколько еще можно докинуть
 	freeSpace := SafeQueueLimit - inBuffer
 	if freeSpace < 0 {
 		freeSpace = 0
 	}
 
-	slog.Debug("MARKEM Software Buffer", "ip", d.Address, "sent", d.totalSent, "printed", printedSinceStart, "in_buffer", inBuffer, "free_space", freeSpace)
+	slog.Debug("MARKEM Software Buffer",
+		"ip", d.Address,
+		"sent", d.totalSent,
+		"printed", printedSinceStart,
+		"in_buffer", inBuffer,
+		"free_space", freeSpace,
+	)
 
 	return freeSpace, nil
 }
