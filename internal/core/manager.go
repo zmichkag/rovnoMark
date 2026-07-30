@@ -178,7 +178,7 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 	return nil
 }
 
-// RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC
+// RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC / Markem
 func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID int, p Printer) {
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("DEFAULT-PUMPER: Запущен умный пачечный цикл", "line_id", lineID, "task_id", taskID)
@@ -200,46 +200,56 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				return
 			}
 
+			// Получаем ВСЕ принтеры, привязанные к этой линии
 			printers, err := tp.Store.GetPrintersByLine(lineID)
 			if err != nil || len(printers) == 0 {
 				continue
 			}
-			pCfg := printers[0]
 
-			// 2. Считаем свободное место математикой драйвера
-			freeSpace, err := p.GetBufferFreeSpace()
-			if err != nil || freeSpace <= 0 {
-				// Места нет, ждем следующего тика (принтер пока печатает то, что есть)
-				continue
-			}
+			// 2. ИТЕРИРУЕМСЯ ПО ВСЕМ ПРИНТЕРАМ НА ЛИНИИ (убран затыковый printers[0])
+			for _, pCfg := range printers {
+				pPrinter := tp.Manager.GetPrinter(pCfg.ID)
+				if pPrinter == nil {
+					continue
+				}
 
-			// 3. Дробим отправку. Даже если места много, шлем не больше 15 за раз.
-			// Это спасает слабые мозги Маркема от переполнения XML-парсера.
-			batchSize := freeSpace
-			if batchSize > 15 {
-				batchSize = 15
-			}
+				// 3. Считаем свободное место в софтверном буфере конкретного принтера
+				freeSpace, err := pPrinter.GetBufferFreeSpace()
+				if err != nil || freeSpace <= 0 {
+					// Места в буфере этого принтера нет, пропускаем и идем к следующему
+					continue
+				}
 
-			// 4. Достаем коды из БД
-			codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
-			if err != nil || len(codes) == 0 {
-				continue
-			}
+				// 4. Дробим отправку. Даже если места много, шлем не больше 15 кодов за раз,
+				// чтобы не перегрузить XML-парсер Маркема.
+				batchSize := freeSpace
+				if batchSize > 15 {
+					batchSize = 15
+				}
 
-			var payload []string
-			for _, c := range codes {
-				payload = append(payload, c.Code)
-			}
+				// 5. Достаем коды из БД, атомарно назначая их ИМЕННО ЭТОМУ pCfg.ID
+				codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
+				if err != nil || len(codes) == 0 {
+					continue
+				}
 
-			// 5. Отправляем в принтер
-			startIndex := codes[0].PrinterIndex
-			_, err = p.PrintBatchIndexed("DATAMATRIX", startIndex, payload)
-			if err != nil {
-				// Если принтер отбил ошибку - в идеале вернуть статусы кодов в 'pending'
-				// но пока просто логируем
-				slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
-			} else {
-				slog.Info("DEFAULT-PUMPER: Пачка отправлена", "printer", pCfg.Name, "count", len(payload), "free_space_left", freeSpace-len(payload))
+				var payload []string
+				for _, c := range codes {
+					payload = append(payload, c.Code)
+				}
+
+				// 6. Отправляем сформированную пачку в сокет принтера
+				startIndex := codes[0].PrinterIndex
+				_, err = pPrinter.PrintBatchIndexed("DATAMATRIX", startIndex, payload)
+				if err != nil {
+					slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
+				} else {
+					slog.Info("DEFAULT-PUMPER: Пачка отправлена",
+						"printer", pCfg.Name,
+						"count", len(payload),
+						"free_space_left", freeSpace-len(payload),
+					)
+				}
 			}
 		}
 	}
