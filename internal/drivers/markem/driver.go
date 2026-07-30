@@ -103,7 +103,7 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 	defer d.mu.Unlock()
 
 	act := d.getNextAct()
-	formattedBody := fmt.Sprintf(bodyXML, act)
+	formattedBody := strings.ReplaceAll(bodyXML, "{act}", strconv.Itoa(act))
 	soapMsg := fmt.Sprintf(`<?xml version="1.0" encoding="utf-16"?><Envelope><Header sender="%s" receiver="%s"/><Body>%s</Body></Envelope>`,
 		d.SenderName, d.ActorName, formattedBody)
 	payload := encodeUTF16LE(soapMsg)
@@ -180,7 +180,7 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 		jobName += ".job"
 	}
 
-	cmdSelect := `<SelectLocalJob act="%d"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
+	cmdSelect := `<SelectLocalJob act="{act}"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
 	if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
 		return fmt.Errorf("ошибка активации задания %s: %w", jobName, err)
 	}
@@ -199,7 +199,7 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(`<UpdateSelectedJob act="%d">`)
+	sb.WriteString(`<UpdateSelectedJob act="{act}">`)
 
 	for name, val := range fields {
 		cleanVal := strings.ReplaceAll(val, "|", "")
@@ -233,7 +233,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	targetField := "DATAMATRIX" // Жестко фиксируем для Маркема
 
 	var sb strings.Builder
-	sb.WriteString(`<QueuePackData act="%d">`)
+	sb.WriteString(`<QueuePackData act="{act}">`)
 
 	for _, code := range codes {
 		cleanCode := escapeXML(code)
@@ -261,7 +261,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 }
 
 func (d *Driver) GetCurrentPrintCount() (string, error) {
-	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="%d"/>`)
+	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="{act}"/>`)
 	if err != nil {
 		return "0", err
 	}
@@ -317,7 +317,7 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 }
 
 func (d *Driver) GetStatus() (string, error) {
-	resp, err := d.sendSOAPWaitACK(`<RequestPackMLStatus act="%d"/>`)
+	resp, err := d.sendSOAPWaitACK(`<RequestPackMLStatus act="{act}"/>`)
 	if err != nil {
 		return "ОФФЛАЙН", err
 	}
@@ -340,7 +340,7 @@ func (d *Driver) GetStatus() (string, error) {
 
 func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
-	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="%d"/>`)
+	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="{act}"/>`)
 
 	// Привязываем базовый счетчик к текущему аппаратному счетчику
 	countStr, _ := d.GetCurrentPrintCount()
@@ -375,7 +375,7 @@ func (d *Driver) PrintTemplate(template string, fields map[string]string) error 
 }
 
 func (d *Driver) GetTemplates() ([]string, error) {
-	resp, err := d.sendSOAPWaitACK(`<RequestFileDirectoryListing act="%d"><Filter>job</Filter></RequestFileDirectoryListing>`)
+	resp, err := d.sendSOAPWaitACK(`<RequestFileDirectoryListing act="{act}"><Filter>job</Filter></RequestFileDirectoryListing>`)
 	if err != nil {
 		return nil, err
 	}
