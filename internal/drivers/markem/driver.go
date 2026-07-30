@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	MaxQueueLimit  = 200 // Аппаратный лимит буфера кодов SmartDate X60
+	MaxQueueLimit  = 150 // Аппаратный лимит буфера кодов SmartDate X60
 	SafeQueueLimit = 50  // Безопасный лимит для программного контроля буфера
 
 )
@@ -263,22 +263,40 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 func (d *Driver) GetCurrentPrintCount() (string, error) {
 	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="{act}"/>`)
 	if err != nil {
-		return "0", err
+		// При сетевом сбое возвращаем последнее достоверное значение
+		d.stateMu.Lock()
+		lastValid := d.baseCount + (d.totalSent - 0) // Фолбэк
+		d.stateMu.Unlock()
+		return strconv.Itoa(lastValid), err
 	}
 
-	re := regexp.MustCompile(`<Batch>.*?<Value>(\d+)</Value>.*?</Batch>`)
-	matches := re.FindStringSubmatch(resp)
+	var current int
+	reBatch := regexp.MustCompile(`<Batch>.*?<Value>(\d+)</Value>.*?</Batch>`)
+	matches := reBatch.FindStringSubmatch(resp)
 	if len(matches) > 1 {
-		return matches[1], nil
+		current, _ = strconv.Atoi(matches[1])
+	} else {
+		reTotal := regexp.MustCompile(`<Total>.*?<Value>(\d+)</Value>.*?</Total>`)
+		matchesTotal := reTotal.FindStringSubmatch(resp)
+		if len(matchesTotal) > 1 {
+			current, _ = strconv.Atoi(matchesTotal[1])
+		}
 	}
 
-	reTotal := regexp.MustCompile(`<Total>.*?<Value>(\d+)</Value>.*?</Total>`)
-	matchesTotal := reTotal.FindStringSubmatch(resp)
-	if len(matchesTotal) > 1 {
-		return matchesTotal[1], nil
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
+	// 🛡 ЗАЩИТА ОТ ФАНТОМНЫХ НУЛЕЙ И СБОЕВ СЕТИ (как в Python-стенде)
+	// Если принтер вернул 0 или значение МЕНЬШЕ предыдущего валидного
+	if current < d.baseCount && d.baseCount > 0 {
+		slog.Warn("MARKEM: Дроп счетчика ниже baseCount, игнорируем аномалию",
+			"received", current,
+			"baseCount", d.baseCount,
+		)
+		return strconv.Itoa(d.baseCount), nil
 	}
 
-	return "0", nil
+	return strconv.Itoa(current), nil
 }
 
 // Полностью переписываем GetBufferFreeSpace под софтверный расчет
@@ -342,7 +360,7 @@ func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
 	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="{act}"/>`)
 
-	// Привязываем базовый счетчик к текущему аппаратному счетчику
+	// Фиксируем новый базовый счетчик под свежее задание
 	countStr, _ := d.GetCurrentPrintCount()
 	hwCount, _ := strconv.Atoi(countStr)
 
@@ -351,23 +369,12 @@ func (d *Driver) ClearQueue() error {
 	d.totalSent = 0
 	d.stateMu.Unlock()
 
+	slog.Info("MARKEM: Очередь очищена, новый baseCount зафиксирован", "baseCount", hwCount)
 	return err
 }
 
 func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
-	d.ClearQueue()
-
-	// Получаем текущий физический счетчик принтера ДО начала печати
-	countStr, _ := d.GetCurrentPrintCount()
-	hwCount, _ := strconv.Atoi(countStr)
-
-	d.stateMu.Lock()
-	d.baseCount = hwCount
-	d.totalSent = 0
-	d.stateMu.Unlock()
-
-	slog.Info("MARKEM: Сессия инициализирована", "ip", d.Address, "baseCount", hwCount)
-	return nil
+	return d.ClearQueue()
 }
 
 func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
