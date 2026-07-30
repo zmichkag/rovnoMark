@@ -234,7 +234,7 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	buf := make([]byte, 64)
 	n, err := d.conn.Read(buf)
 	if err != nil {
-		// При таймауте возвращаем последнее известное виртуальное значение без разрыва сокета
+		// При таймауте возвращаем последнее известное значение
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return strconv.Itoa(d.lastCount), nil
 		}
@@ -242,37 +242,60 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 		return strconv.Itoa(d.lastCount), err
 	}
 
-	cleanResp := strings.Trim(string(buf[:n]), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+	// 🔍 ДЕБАГ 1: Дамп сырого ответа от принтера
+	rawResponse := buf[:n]
+	cleanResp := strings.Trim(string(rawResponse), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
 
 	rawCount := 0
+	numStr := ""
+
 	if strings.HasPrefix(cleanResp, "A") {
-		// Отсекаем 'A'
 		valStr := cleanResp[1:]
-		// Собираем только цифры до первого дефиса или пробела
-		numStr := ""
 		for _, char := range valStr {
 			if char >= '0' && char <= '9' {
 				numStr += string(char)
 			} else {
-				break // Уперлись в дефис — стоп
+				break
 			}
 		}
 		rawCount, _ = strconv.Atoi(numStr)
 	} else {
-		rawCount, _ = strconv.Atoi(strings.TrimSpace(cleanResp))
+		// Пробуем извлечь цифры, даже если маркер 'A' сдвинулся или отсутствует
+		for _, char := range cleanResp {
+			if char >= '0' && char <= '9' {
+				numStr += string(char)
+			} else if len(numStr) > 0 {
+				break // Закончили парсинг первого числового блока
+			}
+		}
+		rawCount, _ = strconv.Atoi(numStr)
 	}
 
-	// ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
-	// Если физический счетчик Valentin вырос по сравнению с последним опросом
+	oldLastRaw := d.lastRawFBBC
+	oldLastCount := d.lastCount
+
+	// 📊 ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
 	if rawCount > d.lastRawFBBC {
 		delta := rawCount - d.lastRawFBBC
-		d.lastCount += delta     // Увеличиваем виртуальный счетчик смены
-		d.lastRawFBBC = rawCount // Запоминаем текущую физическую засечку
-	} else if rawCount < d.lastRawFBBC {
-		// Если принтер сбросил FBBC в 0 (например, произошел перезапуск макета FMB)
+		d.lastCount += delta
+		d.lastRawFBBC = rawCount
+	} else if rawCount < d.lastRawFBBC && rawCount > 0 {
+		// Принтер сбросил физический счетчик в 0 (перезапуск макета/смены)
 		d.lastCount += rawCount
 		d.lastRawFBBC = rawCount
 	}
+
+	// 🔍 ДЕБАГ 2: Подробное логирование состояния при каждом изменении или для контроля
+	slog.Debug("VALENTIN-FBBC-DIAG",
+		"printer_id", d.ID,
+		"raw_hex", fmt.Sprintf("%x", rawResponse),
+		"clean_resp", cleanResp,
+		"parsed_num_str", numStr,
+		"parsed_raw_count", rawCount,
+		"prev_raw_fbbc", oldLastRaw,
+		"new_virtual_count", d.lastCount,
+		"counter_changed", d.lastCount != oldLastCount,
+	)
 
 	return strconv.Itoa(d.lastCount), nil
 }
