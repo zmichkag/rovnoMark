@@ -108,8 +108,8 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 		d.SenderName, d.ActorName, formattedBody)
 	payload := encodeUTF16LE(soapMsg)
 
-	// Делаем максимум 2 попытки (оригинальная + 1 ретрай при обрыве)
 	for attempt := 1; attempt <= 2; attempt++ {
+		// Если это 2-я попытка или сокета нет — принудительно переподключаемся
 		if d.conn == nil {
 			address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 			conn, err := net.DialTimeout("tcp", address, d.Timeout)
@@ -118,7 +118,8 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 					slog.Error("MARKEM Connect Error (Retry Failed)", "ip", d.Address, "err", err)
 					return "", err
 				}
-				continue // Пробуем еще раз
+				time.Sleep(200 * time.Millisecond) // Микро-пауза перед 2-й попыткой
+				continue
 			}
 			d.conn = conn
 		}
@@ -127,11 +128,12 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 		slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
 
 		if _, err := d.conn.Write(payload); err != nil {
-			d.closeConn()
+			d.closeConn() // Закрываем сокет и d.conn = nil
 			if attempt == 2 {
 				return "", fmt.Errorf("socket write error: %w", err)
 			}
-			continue // Сокет отвалился при записи, уходим на 2-ю попытку
+			time.Sleep(200 * time.Millisecond)
+			continue
 		}
 
 		var buffer bytes.Buffer
@@ -141,18 +143,19 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 
 		readSuccess := false
 		for {
-			_ = d.conn.SetDeadline(time.Now().Add(5 * time.Second))
+			_ = d.conn.SetDeadline(time.Now().Add(4 * time.Second))
 			n, err := d.conn.Read(chunk)
 			if err != nil {
+				// ПРИНУДИТЕЛЬНО обнуляем сокет при сбое чтения, чтобы на 2-й попытке создался чистыйDial
 				d.closeConn()
-				break // Выходим из цикла чтения, пойдет на 2-ю попытку (если attempt==1)
+				break
 			}
 			buffer.Write(chunk[:n])
 			decoded := decodeUTF16LE(buffer.Bytes())
 
 			if strings.Contains(decoded, actTagSingle) || strings.Contains(decoded, actTagDouble) {
 				if strings.Contains(decoded, "CmdPending") {
-					continue // Ждем финального ответа
+					continue
 				}
 				if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
 					slog.Warn("MARKEM Command Failed", "ip", d.Address, "resp", decoded)
@@ -185,7 +188,9 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 		return fmt.Errorf("ошибка активации задания %s: %w", jobName, err)
 	}
 	d.curTemplate = template
-	time.Sleep(100 * time.Millisecond)
+
+	// Даем мозгам Маркема 250 мс на распарсивание структуры макета
+	time.Sleep(250 * time.Millisecond)
 
 	if len(fields) > 0 {
 		return d.UpdateStaticFields(fields)
