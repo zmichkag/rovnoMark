@@ -1,32 +1,36 @@
-# Stage 1: Сборка
+# Stage 1: Сборка бинарного файла
 FROM golang:1.22-alpine AS builder
 
-# Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем файлы зависимостей
+# 1. Копируем манифесты зависимостей
 COPY go.mod go.sum ./
-RUN go mod download
 
-# Копируем исходный код
+# 2. Скачиваем модули с монтированием кэша (не перекачивает при неизменных go.mod/go.sum)
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# 3. Копируем исходный код приложения
 COPY . .
 
-# Собираем статически скомпилированный бинарный файл
-RUN CGO_ENABLED=0 GOOS=linux go build -o marking-service ./main.go
+# 4. Собираем статический бинарник с использованием кэша компилятора Go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o marking-service ./main.go
 
-# Stage 2: Финальный образ
+# Stage 2: Минималистичный финальный образ
 FROM alpine:latest
 
-# Добавляем сертификаты и tzdata для настройки времени
+# Устанавливаем системные сертификаты и таймзоны
 RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /root/
 
-# Складываем экзешник в системную папку /bin/
+# Переносим скомпилированный бинарный файл
 COPY --from=builder /app/marking-service /bin/marking-service
 
-# Устанавливаем рабочую директорию туда, куда будет смотреть Volume из compose
+# Рабочая директория под Volume для базы данных и конфигурации
 WORKDIR /app/data
 
-# Запуск приложения (оно создаст rovnoMark.db прямо в /app/data)
+# Запуск сервиса
 CMD ["/bin/marking-service"]
