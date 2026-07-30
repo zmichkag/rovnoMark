@@ -92,15 +92,16 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	go tp.RunDefaultPumper(ctx, lineID, taskID, pPrinter)
 }
 
-// RunValentinFastPumper — изолированный реактивный насос для Carl Valentin (Fast Loop 1-в-1)
+// RunValentinFastPumper — изолированный реактивный насос для Carl Valentin с пред-буферизацией (Sliding Window)
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Активен реактивный цикл (50ms)", "line_id", lineID, "task_id", taskID)
+	slog.Info("VALENTIN-PUMPER: Активен реактивный цикл с пред-буфером", "line_id", lineID, "task_id", taskID)
 
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
 	var lastPrintedCount int = -1
+	const preBufferSize = 3 // Количество кодов, которые держим в памяти принтера авансом
 
 	for {
 		select {
@@ -109,7 +110,6 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 			return
 
 		case <-ticker.C:
-			// 1. Опрос виртуального счетчика из драйвера Valentin
 			countStr, err := vDriver.GetCurrentPrintCount()
 			if err != nil {
 				slog.Warn("VALENTIN-PUMPER: Ошибка чтения FBBC", "task_id", taskID, "err", err)
@@ -118,28 +118,35 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 
 			currentCount, _ := strconv.Atoi(countStr)
 
-			// 2. Первичная засечка при старте
+			// 1. Первичная накачка буфера при старте
 			if lastPrintedCount == -1 {
 				lastPrintedCount = currentCount
-				if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-					slog.Error("VALENTIN-PUMPER: Сбой первичного взвода КМ", "task_id", taskID, "err", err)
+				slog.Info("VALENTIN-PUMPER: Инициализация пред-буфера", "size", preBufferSize)
+				for i := 0; i < preBufferSize; i++ {
+					if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+						slog.Error("VALENTIN-PUMPER: Сбой пред-накачки КМ", "err", err)
+						break // При сетевой ошибке прерываем цикл, повторим на следующем тике
+					}
 				}
 				continue
 			}
 
-			// 3. РЕАКТИВНАЯ РЕАКЦИЯ: Если продукт сошел с печатной головки
+			// 2. Восполнение буфера при сходе продукции
 			if currentCount > lastPrintedCount {
 				delta := currentCount - lastPrintedCount
-				slog.Info("VALENTIN-PUMPER: Фиксируем печать этикетки", "delta", delta, "total", currentCount)
+				slog.Info("VALENTIN-PUMPER: Отстрел зафиксирован, восполняем буфер", "delta", delta, "total", currentCount)
 
 				if _, err := tp.Store.MarkAsPrinted(taskID, currentCount); err != nil {
-					slog.Error("VALENTIN-PUMPER: Ошибка обновления статуса в БД", "err", err)
+					slog.Error("VALENTIN-PUMPER: Ошибка БД", "err", err)
 				}
-
 				lastPrintedCount = currentCount
 
-				if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-					slog.Error("VALENTIN-PUMPER: Ошибка подкачки очередного КМ", "task_id", taskID, "err", err)
+				// Докидываем новые коды взамен отпечатанных
+				for i := 0; i < delta; i++ {
+					if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+						slog.Error("VALENTIN-PUMPER: Сбой подкачки очередного КМ", "err", err)
+						break
+					}
 				}
 			}
 		}
