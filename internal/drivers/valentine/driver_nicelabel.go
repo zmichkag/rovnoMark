@@ -246,10 +246,18 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 
 	rawCount := 0
 	if strings.HasPrefix(cleanResp, "A") {
-		parts := strings.Split(cleanResp, "A")
-		if len(parts) > 1 {
-			rawCount, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+		// Отсекаем 'A'
+		valStr := cleanResp[1:]
+		// Собираем только цифры до первого дефиса или пробела
+		numStr := ""
+		for _, char := range valStr {
+			if char >= '0' && char <= '9' {
+				numStr += string(char)
+			} else {
+				break // Уперлись в дефис — стоп
+			}
 		}
+		rawCount, _ = strconv.Atoi(numStr)
 	} else {
 		rawCount, _ = strconv.Atoi(strings.TrimSpace(cleanResp))
 	}
