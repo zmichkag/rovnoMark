@@ -97,7 +97,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("VALENTIN-PUMPER: Активен реактивный цикл (50ms)", "line_id", lineID, "task_id", taskID)
 
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
 	var lastPrintedCount int = -1

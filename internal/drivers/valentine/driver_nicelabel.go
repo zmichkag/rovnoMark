@@ -274,18 +274,22 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	oldLastRaw := d.lastRawFBBC
 	oldLastCount := d.lastCount
 
-	// 📊 ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
+	//  ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
 	if rawCount > d.lastRawFBBC {
+		// Стандартный случай: физический счетчик вырос
 		delta := rawCount - d.lastRawFBBC
 		d.lastCount += delta
 		d.lastRawFBBC = rawCount
-	} else if rawCount < d.lastRawFBBC && rawCount > 0 {
-		// Принтер сбросил физический счетчик в 0 (перезапуск макета/смены)
-		d.lastCount += rawCount
-		d.lastRawFBBC = rawCount
+	} else if rawCount < d.lastRawFBBC {
+		// Принтер сбросил FBBC в 0 (при взводе FD/FBC или смене макета)
+		// Если пришел rawCount > 0 (например, успел напечатать 1 до нашего опроса), учитываем его
+		if rawCount > 0 {
+			d.lastCount += rawCount
+		}
+		d.lastRawFBBC = rawCount // Фиксируем новый ноль или текущую засечку!
 	}
 
-	// 🔍 ДЕБАГ 2: Подробное логирование состояния при каждом изменении или для контроля
+	// Подробное логирование состояния при каждом изменении или для контроля
 	slog.Debug("VALENTIN-FBBC-DIAG",
 		"printer_id", d.ID,
 		"raw_hex", fmt.Sprintf("%x", rawResponse),
