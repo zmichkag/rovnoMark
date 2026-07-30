@@ -20,17 +20,18 @@ const (
 type Driver struct {
 	Address     string
 	Port        int
-	ActorName   string // Имя принтера в DCP ("Actor1")
-	SenderName  string // Наше имя ("RovnoMarkGo")
+	ActorName   string
+	SenderName  string
 	Timeout     time.Duration
-	mu          sync.Mutex
+	mu          sync.Mutex // Защищает сетевые операции
+	stateMu     sync.Mutex // Защищает счетчики (избегаем dead-lock'ов)
 	conn        net.Conn
 	actCounter  int
 	curTemplate string
 
-	// Внутренние счетчики для автономного контроля буфера
-	totalSent    int
-	totalPrinted int
+	// Внутренние счетчики
+	totalSent int
+	baseCount int // Стартовое значение счетчика принтера при начале задания
 }
 
 func New(ip string, port int, actorName string) *Driver {
@@ -94,94 +95,96 @@ func (d *Driver) closeConn() {
 	}
 }
 
-// sendSOAPWaitACK отправляет XML и дожидается РЕАЛЬНОГО выполнения (CmdOK / CmdFailed),
-// автоматически игнорируя промежуточные сообщения CmdPending и фоновые события принтера.
+// sendSOAPWaitACK отправляет XML с умным ожиданием и АВТОРЕТРАЕМ при обрыве
 func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.conn == nil {
-		address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-		conn, err := net.DialTimeout("tcp", address, d.Timeout)
-		if err != nil {
-			slog.Error("MARKEM Connect Error", "ip", d.Address, "err", err)
-			return "", err
-		}
-		d.conn = conn
-	}
-
 	act := d.getNextAct()
 	formattedBody := fmt.Sprintf(bodyXML, act)
-
 	soapMsg := fmt.Sprintf(`<?xml version="1.0" encoding="utf-16"?><Envelope><Header sender="%s" receiver="%s"/><Body>%s</Body></Envelope>`,
 		d.SenderName, d.ActorName, formattedBody)
-
 	payload := encodeUTF16LE(soapMsg)
-	_ = d.conn.SetDeadline(time.Now().Add(8 * time.Second))
 
-	slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
+	// Делаем максимум 2 попытки (оригинальная + 1 ретрай при обрыве)
+	for attempt := 1; attempt <= 2; attempt++ {
+		if d.conn == nil {
+			address := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+			conn, err := net.DialTimeout("tcp", address, d.Timeout)
+			if err != nil {
+				if attempt == 2 {
+					slog.Error("MARKEM Connect Error (Retry Failed)", "ip", d.Address, "err", err)
+					return "", err
+				}
+				continue // Пробуем еще раз
+			}
+			d.conn = conn
+		}
 
-	if _, err := d.conn.Write(payload); err != nil {
-		d.closeConn()
-		return "", fmt.Errorf("socket write error: %w", err)
-	}
+		_ = d.conn.SetDeadline(time.Now().Add(8 * time.Second))
+		slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
 
-	var buffer bytes.Buffer
-	chunk := make([]byte, 4096)
-	actTagSingle := fmt.Sprintf("act='%d'", act)
-	actTagDouble := fmt.Sprintf("act=\"%d\"", act)
-
-	for {
-		_ = d.conn.SetDeadline(time.Now().Add(5 * time.Second)) // Продляем таймаут при чтении
-		n, err := d.conn.Read(chunk)
-		if err != nil {
+		if _, err := d.conn.Write(payload); err != nil {
 			d.closeConn()
-			return "", fmt.Errorf("socket read error: %w", err)
+			if attempt == 2 {
+				return "", fmt.Errorf("socket write error: %w", err)
+			}
+			continue // Сокет отвалился при записи, уходим на 2-ю попытку
 		}
-		buffer.Write(chunk[:n])
 
-		decoded := decodeUTF16LE(buffer.Bytes())
+		var buffer bytes.Buffer
+		chunk := make([]byte, 4096)
+		actTagSingle := fmt.Sprintf("act='%d'", act)
+		actTagDouble := fmt.Sprintf("act=\"%d\"", act)
 
-		// Проверяем, пришел ли ответ ИМЕННО на нашу команду
-		if strings.Contains(decoded, actTagSingle) || strings.Contains(decoded, actTagDouble) {
-			// Если пришел CmdPending — принтер рендерит макет, продолжаем слушать сокет!
-			if strings.Contains(decoded, "CmdPending") {
-				slog.Debug("MARKEM Pending...", "ip", d.Address, "act", act)
-				continue
+		readSuccess := false
+		for {
+			_ = d.conn.SetDeadline(time.Now().Add(5 * time.Second))
+			n, err := d.conn.Read(chunk)
+			if err != nil {
+				d.closeConn()
+				break // Выходим из цикла чтения, пойдет на 2-ю попытку (если attempt==1)
 			}
+			buffer.Write(chunk[:n])
+			decoded := decodeUTF16LE(buffer.Bytes())
 
-			// Если сбой выполнения
-			if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
-				slog.Warn("MARKEM Command Failed", "ip", d.Address, "resp", decoded)
-				return decoded, fmt.Errorf("printer rejected command (CmdFailed)")
+			if strings.Contains(decoded, actTagSingle) || strings.Contains(decoded, actTagDouble) {
+				if strings.Contains(decoded, "CmdPending") {
+					continue // Ждем финального ответа
+				}
+				if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
+					slog.Warn("MARKEM Command Failed", "ip", d.Address, "resp", decoded)
+					return decoded, fmt.Errorf("printer rejected command (CmdFailed)")
+				}
+				readSuccess = true
+				return decoded, nil
 			}
+		}
 
-			// Успешно!
-			return decoded, nil
+		if readSuccess {
+			break
 		}
 	}
+	return "", fmt.Errorf("failed to communicate with printer after retries")
 }
 
 // --- РЕАЛИЗАЦИЯ КОНТРАКТА core.Printer ---
 
 func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
-	slog.Info("MARKEM: Выбор шаблона и загрузка статики", "ip", d.Address, "template", template, "fields", len(fields))
+	slog.Info("MARKEM: Выбор шаблона и загрузка статики", "ip", d.Address, "template", template)
 
 	jobName := template
 	if !strings.HasSuffix(strings.ToLower(jobName), ".job") {
 		jobName += ".job"
 	}
 
-	// 1. Активируем макет
 	cmdSelect := `<SelectLocalJob act="%d"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
 	if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
 		return fmt.Errorf("ошибка активации задания %s: %w", jobName, err)
 	}
 	d.curTemplate = template
+	time.Sleep(100 * time.Millisecond)
 
-	time.Sleep(100 * time.Millisecond) // Стабилизация графического контекста
-
-	// 2. Отправляем статические поля
 	if len(fields) > 0 {
 		return d.UpdateStaticFields(fields)
 	}
@@ -200,11 +203,9 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 		cleanVal := strings.ReplaceAll(val, "|", "")
 		cleanVal = escapeXML(cleanVal)
 
-		// 1. Отправляем поле в оригинальном виде (например, PLU)
 		sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData>`,
 			escapeXML(name), cleanVal))
 
-		// 2. АЛИАСЫ ДЛЯ ДАТ 1С: Автоматический перевод DATE01/DATE02 -> date1/date2
 		upper := strings.ToUpper(name)
 		if upper == "DATE01" || upper == "DATE1" {
 			sb.WriteString(fmt.Sprintf(`<FieldData><FieldName>date1</FieldName><FieldValue>%s</FieldValue></FieldData>`, cleanVal))
@@ -215,14 +216,10 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	}
 	sb.WriteString(`</UpdateSelectedJob>`)
 
-	slog.Info("MARKEM: Отправка пакета статики", "ip", d.Address, "payload_xml", sb.String())
-
 	_, err := d.sendSOAPWaitACK(sb.String())
 	if err != nil {
-		return fmt.Errorf("ошибка передачи статических полей: %w", err)
+		return fmt.Errorf("ошибка передачи статики: %w", err)
 	}
-
-	slog.Info("MARKEM: Статические даты успешно применены", "ip", d.Address, "count", len(fields))
 	return nil
 }
 
@@ -231,26 +228,20 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, nil
 	}
 
+	// Жестко форсируем DATAMATRIX, чтобы избежать "Syntax error parsing command"
 	targetField := "DATAMATRIX"
-	//if fieldName == "" {
-	//	targetField = "DATAMATRIX"
-	//}
-
-	slog.Info("MARKEM: Отправка пачки в буфер (QueuePackData)", "ip", d.Address, "field", targetField, "count", len(codes))
 
 	var sb strings.Builder
 	sb.WriteString(`<QueuePackData act="%d">`)
 
 	for _, code := range codes {
-		// 1. Сначала экранируем XML (<, >, &...)
 		cleanCode := escapeXML(code)
-		// 2. ТЕПЕРЬ подменяем спецсимволы GS1 на сущность &#x1D;
 		cleanCode = strings.ReplaceAll(cleanCode, "&lt;GS&gt;", "&#x1D;")
 		cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "&#x1D;")
 		cleanCode = strings.ReplaceAll(cleanCode, "\x1d", "&#x1D;")
 
 		sb.WriteString(fmt.Sprintf(`<PackData><FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData></PackData>`,
-			escapeXML(targetField), cleanCode))
+			targetField, cleanCode))
 	}
 	sb.WriteString(`</QueuePackData>`)
 
@@ -260,39 +251,18 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, err
 	}
 
+	// Безопасно обновляем счетчик отправленных кодов
+	d.stateMu.Lock()
 	d.totalSent += len(codes)
+	d.stateMu.Unlock()
+
 	return len(codes), nil
-}
-
-func (d *Driver) GetBufferFreeSpace() (int, error) {
-	countStr, err := d.GetCurrentPrintCount()
-	if err != nil {
-		return 0, err
-	}
-
-	printed, _ := strconv.Atoi(countStr)
-	if printed > d.totalPrinted {
-		d.totalPrinted = printed
-	}
-
-	inBuffer := d.totalSent - d.totalPrinted
-	if inBuffer < 0 {
-		inBuffer = 0
-	}
-
-	freeSpace := MaxQueueLimit - inBuffer
-	if freeSpace < 0 {
-		freeSpace = 0
-	}
-
-	slog.Debug("MARKEM Buffer Status", "ip", d.Address, "in_buffer", inBuffer, "free_space", freeSpace)
-	return freeSpace, nil
 }
 
 func (d *Driver) GetCurrentPrintCount() (string, error) {
 	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="%d"/>`)
 	if err != nil {
-		return strconv.Itoa(d.totalPrinted), err
+		return "0", err
 	}
 
 	re := regexp.MustCompile(`<Batch>.*?<Value>(\d+)</Value>.*?</Batch>`)
@@ -307,7 +277,39 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 		return matchesTotal[1], nil
 	}
 
-	return strconv.Itoa(d.totalPrinted), nil
+	return "0", nil
+}
+
+func (d *Driver) GetBufferFreeSpace() (int, error) {
+	countStr, err := d.GetCurrentPrintCount()
+	if err != nil {
+		return 0, err
+	}
+
+	hwCount, _ := strconv.Atoi(countStr)
+
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+
+	// Вычисляем, сколько РЕАЛЬНО напечатано с момента инициализации (InitSession)
+	printedSinceStart := hwCount - d.baseCount
+	if printedSinceStart < 0 {
+		printedSinceStart = 0 // На случай сброса счетчиков на самом принтере
+	}
+
+	// Вычисляем, сколько кодов сейчас висит в буфере принтера
+	inBuffer := d.totalSent - printedSinceStart
+	if inBuffer < 0 {
+		inBuffer = 0
+	}
+
+	freeSpace := MaxQueueLimit - inBuffer
+	if freeSpace < 0 {
+		freeSpace = 0
+	}
+
+	slog.Debug("MARKEM Buffer", "ip", d.Address, "in_buffer", inBuffer, "free_space", freeSpace, "total_sent", d.totalSent, "printed", printedSinceStart)
+	return freeSpace, nil
 }
 
 func (d *Driver) GetStatus() (string, error) {
@@ -335,15 +337,21 @@ func (d *Driver) GetStatus() (string, error) {
 func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
 	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="%d"/>`)
-	if err == nil {
-		d.totalSent = 0
-		d.totalPrinted = 0
-	}
+
+	// Привязываем базовый счетчик к текущему аппаратному счетчику
+	countStr, _ := d.GetCurrentPrintCount()
+	hwCount, _ := strconv.Atoi(countStr)
+
+	d.stateMu.Lock()
+	d.baseCount = hwCount
+	d.totalSent = 0
+	d.stateMu.Unlock()
+
 	return err
 }
 
 func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
-	return d.ClearQueue()
+	return d.ClearQueue() // Очистка очереди автоматически сбрасывает счетчики расчета буфера
 }
 
 func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
@@ -370,13 +378,16 @@ func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
 	return []string{"DATAMATRIX", "date1", "date2", "PLU"}, nil
 }
 
-// заглушки
 func (d *Driver) GetRemainingRibbon() (string, error) { return "N/A", nil }
 func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
 	return strconv.Itoa(MaxQueueLimit), nil
 }
-func (d *Driver) GetPrintSpeed() (string, error)    { return "N/A", nil }
-func (d *Driver) GetLastPrintedIndex() (int, error) { return d.totalPrinted, nil }
+func (d *Driver) GetPrintSpeed() (string, error) { return "N/A", nil }
+func (d *Driver) GetLastPrintedIndex() (int, error) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.totalSent, nil // Упрощенный возврат для Markem, так как индексы тут условные
+}
 func (d *Driver) GetCurrentTemplate() (string, error) {
 	if d.curTemplate != "" {
 		return d.curTemplate, nil
