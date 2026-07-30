@@ -166,7 +166,16 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	// --- ШАГ 1: Обновляем динамический DataMatrix BM[20] ---
+	// Ставим паузу
+	cmdFDPause := []byte(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [0/3]: Set Stop (FD)", startIndex), cmdFDPause)
+	if _, err := d.conn.Write(cmdFDPause); err != nil {
+		d.closeConnNoLock()
+		return 0, fmt.Errorf("сбой отправки FD: %w", err)
+	}
+
+	// Обновляем динамический DataMatrix BM[20] ---
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/3]: Set DataMatrix (BM20)", startIndex), cmdBM20)
@@ -178,10 +187,10 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
 	time.Sleep(15 * time.Millisecond)
 
-	// --- ШАГ 2: Выставляем тираж 1 шт (FD) ---
+	//Снимаем паузу
 	cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Quantity (FD)", startIndex), cmdFD)
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Wait (FD)", startIndex), cmdFD)
 	if _, err := d.conn.Write(cmdFD); err != nil {
 		d.closeConnNoLock()
 		return 0, fmt.Errorf("сбой отправки FD: %w", err)
