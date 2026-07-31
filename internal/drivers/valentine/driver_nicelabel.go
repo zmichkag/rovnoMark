@@ -212,83 +212,13 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	return 1, nil
 }
 
-// GetCurrentPrintCount опрашивает FBBC с фильтрацией мусорных кадров TD
+// GetCurrentPrintCount возвращает виртуальный счетчик без опроса железа (исключает коллизии TCP)
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.conn == nil {
-		if err := d.reconnectNoLock(); err != nil {
-			return strconv.Itoa(d.lastCount), fmt.Errorf("сокет закрыт: %w", err)
-		}
-	}
-
-	d.conn.SetDeadline(time.Now().Add(d.Timeout))
-	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
-
-	if _, err := d.conn.Write([]byte(cmd)); err != nil {
-		d.closeConnNoLock()
-		return strconv.Itoa(d.lastCount), err
-	}
-
-	buf := make([]byte, 128)
-	n, err := d.conn.Read(buf)
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return strconv.Itoa(d.lastCount), nil
-		}
-		d.closeConnNoLock()
-		return strconv.Itoa(d.lastCount), err
-	}
-
-	rawResponse := string(buf[:n])
-
-	// 🛑 ЖЕСТКАЯ ФИЛЬТРАЦИЯ: Если прилетел статус дисплея (TD) или байты без 'A', ИГНОРИРУЕМ ПАКЕТ!
-	if strings.Contains(rawResponse, "TD\"") || !strings.Contains(rawResponse, "A") {
-		slog.Warn("VALENTIN-FBBC: Пропущен мусорный калибровочный пакет сокета", "printer_id", d.ID, "raw", rawResponse)
-		return strconv.Itoa(d.lastCount), nil
-	}
-
-	// Извлекаем точный ответ формата A005888
-	cleanResp := strings.Trim(rawResponse, string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
-	aIdx := strings.Index(cleanResp, "A")
-	if aIdx == -1 {
-		return strconv.Itoa(d.lastCount), nil
-	}
-
-	valStr := cleanResp[aIdx+1:]
-	numStr := ""
-	for _, char := range valStr {
-		if char >= '0' && char <= '9' {
-			numStr += string(char)
-		} else {
-			break
-		}
-	}
-
-	if numStr == "" {
-		return strconv.Itoa(d.lastCount), nil
-	}
-
-	rawCount, _ := strconv.Atoi(numStr)
-
-	// 防-ЗАЩИТА ОТ СРЫВА СЧЕТЧИКА:
-	// Если rawCount резким прыжком упал до 0..5 при значении lastRawFBBC > 1000 — это сброс макета/FBC!
-	if rawCount < d.lastRawFBBC {
-		// Фиксируем новый базовый отсчет без прибавления старого массива к виртуальному счетчику
-		d.lastRawFBBC = rawCount
-		return strconv.Itoa(d.lastCount), nil
-	}
-
-	if rawCount > d.lastRawFBBC {
-		delta := rawCount - d.lastRawFBBC
-		// Дополнительная проверка на аномальный выброс (если дельта > 100 за один опрос — это сбой)
-		if delta < 100 {
-			d.lastCount += delta
-		}
-		d.lastRawFBBC = rawCount
-	}
-
+	// Просто возвращаем счетчик, который инкрементируется в PrintBatchIndexed.
+	// Никаких запросов FBBC в сокет принтера больше не отправляем.
 	return strconv.Itoa(d.lastCount), nil
 }
 
