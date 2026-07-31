@@ -92,88 +92,60 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	go tp.RunDefaultPumper(ctx, lineID, taskID, pPrinter)
 }
 
-// RunValentinFastPumper — изолированный реактивный насос для Carl Valentin с пред-буферизацией (Sliding Window)
+// RunValentinFastPumper — ритмичный насос с защитой от оверфлуда
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Активен реактивный цикл с пред-буфером", "line_id", lineID, "task_id", taskID)
+	slog.Info("VALENTIN-PUMPER: Запуск линейного насоса Valentin", "line_id", lineID, "task_id", taskID)
 
-	ticker := time.NewTicker(250 * time.Millisecond)
+	// Безопасный такт подкачки — 300 мс (до 200 кодов в минуту, безопасно для ОЗУ Valentin)
+	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
-
-	var lastPrintedCount int = -1
-	const preBufferSize = 3 // Количество кодов, которые держим в памяти принтера авансом
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("VALENTIN-PUMPER: Фоновый насос остановлен по контексту", "task_id", taskID)
+			slog.Info("VALENTIN-PUMPER: Насос остановлен", "task_id", taskID)
 			return
 
 		case <-ticker.C:
-			countStr, err := vDriver.GetCurrentPrintCount()
-			if err != nil {
-				slog.Warn("VALENTIN-PUMPER: Ошибка чтения FBBC", "task_id", taskID, "err", err)
-				continue
+			// Проверяем статус задачи в БД
+			status, err := tp.Store.GetTaskStatus(taskID)
+			if err != nil || status == "stopped" || status == "completed" {
+				return
 			}
 
-			currentCount, _ := strconv.Atoi(countStr)
-
-			// 1. Первичная накачка буфера при старте
-			if lastPrintedCount == -1 {
-				lastPrintedCount = currentCount
-				slog.Info("VALENTIN-PUMPER: Инициализация пред-буфера", "size", preBufferSize)
-				for i := 0; i < preBufferSize; i++ {
-					if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-						slog.Error("VALENTIN-PUMPER: Сбой пред-накачки КМ", "err", err)
-						break // При сетевой ошибке прерываем цикл, повторим на следующем тике
-					}
-				}
-				continue
-			}
-
-			// 2. Восполнение буфера при сходе продукции
-			if currentCount > lastPrintedCount {
-				delta := currentCount - lastPrintedCount
-				slog.Info("VALENTIN-PUMPER: Отстрел зафиксирован, восполняем буфер", "delta", delta, "total", currentCount)
-
-				if _, err := tp.Store.MarkAsPrinted(taskID, currentCount); err != nil {
-					slog.Error("VALENTIN-PUMPER: Ошибка БД", "err", err)
-				}
-				lastPrintedCount = currentCount
-
-				// Докидываем новые коды взамен отпечатанных
-				for i := 0; i < delta; i++ {
-					if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-						slog.Error("VALENTIN-PUMPER: Сбой подкачки очередного КМ", "err", err)
-						break
-					}
-				}
+			// Отправляем 1 код за такт
+			if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+				slog.Warn("VALENTIN-PUMPER: Заминка подкачки", "task_id", taskID, "err", err)
 			}
 		}
 	}
 }
 
-// pushSingleValentinCode берет 1 pending код из базы и передает драйверу на атомарную отправку
+// pushSingleValentinCode берет 1 pending код, отправляет в Valentin и запечатывает статус в БД
 func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
-	// Использование FetchAndAssignCodes гарантирует сквозную нумерацию printer_index от 1 до N
 	codes, err := tp.Store.FetchAndAssignCodes(taskID, vDriver.ID, 1)
 	if err != nil || len(codes) == 0 {
-		return nil
+		return nil // Очередь пуста
 	}
 
 	codeObj := codes[0]
-	cleanCode := codeObj.Code
+	cleanCode := strings.TrimSpace(codeObj.Code)
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
-	cleanCode = strings.TrimSpace(cleanCode)
 
-	// Передаем в принтер реальный порядковый индекс (codeObj.PrinterIndex), а не ID строки БД
+	// Отправляем FBD r0 -> BM[20] -> FBD r1
 	_, err = vDriver.PrintBatchIndexed("20", codeObj.PrinterIndex, []string{cleanCode})
 	if err != nil {
-		// При сетевом сбое откатываем код обратно в status = 'pending'
+		// При сбое сети откатываем код в pending
 		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
-		return fmt.Errorf("сбой отправки КМ в Valentin: %w", err)
+		return fmt.Errorf("ошибка отправки в Valentin: %w", err)
+	}
+
+	// Фиксируем статус printed в SQLite для учета в UI
+	if err := tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.PrinterIndex); err != nil {
+		slog.Error("VALENTIN-PUMPER: Ошибка записи printed в БД", "code_id", codeObj.ID, "err", err)
 	}
 
 	return nil

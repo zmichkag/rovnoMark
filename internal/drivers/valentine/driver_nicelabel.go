@@ -144,8 +144,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	return nil
 }
 
-// PrintBatchIndexed отправляет матрицу и дает команду старта без отрыва
-// PrintBatchIndexed осуществляет ротацию DataMatrix с обязательным передергиванием паузы (FBD r0/r1)
+// PrintBatchIndexed осуществляет ротацию DataMatrix с безопасными паузами для контроллера
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -164,19 +163,19 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
-	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстановление байта GS1
+	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстанавливаем разделитель GS1
 
-	// 0. ОБЯЗАТЕЛЬНАЯ ПАУЗА: Снимаем готовность триггера перед обновлением переменной
+	// 1. Снимаем триггер готовности перед записью переменной
 	cmdFBDPause := []byte(fmt.Sprintf("%cFBD---r0-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDPause); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBD r0 (пауза): %w", err)
+		return 0, fmt.Errorf("сбой отправки FBD r0: %w", err)
 	}
 
-	time.Sleep(10 * time.Millisecond) // Микро-пауза для фиксации состояния платой
+	time.Sleep(15 * time.Millisecond) // Пауза для фиксации состояния платой
 
-	// 1. Отправляем новый DataMatrix в поле 20
+	// 2. Записываем DataMatrix в поле 20
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdBM20); err != nil {
@@ -184,19 +183,17 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
 	}
 
-	time.Sleep(10 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
+	time.Sleep(15 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
 
-	// 2. ВЗВОД ТРИГГЕРА: Переводим в готовность к печати по датчику
+	// 3. Взводим триггер в готовность к печати по датчику
 	cmdFBDRun := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDRun); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBD r1 (старт): %w", err)
+		return 0, fmt.Errorf("сбой отправки FBD r1: %w", err)
 	}
 
-	// Фиксируем физический индекс отправленного кода
 	d.lastCount = startIndex
-
 	return 1, nil
 }
 
