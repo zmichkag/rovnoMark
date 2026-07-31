@@ -144,7 +144,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	return nil
 }
 
-// PrintBatchIndexed обновляет DataMatrix в ОЗУ принтера и взводит триггер печати
+// PrintBatchIndexed отправляет 1 код в ОЗУ принтера с четкой паузой под замену кадра
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -165,7 +165,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстановление байта GS1
 
-	// 1. Пауза перед записью (снимаем готовность триггера)
+	// 1. Снимаем триггер готовности (FBD r0) перед обновлением переменной
 	cmdFBDPause := []byte(fmt.Sprintf("%cFBD---r0-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDPause); err != nil {
@@ -173,9 +173,9 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 		return 0, fmt.Errorf("сбой FBD r0: %w", err)
 	}
 
-	time.Sleep(15 * time.Millisecond)
+	time.Sleep(15 * time.Millisecond) // Пауза для фиксации состояния платой
 
-	// 2. Отправляем DataMatrix в BM[20]
+	// 2. Записываем новый DataMatrix в поле 20
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdBM20); err != nil {
@@ -183,9 +183,9 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 		return 0, fmt.Errorf("сбой BM20: %w", err)
 	}
 
-	time.Sleep(15 * time.Millisecond)
+	time.Sleep(15 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
 
-	// 3. Взвод триггера (готовность к печати по фотодатчику)
+	// 3. ВЗВОД ТРИГГЕРА: Переводим в режим ожидания импульса датчика натяжения
 	cmdFBDRun := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDRun); err != nil {
@@ -193,6 +193,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 		return 0, fmt.Errorf("сбой FBD r1: %w", err)
 	}
 
+	d.lastCount = startIndex
 	return 1, nil
 }
 
