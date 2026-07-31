@@ -212,13 +212,81 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	return 1, nil
 }
 
-// GetCurrentPrintCount возвращает виртуальный счетчик без опроса железа (исключает коллизии TCP)
+// GetCurrentPrintCount опрашивает FBBC с жестким фильтром мусора от тачскрина
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Просто возвращаем счетчик, который инкрементируется в PrintBatchIndexed.
-	// Никаких запросов FBBC в сокет принтера больше не отправляем.
+	if d.conn == nil {
+		if err := d.reconnectNoLock(); err != nil {
+			return strconv.Itoa(d.lastCount), fmt.Errorf("сокет закрыт: %w", err)
+		}
+	}
+
+	d.conn.SetDeadline(time.Now().Add(d.Timeout))
+	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
+
+	if _, err := d.conn.Write([]byte(cmd)); err != nil {
+		d.closeConnNoLock()
+		return strconv.Itoa(d.lastCount), err
+	}
+
+	buf := make([]byte, 128)
+	n, err := d.conn.Read(buf)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return strconv.Itoa(d.lastCount), nil
+		}
+		d.closeConnNoLock()
+		return strconv.Itoa(d.lastCount), err
+	}
+
+	rawResponse := string(buf[:n])
+
+	// 🛑 ЖЕСТКИЙ ФИЛЬТР: Игнорируем пакеты дисплея (TD) и всё, где нет маркера ответа 'A'
+	if strings.Contains(rawResponse, "TD\"") || !strings.Contains(rawResponse, "A") {
+		return strconv.Itoa(d.lastCount), nil
+	}
+
+	// Парсим только цифры после маркера 'A'
+	cleanResp := strings.Trim(rawResponse, string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+	aIdx := strings.Index(cleanResp, "A")
+	if aIdx == -1 {
+		return strconv.Itoa(d.lastCount), nil
+	}
+
+	numStr := ""
+	for _, char := range cleanResp[aIdx+1:] {
+		if char >= '0' && char <= '9' {
+			numStr += string(char)
+		} else {
+			break
+		}
+	}
+
+	if numStr == "" {
+		return strconv.Itoa(d.lastCount), nil
+	}
+
+	rawCount, _ := strconv.Atoi(numStr)
+
+	// 🛑 ЛОГИКА ЗАЩИТЫ СЧЕТЧИКА (Блокировка полетов в космос):
+	if rawCount < d.lastRawFBBC {
+		// Принтер сбросил счетчик (например, из-за команды FBC).
+		// Фиксируем новый ноль, виртуальный счетчик НЕ трогаем.
+		d.lastRawFBBC = rawCount
+		return strconv.Itoa(d.lastCount), nil
+	}
+
+	if rawCount > d.lastRawFBBC {
+		delta := rawCount - d.lastRawFBBC
+		// Защита от аномальных скачков (больше 10 за один такт опроса быть не может)
+		if delta < 10 {
+			d.lastCount += delta
+		}
+		d.lastRawFBBC = rawCount
+	}
+
 	return strconv.Itoa(d.lastCount), nil
 }
 
