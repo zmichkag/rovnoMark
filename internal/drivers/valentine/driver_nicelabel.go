@@ -145,7 +145,6 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 }
 
 // PrintBatchIndexed осуществляет отправку строго динамического блока BM[20] (Честный Знак)
-// PrintBatchIndexed отправляет матрицу и дает команду старта без отрыва
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -156,38 +155,60 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 
 	if d.conn == nil {
 		if err := d.reconnectNoLock(); err != nil {
-			return 0, fmt.Errorf("ошибка сокета: %w", err)
+			return 0, fmt.Errorf("ошибка сокета перед реактивным тактом: %w", err)
 		}
 	}
 
-	cleanCode := strings.TrimSpace(codes[0])
+	targetCode := codes[0]
+	cleanCode := targetCode
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
-	// Восстанавливаем спецсимвол разделителя GS1
-	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d")
+	cleanCode = strings.TrimSpace(cleanCode)
 
-	// 1. Отправляем DataMatrix
+	// Ставим паузу
+	cmdFDPause := []byte(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [0/3]: Set Stop (FD)", startIndex), cmdFDPause)
+	if _, err := d.conn.Write(cmdFDPause); err != nil {
+		d.closeConnNoLock()
+		return 0, fmt.Errorf("сбой отправки FD: %w", err)
+	}
+
+	// Обновляем динамический DataMatrix BM[20] ---
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/2]: Set DataMatrix (BM20)", startIndex), cmdBM20)
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/3]: Set DataMatrix (BM20)", startIndex), cmdBM20)
 	if _, err := d.conn.Write(cmdBM20); err != nil {
 		d.closeConnNoLock()
 		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
 	}
 
-	// Микро-пауза для усвоения графического блока контроллером
-	time.Sleep(10 * time.Millisecond)
+	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
+	time.Sleep(15 * time.Millisecond)
 
-	// 2. Взводим триггер ДАТЧИКА через FBD (без реверса отрыва и без пауз)
-	cmdFBD := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
+	//Снимаем паузу
+	cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/2]: Arm Trigger (FBD)", startIndex), cmdFBD)
-	if _, err := d.conn.Write(cmdFBD); err != nil {
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Wait (FD)", startIndex), cmdFD)
+	if _, err := d.conn.Write(cmdFD); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBD: %w", err)
+		return 0, fmt.Errorf("сбой отправки FD: %w", err)
 	}
 
+	// 🛑 ВАЖНО: Пауза 10мс перед взводом
+	time.Sleep(10 * time.Millisecond)
+
+	// --- ШАГ 3: Взвод триггера на фотодатчик (FBC) ---
+	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [3/3]: Arm Trigger (FBC)", startIndex), cmdFBC)
+	if _, err := d.conn.Write(cmdFBC); err != nil {
+		d.closeConnNoLock()
+		return 0, fmt.Errorf("сбой отправки FBC: %w", err)
+	}
+
+	slog.Info("VALENTIN-DIRECT: Код BM[20] успешно взведен на датчик", "printer_id", d.ID, "index", startIndex)
 	return 1, nil
 }
 
