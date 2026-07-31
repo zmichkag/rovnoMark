@@ -253,19 +253,19 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	oldLastRaw := d.lastRawFBBC
 	oldLastCount := d.lastCount
 
-	//  ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
 	if rawCount > d.lastRawFBBC {
-		// Стандартный случай: физический счетчик вырос
+		// Физический счетчик принтера вырос (произошел отстрел на линии)
 		delta := rawCount - d.lastRawFBBC
 		d.lastCount += delta
 		d.lastRawFBBC = rawCount
 	} else if rawCount < d.lastRawFBBC {
-		// Принтер сбросил FBBC в 0 (при взводе FD/FBC или смене макета)
-		// Если пришел rawCount > 0 (например, успел напечатать 1 до нашего опроса), учитываем его
+		// Принтер сбросил FBBC в 0 (при отправке кадров FBD/FBC)
 		if rawCount > 0 {
+			// Если принтер успел напечатать этикетку до момента нашего опроса
 			d.lastCount += rawCount
 		}
-		d.lastRawFBBC = rawCount // Фиксируем новый ноль или текущую засечку!
+		// Запоминаем новый ноль или текущую засечку
+		d.lastRawFBBC = rawCount
 	}
 
 	// Подробное логирование состояния при каждом изменении или для контроля
