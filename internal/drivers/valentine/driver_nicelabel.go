@@ -166,14 +166,14 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	// Ставим паузу
-	cmdFDPause := []byte(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [0/3]: Set Stop (FD)", startIndex), cmdFDPause)
-	if _, err := d.conn.Write(cmdFDPause); err != nil {
-		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FD: %w", err)
-	}
+	//// Ставим паузу
+	//cmdFDPause := []byte(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
+	//d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	//d.traceCommand(fmt.Sprintf("PUMPER TACT %d [0/3]: Set Stop (FD)", startIndex), cmdFDPause)
+	//if _, err := d.conn.Write(cmdFDPause); err != nil {
+	//	d.closeConnNoLock()
+	//	return 0, fmt.Errorf("сбой отправки FD: %w", err)
+	//}
 
 	// Обновляем динамический DataMatrix BM[20] ---
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
