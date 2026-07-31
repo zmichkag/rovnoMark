@@ -144,7 +144,8 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	return nil
 }
 
-// PrintBatchIndexed отправляет 1 код в ОЗУ принтера с четкой паузой под замену кадра
+// PrintBatchIndexed осуществляет отправку строго динамического блока BM[20] (Честный Знак)
+// PrintBatchIndexed отправляет матрицу и дает команду старта без отрыва
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -163,44 +164,122 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
-	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстановление байта GS1
+	// Восстанавливаем спецсимвол разделителя GS1
+	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d")
 
-	// 1. Снимаем триггер готовности (FBD r0) перед обновлением переменной
-	cmdFBDPause := []byte(fmt.Sprintf("%cFD---r0-------%c", SOH, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	if _, err := d.conn.Write(cmdFBDPause); err != nil {
-		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой FD r0: %w", err)
-	}
-
-	time.Sleep(15 * time.Millisecond) // Пауза для фиксации состояния платой
-
-	// 2. Записываем новый DataMatrix в поле 20
+	// 1. Отправляем DataMatrix
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/2]: Set DataMatrix (BM20)", startIndex), cmdBM20)
 	if _, err := d.conn.Write(cmdBM20); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой BM20: %w", err)
+		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
 	}
 
-	time.Sleep(15 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
+	// Микро-пауза для усвоения графического блока контроллером
+	time.Sleep(10 * time.Millisecond)
 
-	// 3. ВЗВОД ТРИГГЕРА: Переводим в режим ожидания импульса датчика натяжения
-	cmdFBDRun := []byte(fmt.Sprintf("%cFD---r1-------%c", SOH, ETB))
+	// 2. Взводим триггер ДАТЧИКА через FBD (без реверса отрыва и без пауз)
+	cmdFBD := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	if _, err := d.conn.Write(cmdFBDRun); err != nil {
+	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/2]: Arm Trigger (FBD)", startIndex), cmdFBD)
+	if _, err := d.conn.Write(cmdFBD); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой FBD r1: %w", err)
+		return 0, fmt.Errorf("сбой отправки FBD: %w", err)
 	}
 
-	d.lastCount = startIndex
 	return 1, nil
 }
 
-// GetCurrentPrintCount просто отдает виртуальный итог для UI
+// GetCurrentPrintCount опрашивает FBBC и высчитывает виртуальный нарастающий итог для фронтенда
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if d.conn == nil {
+		if err := d.reconnectNoLock(); err != nil {
+			return strconv.Itoa(d.lastCount), fmt.Errorf("сокет закрыт: %w", err)
+		}
+	}
+
+	d.conn.SetDeadline(time.Now().Add(d.Timeout))
+	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
+
+	if _, err := d.conn.Write([]byte(cmd)); err != nil {
+		d.closeConnNoLock()
+		return strconv.Itoa(d.lastCount), err
+	}
+
+	buf := make([]byte, 64)
+	n, err := d.conn.Read(buf)
+	if err != nil {
+		// При таймауте возвращаем последнее известное значение
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return strconv.Itoa(d.lastCount), nil
+		}
+		d.closeConnNoLock()
+		return strconv.Itoa(d.lastCount), err
+	}
+
+	// 🔍 ДЕБАГ 1: Дамп сырого ответа от принтера
+	rawResponse := buf[:n]
+	cleanResp := strings.Trim(string(rawResponse), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+
+	rawCount := 0
+	numStr := ""
+
+	if strings.HasPrefix(cleanResp, "A") {
+		valStr := cleanResp[1:]
+		for _, char := range valStr {
+			if char >= '0' && char <= '9' {
+				numStr += string(char)
+			} else {
+				break
+			}
+		}
+		rawCount, _ = strconv.Atoi(numStr)
+	} else {
+		// Пробуем извлечь цифры, даже если маркер 'A' сдвинулся или отсутствует
+		for _, char := range cleanResp {
+			if char >= '0' && char <= '9' {
+				numStr += string(char)
+			} else if len(numStr) > 0 {
+				break // Закончили парсинг первого числового блока
+			}
+		}
+		rawCount, _ = strconv.Atoi(numStr)
+	}
+
+	oldLastRaw := d.lastRawFBBC
+	oldLastCount := d.lastCount
+
+	//  ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
+	if rawCount > d.lastRawFBBC {
+		// Стандартный случай: физический счетчик вырос
+		delta := rawCount - d.lastRawFBBC
+		d.lastCount += delta
+		d.lastRawFBBC = rawCount
+	} else if rawCount < d.lastRawFBBC {
+		// Принтер сбросил FBBC в 0 (при взводе FD/FBC или смене макета)
+		// Если пришел rawCount > 0 (например, успел напечатать 1 до нашего опроса), учитываем его
+		if rawCount > 0 {
+			d.lastCount += rawCount
+		}
+		d.lastRawFBBC = rawCount // Фиксируем новый ноль или текущую засечку!
+	}
+
+	// Подробное логирование состояния при каждом изменении или для контроля
+	slog.Debug("VALENTIN-FBBC-DIAG",
+		"printer_id", d.ID,
+		"raw_hex", fmt.Sprintf("%x", rawResponse),
+		"clean_resp", cleanResp,
+		"parsed_num_str", numStr,
+		"parsed_raw_count", rawCount,
+		"prev_raw_fbbc", oldLastRaw,
+		"new_virtual_count", d.lastCount,
+		"counter_changed", d.lastCount != oldLastCount,
+	)
+
 	return strconv.Itoa(d.lastCount), nil
 }
 
