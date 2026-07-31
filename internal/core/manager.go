@@ -98,7 +98,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос (Синхронизация по железу)", "line_id", lineID, "task_id", taskID)
 
 	// Опрашиваем железо каждые 150 мс
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	lastPrintedCount := -1
