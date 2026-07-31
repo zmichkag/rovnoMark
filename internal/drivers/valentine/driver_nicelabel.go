@@ -212,7 +212,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	return 1, nil
 }
 
-// GetCurrentPrintCount опрашивает FBBC и высчитывает виртуальный нарастающий итог для фронтенда
+// GetCurrentPrintCount опрашивает FBBC с фильтрацией мусорных кадров TD
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -231,10 +231,9 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 		return strconv.Itoa(d.lastCount), err
 	}
 
-	buf := make([]byte, 64)
+	buf := make([]byte, 128)
 	n, err := d.conn.Read(buf)
 	if err != nil {
-		// При таймауте возвращаем последнее известное значение
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return strconv.Itoa(d.lastCount), nil
 		}
@@ -242,64 +241,53 @@ func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 		return strconv.Itoa(d.lastCount), err
 	}
 
-	// 🔍 ДЕБАГ 1: Дамп сырого ответа от принтера
-	rawResponse := buf[:n]
-	cleanResp := strings.Trim(string(rawResponse), string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+	rawResponse := string(buf[:n])
 
-	rawCount := 0
+	// 🛑 ЖЕСТКАЯ ФИЛЬТРАЦИЯ: Если прилетел статус дисплея (TD) или байты без 'A', ИГНОРИРУЕМ ПАКЕТ!
+	if strings.Contains(rawResponse, "TD\"") || !strings.Contains(rawResponse, "A") {
+		slog.Warn("VALENTIN-FBBC: Пропущен мусорный калибровочный пакет сокета", "printer_id", d.ID, "raw", rawResponse)
+		return strconv.Itoa(d.lastCount), nil
+	}
+
+	// Извлекаем точный ответ формата A005888
+	cleanResp := strings.Trim(rawResponse, string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+	aIdx := strings.Index(cleanResp, "A")
+	if aIdx == -1 {
+		return strconv.Itoa(d.lastCount), nil
+	}
+
+	valStr := cleanResp[aIdx+1:]
 	numStr := ""
-
-	if strings.HasPrefix(cleanResp, "A") {
-		valStr := cleanResp[1:]
-		for _, char := range valStr {
-			if char >= '0' && char <= '9' {
-				numStr += string(char)
-			} else {
-				break
-			}
+	for _, char := range valStr {
+		if char >= '0' && char <= '9' {
+			numStr += string(char)
+		} else {
+			break
 		}
-		rawCount, _ = strconv.Atoi(numStr)
-	} else {
-		// Пробуем извлечь цифры, даже если маркер 'A' сдвинулся или отсутствует
-		for _, char := range cleanResp {
-			if char >= '0' && char <= '9' {
-				numStr += string(char)
-			} else if len(numStr) > 0 {
-				break // Закончили парсинг первого числового блока
-			}
-		}
-		rawCount, _ = strconv.Atoi(numStr)
 	}
 
-	oldLastRaw := d.lastRawFBBC
-	oldLastCount := d.lastCount
+	if numStr == "" {
+		return strconv.Itoa(d.lastCount), nil
+	}
 
-	//  ЛОГИКА ВИРТУАЛЬНОГО ИНКРЕМЕНТА:
-	if rawCount > d.lastRawFBBC {
-		// Стандартный случай: физический счетчик вырос
-		delta := rawCount - d.lastRawFBBC
-		d.lastCount += delta
+	rawCount, _ := strconv.Atoi(numStr)
+
+	// 防-ЗАЩИТА ОТ СРЫВА СЧЕТЧИКА:
+	// Если rawCount резким прыжком упал до 0..5 при значении lastRawFBBC > 1000 — это сброс макета/FBC!
+	if rawCount < d.lastRawFBBC {
+		// Фиксируем новый базовый отсчет без прибавления старого массива к виртуальному счетчику
 		d.lastRawFBBC = rawCount
-	} else if rawCount < d.lastRawFBBC {
-		// Принтер сбросил FBBC в 0 (при взводе FD/FBC или смене макета)
-		// Если пришел rawCount > 0 (например, успел напечатать 1 до нашего опроса), учитываем его
-		if rawCount > 0 {
-			d.lastCount += rawCount
-		}
-		d.lastRawFBBC = rawCount // Фиксируем новый ноль или текущую засечку!
+		return strconv.Itoa(d.lastCount), nil
 	}
 
-	// Подробное логирование состояния при каждом изменении или для контроля
-	slog.Debug("VALENTIN-FBBC-DIAG",
-		"printer_id", d.ID,
-		"raw_hex", fmt.Sprintf("%x", rawResponse),
-		"clean_resp", cleanResp,
-		"parsed_num_str", numStr,
-		"parsed_raw_count", rawCount,
-		"prev_raw_fbbc", oldLastRaw,
-		"new_virtual_count", d.lastCount,
-		"counter_changed", d.lastCount != oldLastCount,
-	)
+	if rawCount > d.lastRawFBBC {
+		delta := rawCount - d.lastRawFBBC
+		// Дополнительная проверка на аномальный выброс (если дельта > 100 за один опрос — это сбой)
+		if delta < 100 {
+			d.lastCount += delta
+		}
+		d.lastRawFBBC = rawCount
+	}
 
 	return strconv.Itoa(d.lastCount), nil
 }
