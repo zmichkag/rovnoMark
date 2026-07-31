@@ -146,7 +146,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	}
 }
 
-// pushSingleValentinCode берет 1 pending код из базы и передает драйверу на атомарную отправку
+// pushSingleValentinCode берет 1 pending код из базы, отправляет в сокет и сразу помечает как printed
 func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
 	codes, err := tp.Store.GetPendingCodes(taskID, 1)
 	if err != nil || len(codes) == 0 {
@@ -160,12 +160,17 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "in_buffer", codeObj.ID)
-
-	_, err = vDriver.PrintBatchIndexed("20", codeObj.ID, []string{cleanCode})
+	// 1. Отправляем кадр в принтер по протоколу Valentin
+	_, err = vDriver.PrintBatchIndexed("20", codeObj.PrinterIndex, []string{cleanCode})
 	if err != nil {
+		// При сетевом сбое возвращаем код в pending
 		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
 		return fmt.Errorf("сбой отправки КМ в Valentin: %w", err)
+	}
+
+	// 2. СРАЗУ ПОМЕЧАЕМ КАК НАПЕЧАТАННЫЙ: Код улетел в порт, фиксируем в БД
+	if err := tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.PrinterIndex); err != nil {
+		slog.Error("VALENTIN-PUMPER: Ошибка обновления статуса printed в БД", "code_id", codeObj.ID, "err", err)
 	}
 
 	return nil
