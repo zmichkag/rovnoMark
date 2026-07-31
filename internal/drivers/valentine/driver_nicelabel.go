@@ -185,7 +185,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 
 	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
-	time.Sleep(15 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 
 	//Снимаем паузу
 	cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
@@ -197,7 +197,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 
 	// 🛑 ВАЖНО: Пауза 10мс перед взводом
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 
 	// --- ШАГ 3: Взвод триггера на фотодатчик (FBC) ---
 	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
