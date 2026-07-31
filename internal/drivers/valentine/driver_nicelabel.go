@@ -166,11 +166,11 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстановление байта GS1
 
 	// 1. Снимаем триггер готовности (FBD r0) перед обновлением переменной
-	cmdFBDPause := []byte(fmt.Sprintf("%cFBD---r0-------%c", SOH, ETB))
+	cmdFBDPause := []byte(fmt.Sprintf("%cFD---r0-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDPause); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой FBD r0: %w", err)
+		return 0, fmt.Errorf("сбой FD r0: %w", err)
 	}
 
 	time.Sleep(15 * time.Millisecond) // Пауза для фиксации состояния платой
@@ -186,7 +186,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	time.Sleep(15 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
 
 	// 3. ВЗВОД ТРИГГЕРА: Переводим в режим ожидания импульса датчика натяжения
-	cmdFBDRun := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
+	cmdFBDRun := []byte(fmt.Sprintf("%cFD---r1-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDRun); err != nil {
 		d.closeConnNoLock()
