@@ -92,19 +92,21 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	go tp.RunDefaultPumper(ctx, lineID, taskID, pPrinter)
 }
 
-// RunValentinFastPumper — насос со списыванием "по факту отправки"
-// RunValentinFastPumper — насос с паузой безопасности между тактами
+// RunValentinFastPumper — реактивный насос 1-в-1 (Отправка строго по сдвигу физического счетчика)
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запущен темпированный насос", "line_id", lineID, "task_id", taskID)
+	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос (Синхронизация по железу)", "line_id", lineID, "task_id", taskID)
 
-	// Ограничиваем скорость засыла: не чаще 1 кода в 400 мс (подстраивается под такт линии)
-	ticker := time.NewTicker(400 * time.Millisecond)
+	// Опрашиваем железо каждые 150 мс
+	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
+
+	lastPrintedCount := -1
 
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Info("VALENTIN-PUMPER: Насос остановлен", "task_id", taskID)
 			return
 
 		case <-ticker.C:
@@ -113,19 +115,40 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 				return
 			}
 
-			// Выталкиваем строго 1 код за такт
-			if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-				slog.Error("VALENTIN-PUMPER: Ошибка подкачки КМ", "task_id", taskID, "err", err)
+			// Читаем очищенный от мусора счетчик
+			countStr, err := vDriver.GetCurrentPrintCount()
+			if err != nil {
+				continue
+			}
+			currentCount, _ := strconv.Atoi(countStr)
+
+			// 1. Первичная зарядка при старте конвейера
+			if lastPrintedCount == -1 {
+				lastPrintedCount = currentCount
+				_ = tp.pushSingleValentinCode(taskID, vDriver)
+				continue
+			}
+
+			// 2. РЕАКТИВНЫЙ ТРИГГЕР: Если принтер физически отпечатал этикетку
+			if currentCount > lastPrintedCount {
+				slog.Info("VALENTIN-PUMPER: Зафиксирован сход этикетки, заряжаем следующий код", "total", currentCount)
+
+				lastPrintedCount = currentCount
+
+				// Плюем следующий код и помечаем его
+				if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+					slog.Error("VALENTIN-PUMPER: Ошибка подкачки КМ", "err", err)
+				}
 			}
 		}
 	}
 }
 
-// pushSingleValentinCode берет код, отправляет в сокет и сразу помечает як printed
+// pushSingleValentinCode отправляет код и помечает его как printed
 func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
 	codes, err := tp.Store.GetPendingCodes(taskID, 1)
 	if err != nil || len(codes) == 0 {
-		return nil // Очередь пуста, все напечатано
+		return nil
 	}
 
 	codeObj := codes[0]
@@ -134,19 +157,16 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 		cleanCode = cleanCode[:idx]
 	}
 
-	// 1. Отправляем такт в принтер по сокету
+	// Отправляем такт в принтер: FD r0 -> BM[20] -> FD r1 -> FBC
 	_, err = vDriver.PrintBatchIndexed("20", codeObj.ID, []string{cleanCode})
 	if err != nil {
-		// При сетевом сбое возвращаем код в status pending
 		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
-		return fmt.Errorf("сбой отправки в Valentin: %w", err)
+		return fmt.Errorf("сбой отправки: %w", err)
 	}
 
-	// 2. ЛОГИКА "ОТПРАВЛЕН = НАПЕЧАТАН": Сразу закрываем статус в БД
+	// Фиксируем в БД
 	if err := tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.ID); err != nil {
-		slog.Error("VALENTIN-PUMPER: Ошибка фиксации printed в БД", "code_id", codeObj.ID, "err", err)
-	} else {
-		slog.Debug("VALENTIN-PUMPER: Код ушел в сокет и помечен как printed", "code_id", codeObj.ID)
+		slog.Error("VALENTIN-PUMPER: Ошибка записи printed в БД", "code_id", codeObj.ID)
 	}
 
 	return nil
