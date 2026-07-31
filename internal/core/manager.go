@@ -155,7 +155,8 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 
 // pushSingleValentinCode берет 1 pending код из базы и передает драйверу на атомарную отправку
 func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
-	codes, err := tp.Store.GetPendingCodes(taskID, 1)
+	// Использование FetchAndAssignCodes гарантирует сквозную нумерацию printer_index от 1 до N
+	codes, err := tp.Store.FetchAndAssignCodes(taskID, vDriver.ID, 1)
 	if err != nil || len(codes) == 0 {
 		return nil
 	}
@@ -167,10 +168,10 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "in_buffer", codeObj.ID)
-
-	_, err = vDriver.PrintBatchIndexed("20", codeObj.ID, []string{cleanCode})
+	// Передаем в принтер реальный порядковый индекс (codeObj.PrinterIndex), а не ID строки БД
+	_, err = vDriver.PrintBatchIndexed("20", codeObj.PrinterIndex, []string{cleanCode})
 	if err != nil {
+		// При сетевом сбое откатываем код обратно в status = 'pending'
 		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
 		return fmt.Errorf("сбой отправки КМ в Valentin: %w", err)
 	}
