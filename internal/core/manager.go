@@ -93,28 +93,27 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 }
 
 // RunValentinFastPumper — насос со списыванием "по факту отправки"
+// RunValentinFastPumper — насос с паузой безопасности между тактами
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запущен насос прямого списывания (отправка = printed)", "line_id", lineID, "task_id", taskID)
+	slog.Info("VALENTIN-PUMPER: Запущен темпированный насос", "line_id", lineID, "task_id", taskID)
 
-	// Высокая частота подкачки (50 мс)
-	ticker := time.NewTicker(50 * time.Millisecond)
+	// Ограничиваем скорость засыла: не чаще 1 кода в 400 мс (подстраивается под такт линии)
+	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("VALENTIN-PUMPER: Фоновый насос остановлен", "task_id", taskID)
 			return
 
 		case <-ticker.C:
-			// 1. Проверяем статус задачи в БД
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
 				return
 			}
 
-			// 2. Выталкиваем 1 код в принтер
+			// Выталкиваем строго 1 код за такт
 			if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
 				slog.Error("VALENTIN-PUMPER: Ошибка подкачки КМ", "task_id", taskID, "err", err)
 			}
