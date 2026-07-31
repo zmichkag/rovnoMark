@@ -185,19 +185,19 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 
 	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 
-	//Снимаем паузу
-	cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Wait (FD)", startIndex), cmdFD)
-	if _, err := d.conn.Write(cmdFD); err != nil {
-		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FD: %w", err)
-	}
+	////Снимаем паузу
+	//cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
+	//d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	//d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Wait (FD)", startIndex), cmdFD)
+	//if _, err := d.conn.Write(cmdFD); err != nil {
+	//	d.closeConnNoLock()
+	//	return 0, fmt.Errorf("сбой отправки FD: %w", err)
+	//}
 
 	// 🛑 ВАЖНО: Пауза 10мс перед взводом
-	time.Sleep(10 * time.Millisecond)
+	//time.Sleep(10 * time.Millisecond)
 
 	// --- ШАГ 3: Взвод триггера на фотодатчик (FBC) ---
 	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
