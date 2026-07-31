@@ -144,7 +144,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	return nil
 }
 
-// PrintBatchIndexed осуществляет ротацию DataMatrix с безопасными паузами для контроллера
+// PrintBatchIndexed обновляет DataMatrix в ОЗУ принтера и взводит триггер печати
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -163,37 +163,36 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
-	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстанавливаем разделитель GS1
+	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстановление байта GS1
 
-	// 1. Снимаем триггер готовности перед записью переменной
+	// 1. Пауза перед записью (снимаем готовность триггера)
 	cmdFBDPause := []byte(fmt.Sprintf("%cFBD---r0-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDPause); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBD r0: %w", err)
+		return 0, fmt.Errorf("сбой FBD r0: %w", err)
 	}
 
-	time.Sleep(15 * time.Millisecond) // Пауза для фиксации состояния платой
+	time.Sleep(15 * time.Millisecond)
 
-	// 2. Записываем DataMatrix в поле 20
+	// 2. Отправляем DataMatrix в BM[20]
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdBM20); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
+		return 0, fmt.Errorf("сбой BM20: %w", err)
 	}
 
-	time.Sleep(15 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
+	time.Sleep(15 * time.Millisecond)
 
-	// 3. Взводим триггер в готовность к печати по датчику
+	// 3. Взвод триггера (готовность к печати по фотодатчику)
 	cmdFBDRun := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdFBDRun); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBD r1: %w", err)
+		return 0, fmt.Errorf("сбой FBD r1: %w", err)
 	}
 
-	d.lastCount = startIndex
 	return 1, nil
 }
 

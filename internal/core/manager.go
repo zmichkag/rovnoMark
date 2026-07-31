@@ -92,41 +92,68 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	go tp.RunDefaultPumper(ctx, lineID, taskID, pPrinter)
 }
 
-// RunValentinFastPumper — ритмичный насос с защитой от оверфлуда
+// RunValentinFastPumper — прямой цикл: отстрел -> запись в БД -> подкачка следующего кода
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запуск линейного насоса Valentin", "line_id", lineID, "task_id", taskID)
+	slog.Info("VALENTIN-PUMPER: Запуск чистого синхронного насоса", "line_id", lineID, "task_id", taskID)
 
-	// Безопасный такт подкачки — 300 мс (до 200 кодов в минуту, безопасно для ОЗУ Valentin)
-	ticker := time.NewTicker(300 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+
+	var lastPrintedCount int = -1
+
+	// Первичная подзарядка: перед стартом движения линии засылаем 1-й код
+	if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+		slog.Error("VALENTIN-PUMPER: Ошибка первичной зарядки", "err", err)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("VALENTIN-PUMPER: Насос остановлен", "task_id", taskID)
+			slog.Info("VALENTIN-PUMPER: Остановлен", "task_id", taskID)
 			return
 
 		case <-ticker.C:
-			// Проверяем статус задачи в БД
-			status, err := tp.Store.GetTaskStatus(taskID)
-			if err != nil || status == "stopped" || status == "completed" {
-				return
+			// 1. Проверяем счетчик принтера
+			countStr, err := vDriver.GetCurrentPrintCount()
+			if err != nil {
+				continue
 			}
 
-			// Отправляем 1 код за такт
-			if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-				slog.Warn("VALENTIN-PUMPER: Заминка подкачки", "task_id", taskID, "err", err)
+			currentCount, _ := strconv.Atoi(countStr)
+
+			if lastPrintedCount == -1 {
+				lastPrintedCount = currentCount
+				continue
+			}
+
+			// 2. РЕАКЦИЯ НА ОТСТРЕЛ: счетчик изменился (пошел прирост)
+			if currentCount > lastPrintedCount {
+				delta := currentCount - lastPrintedCount
+				slog.Info("VALENTIN-PUMPER: Зафиксирован отстрел", "delta", delta, "current", currentCount)
+
+				// Маркируем отпечатанный код в БД
+				if affected, err := tp.Store.MarkAsPrinted(taskID, currentCount); err != nil {
+					slog.Error("VALENTIN-PUMPER: Ошибка БД", "err", err)
+				} else {
+					slog.Debug("VALENTIN-PUMPER: Код подтвержден в БД", "affected", affected)
+				}
+
+				lastPrintedCount = currentCount
+
+				// Засылаем следующий 1 код под новый отстрел
+				if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+					slog.Error("VALENTIN-PUMPER: Сбой подкачки следующего кода", "err", err)
+				}
 			}
 		}
 	}
 }
 
-// pushSingleValentinCode берет 1 pending код, отправляет в Valentin и запечатывает статус в БД
 func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
 	codes, err := tp.Store.FetchAndAssignCodes(taskID, vDriver.ID, 1)
 	if err != nil || len(codes) == 0 {
-		return nil // Очередь пуста
+		return nil
 	}
 
 	codeObj := codes[0]
@@ -135,17 +162,15 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 		cleanCode = cleanCode[:idx]
 	}
 
-	// Отправляем FBD r0 -> BM[20] -> FBD r1
 	_, err = vDriver.PrintBatchIndexed("20", codeObj.PrinterIndex, []string{cleanCode})
 	if err != nil {
-		// При сбое сети откатываем код в pending
 		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
 		return fmt.Errorf("ошибка отправки в Valentin: %w", err)
 	}
 
-	// Фиксируем статус printed в SQLite для учета в UI
-	if err := tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.PrinterIndex); err != nil {
-		slog.Error("VALENTIN-PUMPER: Ошибка записи printed в БД", "code_id", codeObj.ID, "err", err)
+	// 🎯 ВАЖНО: Код ушел в сокет, но еще не напечатан! Переводим в in_buffer:
+	if err := tp.Store.UpdateCodeStatusByID(codeObj.ID, "in_buffer", codeObj.PrinterIndex); err != nil {
+		slog.Error("VALENTIN-PUMPER: Ошибка записи in_buffer в БД", "code_id", codeObj.ID, "err", err)
 	}
 
 	return nil
