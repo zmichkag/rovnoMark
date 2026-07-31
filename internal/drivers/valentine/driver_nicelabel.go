@@ -145,6 +145,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 }
 
 // PrintBatchIndexed отправляет матрицу и дает команду старта без отрыва
+// PrintBatchIndexed осуществляет ротацию DataMatrix с обязательным передергиванием паузы (FBD r0/r1)
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -163,9 +164,19 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
 	}
-	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // GS1 разделитель
+	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d") // Восстановление байта GS1
 
-	// 1. Отправляем DataMatrix
+	// 0. ОБЯЗАТЕЛЬНАЯ ПАУЗА: Снимаем готовность триггера перед обновлением переменной
+	cmdFBDPause := []byte(fmt.Sprintf("%cFBD---r0-------%c", SOH, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	if _, err := d.conn.Write(cmdFBDPause); err != nil {
+		d.closeConnNoLock()
+		return 0, fmt.Errorf("сбой отправки FBD r0 (пауза): %w", err)
+	}
+
+	time.Sleep(10 * time.Millisecond) // Микро-пауза для фиксации состояния платой
+
+	// 1. Отправляем новый DataMatrix в поле 20
 	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(cmdBM20); err != nil {
@@ -173,18 +184,18 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond) // Пауза на перерисовку растра в ОЗУ
 
-	// 2. Взводим триггер ДАТЧИКА
-	cmdFBD := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
+	// 2. ВЗВОД ТРИГГЕРА: Переводим в готовность к печати по датчику
+	cmdFBDRun := []byte(fmt.Sprintf("%cFBD---r1-------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	if _, err := d.conn.Write(cmdFBD); err != nil {
+	if _, err := d.conn.Write(cmdFBDRun); err != nil {
 		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBD: %w", err)
+		return 0, fmt.Errorf("сбой отправки FBD r1 (старт): %w", err)
 	}
 
-	// 🎯 ВИРТУАЛЬНЫЙ СЧЕТЧИК: Этикетка ушла в ОЗУ принтера — считаем напечатанной
-	d.lastCount++
+	// Фиксируем физический индекс отправленного кода
+	d.lastCount = startIndex
 
 	return 1, nil
 }
