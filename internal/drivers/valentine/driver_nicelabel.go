@@ -185,7 +185,7 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	}
 
 	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
-	time.Sleep(5 * time.Millisecond)
+	time.Sleep(2 * time.Millisecond)
 
 	////Снимаем паузу
 	//cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
