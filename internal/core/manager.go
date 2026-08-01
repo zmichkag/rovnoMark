@@ -196,11 +196,12 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 	return nil
 }
 
-// RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC
+// RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC / Markem
 func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID int, p Printer) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл подкачки", "line_id", lineID, "task_id", taskID)
+	slog.Info("DEFAULT-PUMPER: Запущен умный пачечный цикл", "line_id", lineID, "task_id", taskID)
 
+	// Опрашиваем раз в 2 секунды. Этого достаточно, чтобы конвейер не простаивал.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -210,44 +211,63 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 			slog.Info("DEFAULT-PUMPER: Остановлен по контексту", "task_id", taskID)
 			return
 		case <-ticker.C:
+			// 1. Проверяем статус задачи
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
-				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID, "status", status)
+				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID)
 				return
 			}
 
+			// Получаем ВСЕ принтеры, привязанные к этой линии
 			printers, err := tp.Store.GetPrintersByLine(lineID)
 			if err != nil || len(printers) == 0 {
 				continue
 			}
-			pCfg := printers[0]
 
-			freeSpace, err := p.GetBufferFreeSpace()
-			if err != nil || freeSpace <= 0 {
-				continue
-			}
+			// 2. ИТЕРИРУЕМСЯ ПО ВСЕМ ПРИНТЕРАМ НА ЛИНИИ (убран затыковый printers[0])
+			for _, pCfg := range printers {
+				pPrinter := tp.Manager.GetPrinter(pCfg.ID)
+				if pPrinter == nil {
+					continue
+				}
 
-			batchSize := freeSpace
-			if batchSize > 50 {
-				batchSize = 50
-			}
+				// 3. Считаем свободное место в софтверном буфере конкретного принтера
+				freeSpace, err := pPrinter.GetBufferFreeSpace()
+				if err != nil || freeSpace <= 0 {
+					// Места в буфере этого принтера нет, пропускаем и идем к следующему
+					continue
+				}
 
-			codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
-			if err != nil || len(codes) == 0 {
-				continue
-			}
+				// 4. Дробим отправку. Даже если места много, шлем не больше 15 кодов за раз,
+				// чтобы не перегрузить XML-парсер Маркема.
+				batchSize := freeSpace
+				if batchSize > 15 {
+					batchSize = 15
+				}
 
-			var payload []string
-			for _, c := range codes {
-				payload = append(payload, c.Code)
-			}
+				// 5. Достаем коды из БД, атомарно назначая их ИМЕННО ЭТОМУ pCfg.ID
+				codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
+				if err != nil || len(codes) == 0 {
+					continue
+				}
 
-			startIndex := codes[0].PrinterIndex
-			_, err = p.PrintBatchIndexed("20", startIndex, payload)
-			if err != nil {
-				slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
-			} else {
-				slog.Info("DEFAULT-PUMPER: Пачка успешно загружена в принтер", "printer", pCfg.Name, "count", len(payload), "start_idx", startIndex)
+				var payload []string
+				for _, c := range codes {
+					payload = append(payload, c.Code)
+				}
+
+				// 6. Отправляем сформированную пачку в сокет принтера
+				startIndex := codes[0].PrinterIndex
+				_, err = pPrinter.PrintBatchIndexed("DATAMATRIX", startIndex, payload)
+				if err != nil {
+					slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
+				} else {
+					slog.Info("DEFAULT-PUMPER: Пачка отправлена",
+						"printer", pCfg.Name,
+						"count", len(payload),
+						"free_space_left", freeSpace-len(payload),
+					)
+				}
 			}
 		}
 	}
