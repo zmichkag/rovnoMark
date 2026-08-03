@@ -161,11 +161,15 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 
 	targetCode := codes[0]
 	cleanCode := targetCode
+
+	// 1. Отрезаем хвост с техническими метаданными 1С (если есть '|')
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
-		cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "&#x1D;")
-		cleanCode = strings.ReplaceAll(cleanCode, "\x1d", "&#x1D;")
 	}
+
+	// 2. Заменяем текстовую заглушку "<GS>" на реальный бинарный байт 0x1D (ASCII 29)
+	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d")
+
 	cleanCode = strings.TrimSpace(cleanCode)
 
 	//// Ставим паузу
