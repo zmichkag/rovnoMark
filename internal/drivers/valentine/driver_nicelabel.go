@@ -163,6 +163,8 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	cleanCode := targetCode
 	if idx := strings.Index(cleanCode, "|"); idx != -1 {
 		cleanCode = cleanCode[:idx]
+		cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "&#x1D;")
+		cleanCode = strings.ReplaceAll(cleanCode, "\x1d", "&#x1D;")
 	}
 	cleanCode = strings.TrimSpace(cleanCode)
 
