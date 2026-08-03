@@ -31,8 +31,9 @@ type Driver struct {
 	curTemplate string
 
 	// Внутренние счетчики
-	totalSent int
-	baseCount int // Значение countBatchGood при начале задания
+	totalSent             int
+	baseCount             int // Значение countBatchGood при начале задания
+	lastPrintedCalculated int // Кэш отпечатанных кодов для защиты буфера
 }
 
 func New(ip string, port int, actorName string) *Driver {
@@ -154,10 +155,10 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 				if strings.Contains(decoded, "CmdPending") {
 					continue
 				}
+				// ФУНДАМЕНТАЛЬНАЯ ЗАЩИТА: Честно возвращаем ошибку, но не спамим в лог фоновыми запросами
 				if strings.Contains(decoded, "CmdFailed") || strings.Contains(decoded, "Fault") {
-					// Игнорируем ошибку состояния -805240831 как некритичную
-					if strings.Contains(decoded, "-805240831") {
-						return decoded, nil
+					if strings.Contains(bodyXML, "RequestCounts") || strings.Contains(bodyXML, "RequestPackMLStatus") {
+						return "", fmt.Errorf("telemetry command rejected")
 					}
 					slog.Warn("MARKEM Command Failed", "ip", d.Address, "resp", decoded)
 					return decoded, fmt.Errorf("printer rejected command (CmdFailed)")
@@ -264,13 +265,14 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	return len(codes), nil
 }
 
-// GetCurrentPrintCount парсит точное значение countBatchGood
 func (d *Driver) GetCurrentPrintCount() (string, error) {
 	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="{act}"/>`)
 	if err != nil {
 		d.stateMu.Lock()
 		defer d.stateMu.Unlock()
-		return strconv.Itoa(d.baseCount), err
+		// Если принтер не ответил, отдаем последнюю стабильную цифру
+		lastValid := d.baseCount + d.lastPrintedCalculated
+		return strconv.Itoa(lastValid), err
 	}
 
 	// Ищем точный тег countBatchGood или countAllocCurrent
@@ -291,28 +293,41 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
-	// Самокоррекция: если счетчик сбросился (стал меньше baseCount)
-	if current < d.baseCount {
+	// Самокоррекция: если счетчик сбросился
+	if current < d.baseCount && current != 0 {
 		d.baseCount = current
 	}
 
 	return strconv.Itoa(current), nil
 }
 
+// GetBufferFreeSpace защищен от прыжков в 0 при ошибке сети
 func (d *Driver) GetBufferFreeSpace() (int, error) {
 	countStr, err := d.GetCurrentPrintCount()
-	if err != nil {
-		return 0, err
-	}
-	hwCount, _ := strconv.Atoi(countStr)
 
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
+
+	// Если принтер не ответил или вернул 0 (переходные стейты), используем кэш
+	if err != nil || countStr == "0" {
+		inBuffer := d.totalSent - d.lastPrintedCalculated
+		if inBuffer < 0 {
+			inBuffer = 0
+		}
+		freeSpace := SafeQueueLimit - inBuffer
+		if freeSpace < 0 {
+			freeSpace = 0
+		}
+		return freeSpace, nil
+	}
+
+	hwCount, _ := strconv.Atoi(countStr)
 
 	printedSinceStart := hwCount - d.baseCount
 	if printedSinceStart < 0 {
 		printedSinceStart = 0
 	}
+	d.lastPrintedCalculated = printedSinceStart
 
 	inBuffer := d.totalSent - printedSinceStart
 	if inBuffer < 0 {
@@ -360,6 +375,9 @@ func (d *Driver) GetStatus() (string, error) {
 func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
 	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="{act}"/>`)
+	if err != nil {
+		return fmt.Errorf("принтер отверг очистку очереди (нужно перевести в Ready/Printing): %w", err)
+	}
 
 	countStr, _ := d.GetCurrentPrintCount()
 	hwCount, _ := strconv.Atoi(countStr)
@@ -367,10 +385,11 @@ func (d *Driver) ClearQueue() error {
 	d.stateMu.Lock()
 	d.baseCount = hwCount
 	d.totalSent = 0
+	d.lastPrintedCalculated = 0
 	d.stateMu.Unlock()
 
 	slog.Info("MARKEM: Очередь очищена, новый baseCount зафиксирован", "baseCount", hwCount)
-	return err
+	return nil
 }
 
 func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
