@@ -241,8 +241,8 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				// 4. Дробим отправку. Даже если места много, шлем не больше 15 кодов за раз,
 				// чтобы не перегрузить XML-парсер Маркема.
 				batchSize := freeSpace
-				if batchSize > 15 {
-					batchSize = 15
+				if batchSize > 2 {
+					batchSize = 2
 				}
 
 				// 5. Достаем коды из БД, атомарно назначая их ИМЕННО ЭТОМУ pCfg.ID
