@@ -83,6 +83,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	// 1. ИЗВЛЕКАЕМ ДАТЫ СТРОГО ИЗ 1С
 	dateProd, ok1 := staticFields["date01"]
 	dateExp, ok2 := staticFields["date02"]
+	text01, ok3 := staticFields["text01"]
 
 	// ВАЛИДАЦИЯ: Если 1С не передала обязательные поля — жестко бракуем запуск!
 	if !ok1 || strings.TrimSpace(dateProd) == "" {
@@ -91,18 +92,22 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	if !ok2 || strings.TrimSpace(dateExp) == "" {
 		return fmt.Errorf("ошибка валидации 1С: поле дата годности 'data02' не заполнено")
 	}
+	if !ok3 || strings.TrimSpace(text01) == "" {
+		return fmt.Errorf("ошибка валидации 1С: строка смены не заполнена")
+	}
 
 	slog.Info("VALENTIN-DIRECT: Покомандная активация макета и запись точных дат из 1С",
 		"printer_id", d.ID,
 		"template", d.curTemplate,
 		"date_prod", dateProd,
 		"date_exp", dateExp,
+		"text01", text01,
 	)
 
 	// --- ШАГ 1: Выбираем макет из Flash (FMB) ---
 	cmdFMB := []byte(fmt.Sprintf("%cFMB---r%s%c", SOH, d.curTemplate, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("STEP 1: Select Layout (FMB)", cmdFMB)
+	d.traceCommand("Select Layout (FMB)", cmdFMB)
 	if _, err := d.conn.Write(cmdFMB); err != nil {
 		d.closeConnNoLock()
 		return fmt.Errorf("сбой отправки FMB: %w", err)
@@ -112,7 +117,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	// --- ШАГ 2: Записываем точную дату производства в поле 18 (BM[18]) ---
 	cmdBM18 := []byte(fmt.Sprintf("%cBM[18]%s%c", SOH, dateProd, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("STEP 2: Field 18 DateProd (BM)", cmdBM18)
+	d.traceCommand("Field 18 DateProd (BM)", cmdBM18)
 	if _, err := d.conn.Write(cmdBM18); err != nil {
 		d.closeConnNoLock()
 		return fmt.Errorf("сбой отправки BM[18]: %w", err)
@@ -122,17 +127,27 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 	// --- ШАГ 3: Записываем точную дату годности в поле 19 (BM[19]) ---
 	cmdBM19 := []byte(fmt.Sprintf("%cBM[19]%s%c", SOH, dateExp, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("STEP 3: Field 19 DateExp (BM)", cmdBM19)
+	d.traceCommand(" Field 19 DateExp (BM)", cmdBM19)
 	if _, err := d.conn.Write(cmdBM19); err != nil {
 		d.closeConnNoLock()
 		return fmt.Errorf("сбой отправки BM[19]: %w", err)
 	}
 	time.Sleep(10 * time.Millisecond)
 
+	cmdBM21 := []byte(fmt.Sprintf("%cBM[21]%s%c", SOH, text01, ETB))
+	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	d.traceCommand("Field 21 text01 (BM)", cmdBM21)
+	if _, err := d.conn.Write(cmdBM21); err != nil {
+		d.closeConnNoLock()
+		return fmt.Errorf(
+			"сбой отправки BM[21]: %w", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
 	// --- ШАГ 4: Первичный взвод в режим ожидания датчика (FBC) ---
 	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
 	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("STEP 4: Arm Printer (FBC)", cmdFBC)
+	d.traceCommand("Arm Printer (FBC)", cmdFBC)
 	if _, err := d.conn.Write(cmdFBC); err != nil {
 		d.closeConnNoLock()
 		return fmt.Errorf("сбой отправки FBC: %w", err)
