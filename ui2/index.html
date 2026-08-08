@@ -243,6 +243,7 @@
     function LineControlDashboard() {
         const [time, setTime] = useState("");
         const [data, setData] = useState(null);
+        const [logsHistory, setLogsHistory] = useState([]);
         const [error, setError] = useState(null);
 
         const handleStopTask = async (taskId) => {
@@ -259,12 +260,24 @@
             }
         };
 
+        // Функция получения данных дашборда и истории логов
         const fetchLiveData = async () => {
             try {
-                const res = await fetch('/api/dashboard/live');
-                if (!res.ok) throw new Error("HTTP Status " + res.status);
-                const json = await res.json();
-                setData(json);
+                // 1. Запрос живого состояния
+                const resLive = await fetch('/api/dashboard/live');
+                if (!resLive.ok) throw new Error("HTTP Status " + resLive.status);
+                const jsonLive = await resLive.json();
+                setData(jsonLive);
+
+                // 2. Запрос истории логов из БД (последние 50 событий)
+                const resLogs = await fetch('/api/logs/history?limit=50');
+                if (resLogs.ok) {
+                    const jsonLogs = await resLogs.json();
+                    if (jsonLogs.items) {
+                        setLogsHistory(jsonLogs.items);
+                    }
+                }
+
                 setError(null);
             } catch (e) {
                 setError(e.message);
@@ -292,7 +305,7 @@
             return (
                 <div className="min-h-screen bg-slate-950 p-6 flex flex-col items-center justify-center text-rose-400 font-mono">
                     <Icons.Alert />
-                    <div className="text-xl font-bold my-2">Сбой подключения к серверу AstraPrint</div>
+                    <div className="text-xl font-bold my-2">Сбой подключения к серверу RovnoMark</div>
                     <div className="bg-rose-950/40 border border-rose-900/50 p-4 rounded-xl text-xs max-w-lg text-center">
                         {error}
                     </div>
@@ -312,7 +325,9 @@
         const summary = data.summary || { active_tasks: 0, total_lines: 0, printers_offline: 0 };
         const lines = data.lines || [];
         const printerCatalog = data.printers || {};
-        const logs = data.logs || [];
+
+        // Используем логи из БД, а если их нет — фоллбэк на логи из памяти
+        const displayLogs = logsHistory.length > 0 ? logsHistory : (data.logs || []);
 
         return (
             <div className="min-h-screen bg-slate-950 text-slate-300 font-sans flex flex-col">
@@ -326,7 +341,7 @@
                                 <Icons.Activity />
                             </div>
                             <div>
-                                <h1 className="text-lg font-black text-white leading-none tracking-wide">ASTRAPRINT</h1>
+                                <h1 className="text-lg font-black text-white leading-none tracking-wide">ROVNO</h1>
                                 <span className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">Line Control v1.5</span>
                             </div>
                         </div>
@@ -374,27 +389,36 @@
                     </div>
                 </main>
 
-                {/* Лента событий (Логи) */}
+                {/* Лента событий (Live Event Stream) */}
                 <footer className="mt-auto border-t border-slate-800 bg-[#0a0d14] p-4 shrink-0">
-                    <div className="max-w-[1920px] mx-auto flex flex-col gap-2 h-32">
+                    <div className="max-w-[1920px] mx-auto flex flex-col gap-2 h-36">
                         <div className="flex items-center justify-between text-xs text-slate-500 font-bold uppercase tracking-widest px-1">
-                            <span className="flex items-center gap-2"><Icons.Terminal /> Live Event Stream</span>
+                            <span className="flex items-center gap-2"><Icons.Terminal /> Live Event Stream (SQLite History)</span>
                             <span className="flex items-center gap-1 text-[10px]"><Icons.Refresh /> Polling (2s)</span>
                         </div>
 
                         <div className="bg-slate-950 rounded-xl border border-slate-800/80 p-3 overflow-y-auto flex-grow font-mono text-xs space-y-1.5 shadow-inner">
-                            {logs.length > 0 ? logs.map((log, i) => {
+                            {displayLogs.length > 0 ? displayLogs.map((log, i) => {
+                                // Поддержка обеих структур (из БД и из RAM)
+                                const timeStr = log.timestamp ? new Date(log.timestamp).toLocaleTimeString('ru-RU') : (log.time || "—");
+                                const printerName = log.printer_name || log.printer || "Система";
+                                const lineInfo = log.line_name ? (" [" + log.line_name + "]") : "";
+                                const messageText = log.message || log.event || "";
+                                const type = (log.event_type || log.type || "info").toLowerCase();
+
                                 let colorClass = "text-slate-400";
-                                if (log.type === "error") colorClass = "text-rose-400";
-                                if (log.type === "warn") colorClass = "text-amber-400";
-                                if (log.type === "success") colorClass = "text-emerald-400";
-                                if (log.type === "info") colorClass = "text-blue-300";
+                                if (type === "error") colorClass = "text-rose-400 font-semibold";
+                                if (type === "warn" || type === "warning") colorClass = "text-amber-400";
+                                if (type === "success") colorClass = "text-emerald-400";
+                                if (type === "info") colorClass = "text-blue-300";
 
                                 return (
-                                    <div key={i} className="flex items-start gap-3 hover:bg-slate-900/50 px-2 py-0.5 rounded -mx-2 transition-colors">
-                                        <span className="text-slate-600 shrink-0">{"[" + log.time + "]"}</span>
-                                        <span className="text-slate-300 font-semibold shrink-0 min-w-[120px] truncate">{log.printer}</span>
-                                        <span className={colorClass + " break-all"}>{log.event}</span>
+                                    <div key={log.id || i} className="flex items-start gap-3 hover:bg-slate-900/50 px-2 py-0.5 rounded -mx-2 transition-colors">
+                                        <span className="text-slate-600 shrink-0">{"[" + timeStr + "]"}</span>
+                                        <span className="text-slate-300 font-semibold shrink-0 min-w-[140px] truncate">
+                            {printerName + lineInfo}
+                          </span>
+                                        <span className={colorClass + " break-all"}>{messageText}</span>
                                     </div>
                                 );
                             }) : (

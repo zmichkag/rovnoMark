@@ -160,6 +160,86 @@ func main() {
 		}
 	})
 
+	http.HandleFunc("/api/logs/history", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только метод GET")
+			return
+		}
+
+		query := r.URL.Query()
+		var filter models.LogFilter
+
+		// 1. Фильтр по линии (line_id)
+		if lineIDStr := query.Get("line_id"); lineIDStr != "" {
+			if id, err := strconv.Atoi(lineIDStr); err == nil && id > 0 {
+				filter.LineID = id
+			}
+		}
+
+		// 2. Фильтр по принтеру (printer_id)
+		if printerIDStr := query.Get("printer_id"); printerIDStr != "" {
+			if id, err := strconv.Atoi(printerIDStr); err == nil && id > 0 {
+				filter.PrinterID = id
+			}
+		}
+
+		// 3. Фильтр по типу события (type: error, warn, info, success)
+		if typeStr := query.Get("type"); typeStr != "" {
+			filter.EventType = strings.ToLower(typeStr)
+		}
+
+		// 4. Фильтры времени (date_from, date_to в формате RFC3339 или YYYY-MM-DD HH:MM:SS)
+		if dateFromStr := query.Get("date_from"); dateFromStr != "" {
+			if t, err := time.Parse(time.RFC3339, dateFromStr); err == nil {
+				filter.DateFrom = t
+			} else if t, err := time.Parse("2006-01-02 15:04:05", dateFromStr); err == nil {
+				filter.DateFrom = t
+			} else if t, err := time.Parse("2006-01-02", dateFromStr); err == nil {
+				filter.DateFrom = t
+			}
+		}
+
+		if dateToStr := query.Get("date_to"); dateToStr != "" {
+			if t, err := time.Parse(time.RFC3339, dateToStr); err == nil {
+				filter.DateTo = t
+			} else if t, err := time.Parse("2006-01-02 15:04:05", dateToStr); err == nil {
+				filter.DateTo = t
+			} else if t, err := time.Parse("2006-01-02", dateToStr); err == nil {
+				// Если передана только дата, ставим конец суток
+				filter.DateTo = t.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+			}
+		}
+
+		// 5. Настройки постраничной навигации
+		if limitStr := query.Get("limit"); limitStr != "" {
+			if lim, err := strconv.Atoi(limitStr); err == nil && lim > 0 {
+				filter.Limit = lim
+			}
+		}
+		if offsetStr := query.Get("offset"); offsetStr != "" {
+			if off, err := strconv.Atoi(offsetStr); err == nil && off >= 0 {
+				filter.Offset = off
+			}
+		}
+
+		// Запрос к хранилищу
+		logs, err := store.GetEventLogsHistory(filter)
+		if err != nil {
+			slog.Error("API LOGS-HISTORY Error", "err", err)
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка получения данных: "+err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+			"count":  len(logs),
+			"filter": filter,
+			"items":  logs,
+		})
+	})
+
 	// 3. API для дашборда (Мониторинг)
 	http.HandleFunc("/api/printers", func(w http.ResponseWriter, r *http.Request) {
 		states, logs := manager.GetDashboardData()

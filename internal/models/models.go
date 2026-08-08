@@ -50,3 +50,26 @@ type TaskCode struct {
 	PrinterIndex int       `json:"printer_index"` // Индекс SID от принтера
 	PrintedAt    time.Time `json:"printed_at"`
 }
+
+// EventLogItem представляет запись системного или аппаратного события в БД
+type EventLogItem struct {
+	ID        int       `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	LineID    *int      `json:"line_id,omitempty"`
+	LineName  string    `json:"line_name,omitempty"`
+	PrinterID *int      `json:"printer_id,omitempty"`
+	Printer   string    `json:"printer_name,omitempty"`
+	EventType string    `json:"event_type"` // 'error', 'warn', 'info', 'success'
+	Message   string    `json:"message"`
+}
+
+// LogFilter содержит параметры фильтрации истории событий
+type LogFilter struct {
+	LineID    int       `json:"line_id"`
+	PrinterID int       `json:"printer_id"`
+	EventType string    `json:"event_type"` // 'error', 'warn', 'info', 'success'
+	DateFrom  time.Time `json:"date_from"`
+	DateTo    time.Time `json:"date_to"`
+	Limit     int       `json:"limit"`
+	Offset    int       `json:"offset"`
+}
