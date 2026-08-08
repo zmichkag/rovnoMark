@@ -104,6 +104,112 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	return list, nil
 }
 
+// GetEventLogsHistory извлекает события с учетом фильтрации по дате, типу и линии
+func (s *Store) GetEventLogsHistory(filter models.LogFilter) ([]models.EventLogItem, error) {
+	query := `
+		SELECT 
+			e.id, 
+			e.timestamp, 
+			e.line_id, 
+			COALESCE(l.name, '') as line_name,
+			e.printer_id, 
+			COALESCE(p.name, 'Система') as printer_name, 
+			e.event_type, 
+			e.message
+		FROM event_log e
+		LEFT JOIN lines l ON e.line_id = l.id
+		LEFT JOIN printers p ON e.printer_id = p.id
+		WHERE 1=1`
+
+	var args []interface{}
+
+	// Фильтр по линии
+	if filter.LineID > 0 {
+		query += " AND e.line_id = ?"
+		args = append(args, filter.LineID)
+	}
+
+	// Фильтр по принтеру
+	if filter.PrinterID > 0 {
+		query += " AND e.printer_id = ?"
+		args = append(args, filter.PrinterID)
+	}
+
+	// Фильтр по типу события (error, warn, info, success)
+	if filter.EventType != "" {
+		query += " AND e.event_type = ?"
+		args = append(args, filter.EventType)
+	}
+
+	// Фильтр по диапазону дат (смене)
+	if !filter.DateFrom.IsZero() {
+		query += " AND e.timestamp >= ?"
+		args = append(args, filter.DateFrom.Format("2006-01-02 15:04:05"))
+	}
+	if !filter.DateTo.IsZero() {
+		query += " AND e.timestamp <= ?"
+		args = append(args, filter.DateTo.Format("2006-01-02 15:04:05"))
+	}
+
+	query += " ORDER BY e.id DESC"
+
+	// Лимиты пагинации
+	if filter.Limit <= 0 {
+		filter.Limit = 100 // По умолчанию 100 записей
+	}
+	query += " LIMIT ?"
+	args = append(args, filter.Limit)
+
+	if filter.Offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, filter.Offset)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения истории логов: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []models.EventLogItem
+	for rows.Next() {
+		var item models.EventLogItem
+		var lID, pID sql.NullInt64
+
+		err := rows.Scan(
+			&item.ID,
+			&item.Timestamp,
+			&lID,
+			&item.LineName,
+			&pID,
+			&item.Printer,
+			&item.EventType,
+			&item.Message,
+		)
+		if err != nil {
+			slog.Error("Scan error event_log", "err", err)
+			continue
+		}
+
+		if lID.Valid {
+			id := int(lID.Int64)
+			item.LineID = &id
+		}
+		if pID.Valid {
+			id := int(pID.Int64)
+			item.PrinterID = &id
+		}
+
+		logs = append(logs, item)
+	}
+
+	if logs == nil {
+		logs = make([]models.EventLogItem, 0)
+	}
+
+	return logs, nil
+}
+
 // GetLiveDashboardData собирает актуальное состояние завода для планшетов
 func (s *Store) GetLiveDashboardData() (map[string]interface{}, error) {
 	// 1. Извлекаем только активные и не удаленные линии (благодаря обновленному GetAllLines)
@@ -606,6 +712,27 @@ func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status
 	return err
 }
 
+// SaveEventLog сохраняет инцидент или системный шаг в SQLite
+func (s *Store) SaveEventLog(lineID *int, printerID *int, eventType string, message string) error {
+	query := `
+		INSERT INTO event_log (line_id, printer_id, event_type, message) 
+		VALUES (?, ?, ?, ?)`
+
+	var lID, pID interface{}
+	if lineID != nil && *lineID > 0 {
+		lID = *lineID
+	}
+	if printerID != nil && *printerID > 0 {
+		pID = *printerID
+	}
+
+	_, err := s.db.Exec(query, lID, pID, eventType, message)
+	if err != nil {
+		slog.Error("SQL Error: Ошибка записи в event_log", "err", err)
+	}
+	return err
+}
+
 // SetTaskStatus меняет статус всей партии (например, на 'completed' или 'stopped')
 func (s *Store) SetTaskStatus(taskID int, status string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
@@ -709,8 +836,10 @@ func createTables(db *sql.DB) {
 
 	// Индекс для быстрых отчетов по времени
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_telemetry_time ON printer_telemetry(timestamp);`)
-
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_status ON task_codes(task_id, status);`)
+	// Составные индексы для ускорения работы пагинации и поиска по фильтрам
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_event_log_composite ON event_log(line_id, event_type, timestamp);`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_event_log_time ON event_log(timestamp DESC);`)
 }
 
 // runMigration перетаскивает данные из бэкапа прозрачно для пользователя

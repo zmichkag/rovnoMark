@@ -87,31 +87,28 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		}
 	}
 
-	// Для всех остальных типов (Videojet, Savema, TSC) запускаем штатный пачечный насос
+	// Для всех остальных типов (Videojet, Savema, TSC, Markem) запускаем штатный пачечный насос
 	slog.Info("Pumper: Запуск штатного пачечного насоса (Default)", "line_id", lineID, "task_id", taskID)
 	go tp.RunDefaultPumper(ctx, lineID, taskID, pPrinter)
 }
 
-// RunValentinFastPumper — реактивный насос подкачки для Valentin с поддержкой двойного буфера (FCGD=2)
+// RunValentinFastPumper — реактивный насос подкачки для Valentin с поддержкой двойного буфера
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID int, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос (Double Buffer FCGD=2)", "line_id", lineID, "task_id", taskID)
+	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос", "line_id", lineID, "task_id", taskID)
 
-	// Высокая частота опроса физического состояния (30 мс)
 	ticker := time.NewTicker(30 * time.Millisecond)
 	defer ticker.Stop()
 
-	// 1. СТАРТОВЫЙ ВЗВОД: Заряжаем первичные 2 кода (Печать + Теневой RAM Valentin)
+	// 1. СТАРТОВЫЙ ВЗВОД: Заряжаем первичные 2 кода
 	slog.Info("VALENTIN-PUMPER: Первичная заправка двух кодов в RAM принтера", "task_id", taskID)
 
-	// Код №1 — встает под печатную головку и датчик
 	if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
 		slog.Error("VALENTIN-PUMPER: Ошибка первичной зарядки (Код 1)", "task_id", taskID, "err", err)
 		return
 	}
-	time.Sleep(15 * time.Millisecond) // Микро-пауза для разделения пакетов в сокете
+	time.Sleep(15 * time.Millisecond)
 
-	// Код №2 — встает в теневой буфер RAM (FCGD=2)
 	if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
 		slog.Error("VALENTIN-PUMPER: Ошибка первичной зарядки (Код 2)", "task_id", taskID, "err", err)
 		return
@@ -126,36 +123,27 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 			return
 
 		case <-ticker.C:
-			// Проверяем актуальный статус задачи в БД
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
 				return
 			}
 
-			// Получаем значение физического счетчика отфильтрованным парсером
 			countStr, err := vDriver.GetCurrentPrintCount()
 			if err != nil {
 				continue
 			}
 			currentCount, _ := strconv.Atoi(countStr)
 
-			// Фиксируем стартовую засечку одометра
 			if lastPrintedCount == -1 {
 				lastPrintedCount = currentCount
 				continue
 			}
 
-			// 2. РЕАКТИВНЫЙ ДОЗАРЯД: На каждый сход этикетки по датчику досылаем ровно 1 код
 			if currentCount > lastPrintedCount {
 				delta := currentCount - lastPrintedCount
-				slog.Info("VALENTIN-PUMPER: Зафиксирован сход этикетки",
-					"delta", delta,
-					"total_printed", currentCount,
-				)
-
+				slog.Info("VALENTIN-PUMPER: Зафиксирован сход этикетки", "delta", delta, "total_printed", currentCount)
 				lastPrintedCount = currentCount
 
-				// На сколько штук сдвинулся одометр, столько новых кодов досылаем в стек
 				for i := 0; i < delta; i++ {
 					if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
 						slog.Error("VALENTIN-PUMPER: Сбой дозарядки буфера", "err", err)
@@ -168,11 +156,10 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	}
 }
 
-// pushSingleValentinCode выталкивает 1 pending код из БД в сокет Valentin и меняет статус на printed
 func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.NiceLabelDriver) error {
 	codes, err := tp.Store.GetPendingCodes(taskID, 1)
 	if err != nil || len(codes) == 0 {
-		return nil // Очередь кодов задачи пуста
+		return nil
 	}
 
 	codeObj := codes[0]
@@ -181,14 +168,12 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 		cleanCode = cleanCode[:idx]
 	}
 
-	// Выполняем такт через драйвер (FD r0 -> BM[20] -> FD r1 -> FBC)
 	_, err = vDriver.PrintBatchIndexed("20", codeObj.ID, []string{cleanCode})
 	if err != nil {
 		_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "pending", 0)
 		return fmt.Errorf("сбой отправки КМ в Valentin: %w", err)
 	}
 
-	// Отправка прошла успешно — фиксируем статус printed в SQLite
 	if err := tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.ID); err != nil {
 		slog.Error("VALENTIN-PUMPER: Ошибка записи printed в БД", "code_id", codeObj.ID, "err", err)
 	}
@@ -196,12 +181,11 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID int, vDriver *valentine.N
 	return nil
 }
 
-// RunDefaultPumper — стандартный пачечный насос для Videojet / Savema / TSC / Markem
+// RunDefaultPumper — стандартный пачечный насос
 func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID int, p Printer) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("DEFAULT-PUMPER: Запущен умный пачечный цикл", "line_id", lineID, "task_id", taskID)
+	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл", "line_id", lineID, "task_id", taskID)
 
-	// Опрашиваем раз в 2 секунды. Этого достаточно, чтобы конвейер не простаивал.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -211,41 +195,33 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 			slog.Info("DEFAULT-PUMPER: Остановлен по контексту", "task_id", taskID)
 			return
 		case <-ticker.C:
-			// 1. Проверяем статус задачи
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
 				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID)
 				return
 			}
 
-			// Получаем ВСЕ принтеры, привязанные к этой линии
 			printers, err := tp.Store.GetPrintersByLine(lineID)
 			if err != nil || len(printers) == 0 {
 				continue
 			}
 
-			// 2. ИТЕРИРУЕМСЯ ПО ВСЕМ ПРИНТЕРАМ НА ЛИНИИ (убран затыковый printers[0])
 			for _, pCfg := range printers {
 				pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 				if pPrinter == nil {
 					continue
 				}
 
-				// 3. Считаем свободное место в софтверном буфере конкретного принтера
 				freeSpace, err := pPrinter.GetBufferFreeSpace()
 				if err != nil || freeSpace <= 0 {
-					// Места в буфере этого принтера нет, пропускаем и идем к следующему
 					continue
 				}
 
-				// 4. Дробим отправку. Даже если места много, шлем не больше 15 кодов за раз,
-				// чтобы не перегрузить XML-парсер Маркема.
 				batchSize := freeSpace
 				if batchSize > 15 {
 					batchSize = 15
 				}
 
-				// 5. Достаем коды из БД, атомарно назначая их ИМЕННО ЭТОМУ pCfg.ID
 				codes, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, batchSize)
 				if err != nil || len(codes) == 0 {
 					continue
@@ -256,17 +232,12 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 					payload = append(payload, c.Code)
 				}
 
-				// 6. Отправляем сформированную пачку в сокет принтера
 				startIndex := codes[0].PrinterIndex
 				_, err = pPrinter.PrintBatchIndexed("DATAMATRIX", startIndex, payload)
 				if err != nil {
 					slog.Error("DEFAULT-PUMPER: Ошибка отправки пачки в принтер", "printer", pCfg.Name, "err", err)
 				} else {
-					slog.Info("DEFAULT-PUMPER: Пачка отправлена",
-						"printer", pCfg.Name,
-						"count", len(payload),
-						"free_space_left", freeSpace-len(payload),
-					)
+					slog.Info("DEFAULT-PUMPER: Пачка отправлена", "printer", pCfg.Name, "count", len(payload))
 				}
 			}
 		}
@@ -304,7 +275,8 @@ func (pm *PrinterManager) AddPrinter(config models.PrinterConfig, p Printer) {
 	pm.printers[config.ID] = p
 	pm.states[config.ID] = models.PrinterState{Status: "INITIALIZING", Ribbon: "?", Queue: "?"}
 
-	pm.addLogNoLock(strconv.Itoa(config.ID), fmt.Sprintf("Принтер добавлен (%s)", config.IP))
+	pID := config.ID
+	pm.addLogNoLock(nil, &pID, nil, "info", fmt.Sprintf("Принтер %s добавлен (%s)", config.Name, config.IP))
 }
 
 func (pm *PrinterManager) GetPrinter(id int) Printer {
@@ -348,7 +320,7 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 	}()
 }
 
-// BackgroundPoller ведет фоновый опрос железа с изоляцией реактивных принтеров
+// BackgroundPoller опрашивает железки и сохраняет логи как в RAM, так и в БД
 func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
 	for {
@@ -388,9 +360,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 				curCount, _ = p.GetCurrentPrintCount()
 				curTemplate, _ = p.GetCurrentTemplate()
 
-				// ==================== ЖИВАЯ СИНХРОНИЗАЦИЯ ПЕЧАТИ ====================
-				// ИЗОЛЯЦИЯ VALENTIN: Если работает Valentin, его синхронизирует FastPumper.
-				// Поллер сюда не лезет, чтобы не создавать Race Condition в БД и сокете!
+				// Синхронизация печати
 				if cfg.DriverType != "valentine_nice" && lineMap != nil {
 					if lineID, ok := lineMap[id]; ok {
 						activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
@@ -399,7 +369,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 							if errIdx == nil && lastPrintedIdx >= 0 {
 								affected, errMark := store.MarkAsPrinted(activeTaskID, lastPrintedIdx)
 								if errMark == nil && affected > 0 {
-									slog.Info("[POLLER-SYNC] Коды успешно подтверждены печатью",
+									slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
 										"printer", cfg.Name,
 										"task_id", activeTaskID,
 										"last_index", lastPrintedIdx,
@@ -410,14 +380,20 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 						}
 					}
 				}
-				// ====================================================================
 			}
 
 			pm.mu.Lock()
 			oldState := pm.states[id]
+			pID := id
+			var lIDPtr *int
+			if lineMap != nil {
+				if lID, ok := lineMap[id]; ok {
+					lIDPtr = &lID
+				}
+			}
 
 			if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
-				pm.addLogNoLock(strconv.Itoa(id), fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
+				pm.addLogNoLock(store, &pID, lIDPtr, "info", fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
 			}
 
 			newState := models.PrinterState{
@@ -428,10 +404,8 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 			isOfflineNow := err != nil
 			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
 
-			printerIDStr := strconv.Itoa(id)
-
 			if isOfflineNow && !wasOffline {
-				pm.addLogNoLock(printerIDStr, fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))
+				pm.addLogNoLock(store, &pID, lIDPtr, "error", fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))
 				newState.Status = fmt.Sprintf("ОФФЛАЙН: %v", err)
 				newState.Ribbon = "N/A"
 				newState.Queue = "N/A"
@@ -439,7 +413,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 				newState.CurCount = "N/A"
 				newState.CurTemplate = "N/A"
 			} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
-				pm.addLogNoLock(printerIDStr, "Связь восстановлена. Статус: "+status)
+				pm.addLogNoLock(store, &pID, lIDPtr, "success", "Связь восстановлена. Статус: "+status)
 				newState.Status = status
 				newState.Ribbon = ribbon
 				newState.Queue = queue
@@ -464,22 +438,33 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	}
 }
 
-func (pm *PrinterManager) addLogNoLock(printer, event string) {
+// addLogNoLock универсальный метод для записи логов в RAM и в БД SQLite
+func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lineID *int, eventType string, event string) {
+	printerName := "Система"
+	if printerID != nil {
+		if cfg, ok := pm.configs[*printerID]; ok {
+			printerName = cfg.Name
+		} else {
+			printerName = fmt.Sprintf("Принтер #%d", *printerID)
+		}
+	}
+
 	entry := models.LogEntry{
 		Time:    time.Now().Format("15:04:05"),
-		Printer: printer,
+		Printer: printerName,
 		Event:   event,
 	}
 	pm.logs = append([]models.LogEntry{entry}, pm.logs...)
 	if len(pm.logs) > 50 {
 		pm.logs = pm.logs[:50]
 	}
-}
 
-func (pm *PrinterManager) addLog(printer, event string) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	pm.addLogNoLock(printer, event)
+	// Если передан Store, пишем также в базу данных SQLite
+	if store != nil {
+		go func() {
+			_ = store.SaveEventLog(lineID, printerID, eventType, event)
+		}()
+	}
 }
 
 func (pm *PrinterManager) GetPrinterState(id int) models.PrinterState {
