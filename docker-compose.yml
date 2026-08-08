@@ -10,6 +10,8 @@ services:
       - TZ=Europe/Moscow
     volumes:
       - ./data:/app/data
+      # МОНТИРУЕМ ПАПКУ ИНТЕРФЕЙСА:
+      - ./ui2:/app/ui2
     logging:
       driver: "json-file"
       options:
