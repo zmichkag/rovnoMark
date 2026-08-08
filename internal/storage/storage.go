@@ -59,6 +59,160 @@ func (s *Store) GetActiveTaskByLine(lineID int) (int, error) {
 	return taskID, err
 }
 
+// GetAllLines возвращает только активные и не удаленные линии, отсортированные по имени
+func (s *Store) GetAllLines() ([]models.LineConfig, error) {
+	// Добавлен фильтр is_active = 1 и сортировка ORDER BY name ASC
+	query := `
+		SELECT id, name, description, is_active 
+		FROM lines 
+		WHERE is_deleted = 0 AND is_active = 1 
+		ORDER BY name ASC`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.LineConfig
+	for rows.Next() {
+		var l models.LineConfig
+		if err := rows.Scan(&l.ID, &l.Name, &l.Description, &l.IsActive); err != nil {
+			continue
+		}
+		list = append(list, l)
+	}
+	return list, nil
+}
+
+// GetAllActivePrinters (для инициализации менеджера при запуске)
+func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
+	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.PrinterConfig
+	for rows.Next() {
+		var p models.PrinterConfig
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
+			continue
+		}
+		list = append(list, p)
+	}
+	return list, nil
+}
+
+// GetLiveDashboardData собирает актуальное состояние завода для планшетов
+func (s *Store) GetLiveDashboardData() (map[string]interface{}, error) {
+	// 1. Извлекаем только активные и не удаленные линии (благодаря обновленному GetAllLines)
+	lines, err := s.GetAllLines()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения линий: %w", err)
+	}
+
+	// 2. Получаем карту привязок принтеров
+	assignments, err := s.GetAssignments()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения привязок: %w", err)
+	}
+
+	linePrintersMap := make(map[int][]int)
+	for _, a := range assignments {
+		lID := a["line_id"].(int)
+		pID := a["printer_id"].(int)
+		linePrintersMap[lID] = append(linePrintersMap[lID], pID)
+	}
+
+	// 3. Получаем все активные задачи
+	activeTasks, _ := s.GetActiveTasks(0, 0)
+	taskByLineMap := make(map[int]map[string]interface{})
+	for _, t := range activeTasks {
+		lID := t["line_id"].(int)
+		taskByLineMap[lID] = t
+	}
+
+	// 4. Формируем список линий
+	var linesData []map[string]interface{}
+	totalActiveTasks := 0
+
+	for _, l := range lines {
+		lineObj := map[string]interface{}{
+			"line_id":     l.ID,
+			"line_name":   l.Name,
+			"description": l.Description,
+			"is_active":   l.IsActive,
+			"printers":    linePrintersMap[l.ID],
+		}
+
+		if task, exists := taskByLineMap[l.ID]; exists {
+			lineObj["current_task"] = task
+			lineObj["status"] = task["status"] // 'active' или 'ready'
+			totalActiveTasks++
+		} else {
+			lineObj["current_task"] = nil
+			lineObj["status"] = "IDLE" // Простой
+		}
+
+		linesData = append(linesData, lineObj)
+	}
+
+	summary := map[string]interface{}{
+		"total_lines":  len(lines),
+		"active_tasks": totalActiveTasks,
+		"idle_lines":   len(lines) - totalActiveTasks,
+	}
+
+	return map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"summary":   summary,
+		"lines":     linesData,
+	}, nil
+}
+
+func (s *Store) GetPrinterLineMap() (map[int]int, error) {
+	rows, err := s.db.Query("SELECT printer_id, line_id FROM line_printers")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := make(map[int]int)
+	for rows.Next() {
+		var pid, lid int
+		rows.Scan(&pid, &lid)
+		m[pid] = lid
+	}
+	return m, nil
+}
+
+// GetPendingCodes извлекает заданное количество неотпечатанных кодов для конкретной задачи
+func (s *Store) GetPendingCodes(taskID int, limit int) ([]models.TaskCode, error) {
+	query := `
+		SELECT id, task_id, code, status, COALESCE(printer_id, 0), COALESCE(printer_index, 0) 
+		FROM task_codes 
+		WHERE task_id = ? AND status = 'pending' 
+		ORDER BY id ASC 
+		LIMIT ?`
+
+	rows, err := s.db.Query(query, taskID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выборки pending кодов из БД: %w", err)
+	}
+	defer rows.Close()
+
+	var codes []models.TaskCode
+	for rows.Next() {
+		var c models.TaskCode
+		if err := rows.Scan(&c.ID, &c.TaskID, &c.Code, &c.Status, &c.PrinterID, &c.PrinterIndex); err != nil {
+			return nil, fmt.Errorf("ошибка сканирования строки task_codes: %w", err)
+		}
+		codes = append(codes, c)
+	}
+	return codes, nil
+}
+
 func (s *Store) GetTaskStaticFieldsJSON(taskID int) (string, error) {
 	var staticJSON string
 	err := s.db.QueryRow("SELECT static_fields_json FROM tasks WHERE id = ?", taskID).Scan(&staticJSON)
@@ -358,41 +512,6 @@ func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
 	return res.RowsAffected()
 }
 
-// GetAllActivePrinters (для инициализации менеджера при запуске)
-func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []models.PrinterConfig
-	for rows.Next() {
-		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
-			continue
-		}
-		list = append(list, p)
-	}
-	return list, nil
-}
-
-func (s *Store) GetPrinterLineMap() (map[int]int, error) {
-	rows, err := s.db.Query("SELECT printer_id, line_id FROM line_printers")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	m := make(map[int]int)
-	for rows.Next() {
-		var pid, lid int
-		rows.Scan(&pid, &lid)
-		m[pid] = lid
-	}
-	return m, nil
-}
-
 func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
 	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
 	var id interface{} = p.ID
@@ -422,96 +541,11 @@ func (s *Store) SaveLine(l models.LineConfig) error {
 	return err
 }
 
-// Получить все активные линии
-func (s *Store) GetAllLines() ([]models.LineConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, description, is_active FROM lines WHERE is_deleted = 0")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var list []models.LineConfig
-	for rows.Next() {
-		var l models.LineConfig
-		rows.Scan(&l.ID, &l.Name, &l.Description, &l.IsActive)
-		list = append(list, l)
-	}
-	return list, nil
-}
-
 // AssignPrinterToLine Привязать принтер к линии
 func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
 		lineID, printerID, role)
 	return err
-}
-
-// GetLiveDashboardData собирает единую структуру состояния завода для операторских планшетов
-func (s *Store) GetLiveDashboardData() (map[string]interface{}, error) {
-	// 1. Получаем все не удаленные линии
-	lines, err := s.GetAllLines()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка получения линий: %w", err)
-	}
-
-	// 2. Получаем карту привязок принтеров
-	assignments, err := s.GetAssignments()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка получения привязок: %w", err)
-	}
-
-	// Строим быстрый индекс: line_id -> []printer_id
-	linePrintersMap := make(map[int][]int)
-	for _, a := range assignments {
-		lID := a["line_id"].(int)
-		pID := a["printer_id"].(int)
-		linePrintersMap[lID] = append(linePrintersMap[lID], pID)
-	}
-
-	// 3. Получаем все активные задачи
-	activeTasks, _ := s.GetActiveTasks(0, 0)
-	taskByLineMap := make(map[int]map[string]interface{})
-	for _, t := range activeTasks {
-		lID := t["line_id"].(int)
-		taskByLineMap[lID] = t
-	}
-
-	// 4. Формируем итоговый список линий для дашборда
-	var linesData []map[string]interface{}
-	totalActiveTasks := 0
-
-	for _, l := range lines {
-		lineObj := map[string]interface{}{
-			"line_id":     l.ID,
-			"line_name":   l.Name,
-			"description": l.Description,
-			"is_active":   l.IsActive,
-			"printers":    linePrintersMap[l.ID], // Массив ID принтеров для сопоставления с менеджером
-		}
-
-		if task, exists := taskByLineMap[l.ID]; exists {
-			lineObj["current_task"] = task
-			lineObj["status"] = task["status"] // 'active' или 'ready'
-			totalActiveTasks++
-		} else {
-			lineObj["current_task"] = nil
-			lineObj["status"] = "IDLE" // Линия простаивает
-		}
-
-		linesData = append(linesData, lineObj)
-	}
-
-	summary := map[string]interface{}{
-		"total_lines":  len(lines),
-		"active_tasks": totalActiveTasks,
-		"idle_lines":   len(lines) - totalActiveTasks,
-	}
-
-	return map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"summary":   summary,
-		"lines":     linesData,
-	}, nil
 }
 
 // New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
@@ -576,32 +610,6 @@ func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status
 func (s *Store) SetTaskStatus(taskID int, status string) error {
 	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err
-}
-
-// GetPendingCodes извлекает заданное количество неотпечатанных кодов для конкретной задачи
-func (s *Store) GetPendingCodes(taskID int, limit int) ([]models.TaskCode, error) {
-	query := `
-		SELECT id, task_id, code, status, COALESCE(printer_id, 0), COALESCE(printer_index, 0) 
-		FROM task_codes 
-		WHERE task_id = ? AND status = 'pending' 
-		ORDER BY id ASC 
-		LIMIT ?`
-
-	rows, err := s.db.Query(query, taskID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка выборки pending кодов из БД: %w", err)
-	}
-	defer rows.Close()
-
-	var codes []models.TaskCode
-	for rows.Next() {
-		var c models.TaskCode
-		if err := rows.Scan(&c.ID, &c.TaskID, &c.Code, &c.Status, &c.PrinterID, &c.PrinterIndex); err != nil {
-			return nil, fmt.Errorf("ошибка сканирования строки task_codes: %w", err)
-		}
-		codes = append(codes, c)
-	}
-	return codes, nil
 }
 
 // UpdateCodeStatusByID атомарно обновляет статус и индекс конкретного кода по его уникальному ID (для Valentin)
