@@ -234,6 +234,66 @@ func main() {
 		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
 	})
 
+	// 4. Единый реактивный эндпоинт для планшетов мастеров и операторов
+	http.HandleFunc("/api/dashboard/live", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только GET")
+			return
+		}
+
+		// Вытягиваем с агрегированные данные из SQLite
+		liveData, err := store.GetLiveDashboardData()
+		if err != nil {
+			slog.Error("DASHBOARD-LIVE: Ошибка сборки данных", "err", err)
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
+			return
+		}
+
+		// Достаем актуальную телеметрию сокетов из менеджера памяти
+		states, logs := manager.GetDashboardData()
+		allPrintersConfig, _ := store.GetAllPrinters()
+
+		printerCatalog := make(map[int]map[string]interface{})
+		offlineCount := 0
+
+		for _, cfg := range allPrintersConfig {
+			st := states[cfg.ID]
+			isOffline := strings.Contains(st.Status, "ОФФЛАЙН") || st.Status == "INITIALIZING"
+			if isOffline {
+				offlineCount++
+			}
+
+			printerCatalog[cfg.ID] = map[string]interface{}{
+				"id":           cfg.ID,
+				"name":         cfg.Name,
+				"ip":           cfg.IP,
+				"port":         cfg.Port,
+				"driver_type":  cfg.DriverType,
+				"is_active":    cfg.IsActive,
+				"status":       st.Status,
+				"ribbon":       st.Ribbon,
+				"queue_free":   st.Queue,
+				"cur_count":    st.CurCount,
+				"cur_template": st.CurTemplate,
+			}
+		}
+
+		// Дополняем сводку кол-вом оффлайн устройств
+		summary := liveData["summary"].(map[string]interface{})
+		summary["printers_offline"] = offlineCount
+		summary["total_printers"] = len(allPrintersConfig)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"timestamp": liveData["timestamp"],
+			"summary":   summary,
+			"lines":     liveData["lines"],
+			"printers":  printerCatalog, // Полный словарь принтеров по ID
+			"logs":      logs,           // Лента живых событий
+		})
+	})
+
 	// Статистика, если что
 	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		printerIDStr := r.URL.Query().Get("printer_id")

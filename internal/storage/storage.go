@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"rovnoMark/internal/models"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -443,6 +444,74 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
 		lineID, printerID, role)
 	return err
+}
+
+// GetLiveDashboardData собирает единую структуру состояния завода для операторских планшетов
+func (s *Store) GetLiveDashboardData() (map[string]interface{}, error) {
+	// 1. Получаем все не удаленные линии
+	lines, err := s.GetAllLines()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения линий: %w", err)
+	}
+
+	// 2. Получаем карту привязок принтеров
+	assignments, err := s.GetAssignments()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения привязок: %w", err)
+	}
+
+	// Строим быстрый индекс: line_id -> []printer_id
+	linePrintersMap := make(map[int][]int)
+	for _, a := range assignments {
+		lID := a["line_id"].(int)
+		pID := a["printer_id"].(int)
+		linePrintersMap[lID] = append(linePrintersMap[lID], pID)
+	}
+
+	// 3. Получаем все активные задачи
+	activeTasks, _ := s.GetActiveTasks(0, 0)
+	taskByLineMap := make(map[int]map[string]interface{})
+	for _, t := range activeTasks {
+		lID := t["line_id"].(int)
+		taskByLineMap[lID] = t
+	}
+
+	// 4. Формируем итоговый список линий для дашборда
+	var linesData []map[string]interface{}
+	totalActiveTasks := 0
+
+	for _, l := range lines {
+		lineObj := map[string]interface{}{
+			"line_id":     l.ID,
+			"line_name":   l.Name,
+			"description": l.Description,
+			"is_active":   l.IsActive,
+			"printers":    linePrintersMap[l.ID], // Массив ID принтеров для сопоставления с менеджером
+		}
+
+		if task, exists := taskByLineMap[l.ID]; exists {
+			lineObj["current_task"] = task
+			lineObj["status"] = task["status"] // 'active' или 'ready'
+			totalActiveTasks++
+		} else {
+			lineObj["current_task"] = nil
+			lineObj["status"] = "IDLE" // Линия простаивает
+		}
+
+		linesData = append(linesData, lineObj)
+	}
+
+	summary := map[string]interface{}{
+		"total_lines":  len(lines),
+		"active_tasks": totalActiveTasks,
+		"idle_lines":   len(lines) - totalActiveTasks,
+	}
+
+	return map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"summary":   summary,
+		"lines":     linesData,
+	}, nil
 }
 
 // New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
