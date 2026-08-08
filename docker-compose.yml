@@ -15,5 +15,6 @@ services:
     logging:
       driver: "json-file"
       options:
-        tag: "{{.Name}}" # Это поможет Promtail найти логи приложения
-
+        tag: "{{.Name}}"
+        max-size: "50m"
+        max-file: "3"
