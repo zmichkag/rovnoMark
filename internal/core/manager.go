@@ -250,7 +250,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				var compositeFields string
 
 				if pCfg.DriverType == "videojet" {
-					// Специфика Videojet: требует склейки статики и динамики через "|"
+					// Достаем имена и значения статических полей задачи
 					dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
 					staticJSONStr, _ := tp.Store.GetTaskStaticFieldsJSON(taskID)
 					var staticFields map[string]string
@@ -260,8 +260,8 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 
 					for _, item := range pending {
 						fields, payload := PrepareDynamicPipeline(dynamicField, staticFields, item.Code)
-						compositeFields = fields                               // Сохраняем строку полей (dm_data;date01;date02)
-						compositePayloads = append(compositePayloads, payload) // Склеенный пейлоад
+						compositeFields = fields
+						compositePayloads = append(compositePayloads, payload)
 					}
 				} else {
 					// Принтеры которы нужно только ЧЗ
