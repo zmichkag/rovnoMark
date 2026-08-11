@@ -47,7 +47,7 @@ Bash
 # Клонировать репозиторий
 git clone [https://github.com/your-username/openmark.git](https://github.com/your-username/openmark.git)
 cd openmark
-'''
+```
 # Запустить сервис и обвязку логирования
 docker-compose up -d --build
 После запуска Web Dashboard доступен по адресу: http://localhost:8080
