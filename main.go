@@ -27,10 +27,15 @@ import (
 //go:embed ui/*
 var uiFS embed.FS
 
-// 1. Добавляем embed для нового интерфейса dev-ветки
+// ui2FS holds embedded UI files from the 'ui2' directory.
 //
 //go:embed ui2/*
 var ui2FS embed.FS
+
+// uiOkkFS embeds the static assets for the OKK user interface.
+//
+//go:embed ui_okk/*
+var uiOkkFS embed.FS
 
 // sendJSONError отправляет стандартизированный JSON-ответ с ошибкой
 func sendJSONError(w http.ResponseWriter, code int, msg string) {
@@ -902,17 +907,51 @@ func main() {
 		json.NewEncoder(w).Encode(tasks)
 	})
 
-	// 5. Раздача UI (Frontend)
+	// 2. API поиска информации о сканированном коде DataMatrix для ОКК
+	http.HandleFunc("/api/code/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только GET")
+			return
+		}
+
+		codeQuery := r.URL.Query().Get("dm")
+		if codeQuery == "" {
+			sendJSONError(w, http.StatusBadRequest, "Параметр dm не передан")
+			return
+		}
+
+		// Ищем информацию о коде в базе данных SQLite
+		info, err := store.GetCodePassport(codeQuery)
+		if err != nil {
+			slog.Warn("ОКК: Код не найден в БД", "code", codeQuery, "err", err)
+			sendJSONError(w, http.StatusNotFound, "Код не найден в базе данных")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(info)
+	})
+
+	// Раздача Frontend
 	content, _ := fs.Sub(uiFS, "ui")
 	http.Handle("/", http.FileServer(http.FS(content)))
 
-	// 3. Монтируем новый UI на отдельный эндпоинт /frontend2
+	// новый UI на отдельный эндпоинт /frontend2
 	content2, err := fs.Sub(ui2FS, "ui2")
 	if err != nil {
 		slog.Error("Ошибка монтирования ui2", "err", err)
 	} else {
 		http.Handle("/frontend2/", http.StripPrefix("/frontend2/", http.FileServer(http.FS(content2))))
 		slog.Info("Развернут Dev Frontend v1.5", "url", "http://localhost:8080/frontend2/")
+	}
+
+	contentOKK, err := fs.Sub(uiOkkFS, "ui_okk")
+	if err != nil {
+		slog.Error("Ошибка монтирования ui_okk", "err", err)
+	} else {
+		http.Handle("/okk/", http.StripPrefix("/okk/", http.FileServer(http.FS(contentOKK))))
+		slog.Info("Развернут Терминал ОКК v1.0", "url", "http://localhost:8080/okk/")
 	}
 
 	addr := fmt.Sprintf(":%d", *port)

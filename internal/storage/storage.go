@@ -6,6 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"rovnoMark/internal/models"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -652,6 +653,52 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`,
 		lineID, printerID, role)
 	return err
+}
+
+// GetCodePassport возвращает паспорт отпечатанного или загруженного кода для терминала ОКК
+func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
+	// Нормализуем спецсимволы
+	cleanCode := strings.ReplaceAll(code, "\x1d", "<GS>")
+
+	query := `
+		SELECT 
+			tc.task_id, 
+			tc.status, 
+			COALESCE(tc.printed_at, 'Не отпечатан') as printed_at,
+			t.template_name, 
+			COALESCE(l.name, '—') as line_name
+		FROM task_codes tc
+		JOIN tasks t ON tc.task_id = t.id
+		LEFT JOIN lines l ON t.line_id = l.id
+		WHERE tc.code = ? OR tc.code LIKE ?
+		ORDER BY tc.id DESC LIMIT 1`
+
+	var taskID int
+	var status, printedAt, templateName, lineName string
+
+	err := s.db.QueryRow(query, cleanCode, "%"+cleanCode+"%").Scan(&taskID, &status, &printedAt, &templateName, &lineName)
+	if err != nil {
+		return nil, err
+	}
+
+	statusRu := "Загружен в очередь"
+	isValid := false
+	if status == "printed" {
+		statusRu = "Нанесен на упаковку"
+		isValid = true
+	} else if status == "in_buffer" {
+		statusRu = "В буфере печати"
+		isValid = true
+	}
+
+	return map[string]interface{}{
+		"batch":     fmt.Sprintf("%d", taskID),
+		"product":   templateName,
+		"line":      lineName,
+		"printTime": printedAt,
+		"status":    statusRu,
+		"valid":     isValid,
+	}, nil
 }
 
 // New запускаемся, чекаем базу на предмет актуальности версии и наличия нужных таблиц.
