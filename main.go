@@ -601,25 +601,37 @@ func main() {
 			}
 
 			// Конфигурация печати в зависимости от режима (ЧЗ / Статика)
+			// main.go (эндпоинт /api/task/create)
+
 			if req.DynamicFieldName == "" {
+				// Режим одиночной статической печати
 				p.ClearQueue()
 				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона (SLA) на %s: %v", pCfg.Name, err))
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона на %s: %v", pCfg.Name, err))
 					return
 				}
 			} else {
-				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
+				// Режим сериализации (Честный ЗНАК)
+				//Для Videojet статику НЕ передаем в SelectTemplate, так как она уходит внутри SHO/SID
+				var selectFields map[string]string
+				if pCfg.DriverType != "videojet" {
+					selectFields = req.StaticFields
+				}
+
+				if err := p.SelectTemplate(req.TemplateName, selectFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
 
+				// Готовим составную строку полей "dm_data0;date01;date02;text01"
 				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
+
+				// InitSession отправит: SCB -> SMR -> SHO|dm_data0|date01|date02|text01|
 				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
 					return
 				}
 			}
-			manager.UpdatePrinterDeltaState(pCfg.ID, req.TemplateName, fmt.Sprintf("%v", req.StaticFields))
 		}
 
 		// 7. Фиксация задачи в БД

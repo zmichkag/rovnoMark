@@ -288,7 +288,7 @@ func (d *Driver) SelectTemplate(name string, fields map[string]string) error {
 	sb.WriteString(name)
 	sb.WriteString("|")
 
-	// Если поля переданы, добавляем их прямо в команду SLA
+	// Если поля переданы, добавляем их прямо в команду SEL
 	for k, v := range fields {
 		cleanValue := strings.ReplaceAll(v, "|", "")
 		sb.WriteString(fmt.Sprintf("%s=%s|", k, cleanValue))
