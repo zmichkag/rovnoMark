@@ -427,8 +427,8 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 		//cleanPayload = strings.ReplaceAll(cleanPayload, "|", "")
 
 		// 3. СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
-		if !strings.HasPrefix(cleanPayload, "~") {
-			cleanPayload = "~" + cleanPayload
+		if !strings.HasPrefix(cleanPayload, "~1") {
+			cleanPayload = "~1" + cleanPayload
 		}
 
 		// 4. Формируем команду и отправляем в сокет
