@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"rovnoMark/internal/core"
+	"rovnoMark/internal/core/marking"
 	"rovnoMark/internal/drivers/markem"
 
 	"rovnoMark/internal/models"
@@ -658,7 +659,6 @@ func main() {
 			return
 		}
 
-		// 1. Читаем task_id из Query-параметров URL, как просит Ваге
 		taskIDStr := r.URL.Query().Get("task_id")
 		taskID, err := strconv.Atoi(taskIDStr)
 		if err != nil || taskID <= 0 {
@@ -676,20 +676,36 @@ func main() {
 			return
 		}
 
-		// Валидация: если 1С прислала пустой массив кодов
 		if len(req.Codes) == 0 {
 			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
 			return
 		}
 
-		// Нормализуем коды перед записью в БД:
-		for i, code := range req.Codes {
-			req.Codes[i] = strings.ReplaceAll(code, "\x1d", "<GS>")
+		// --- ВАЛИДАЦИЯ И НОРМАЛИЗАЦИЯ КОДОВ МАРКИРОВКИ ---
+		for i, rawCode := range req.Codes {
+			parsedMark, err := marking.ParseAndValidateShortGS1(rawCode)
+			if err != nil {
+				slog.Warn("Append: забракован невалидный код от 1С",
+					"task_id", taskID,
+					"index", i,
+					"raw_code", rawCode,
+					"err", err,
+				)
+				// Остановка процесса и мгновенный отказ
+				sendJSONError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
+					"Ошибка валидации кода маркировки на индексе %d: %v (значение: %s)",
+					i, err, rawCode,
+				))
+				return
+			}
+
+			// Заменяем исходный код на нормализованный каноничный формат с тегом <GS>
+			req.Codes[i] = parsedMark.ToDBFormat()
 		}
 
-		slog.Info("[APPEND-DIAG] Коды подготовлены к записи в БД", "task_id", taskID, "count", len(req.Codes))
+		slog.Info("[APPEND-DIAG] Все коды прошeли валидацию GS1 и подготовлены к записи", "task_id", taskID, "count", len(req.Codes))
 
-		// 3. Складываем коды в базу. Используем проверенную локальную переменную taskID
+		// Сохранение проверенных кодов в БД SQLite
 		err = store.AppendTaskCodes(taskID, req.Codes)
 		if err != nil {
 			slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
@@ -697,21 +713,15 @@ func main() {
 			return
 		}
 
-		// 4. ПЫТАЕМСЯ АКТИВИРОВАТЬ ЗАДАЧУ И ЗАПУСТИТЬ НАСОС
-		// TryActivateTask переведет задачу из 'ready' в 'active' при первой пачке
+		// Активация задачи и запуск насоса
 		activated, _ := store.TryActivateTask(taskID)
 		if activated {
-			// Нам нужен ID линии, чтобы передать его горутине-насосу
 			lineID, err := store.GetLineIDByTask(taskID)
 			if err == nil {
 				taskProcessor.StartPumping(lineID, taskID)
-				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос (Pumper) успешно запущен", "task_id", taskID, "line_id", lineID)
-			} else {
-				slog.Error("Append: Задача активирована, но line_id не найден в БД", "task_id", taskID, "err", err)
+				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос (Pumper) запущен", "task_id", taskID, "line_id", lineID)
 			}
 		}
-
-		slog.Debug("Коды успешно добавлены в задачу", "task_id", taskID, "count", len(req.Codes))
 
 		rndText, _ := store.GetRndTextByTask(taskID)
 
