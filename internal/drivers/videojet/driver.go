@@ -421,12 +421,18 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 	successCount := 0
 	for i, payload := range codes {
 		// Подготовка GS1-разделителя (замена <GS> или \x1d на ASCII 29)
-		cleanPayload := strings.ReplaceAll(payload, "<GS>", "\u001D")
-		cleanPayload = strings.ReplaceAll(cleanPayload, "\x1d", "\u001D")
+		cleanPayload := strings.ReplaceAll(payload, "<GS>", "\x1d")
 
+		// 2. Вырезаем символ '|', чтобы защитить протокол CLARiTY от поломки
+		cleanPayload = strings.ReplaceAll(cleanPayload, "|", "")
+
+		// 3. ПРИНУДИТЕЛЬНО ДОБАВЛЯЕМ СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
+		if !strings.HasPrefix(cleanPayload, "\xe8") {
+			cleanPayload = "\xe8" + cleanPayload
+		}
+
+		// 4. Формируем команду и отправляем в сокет
 		currIdx := startIndex + i
-
-		// Формируем финальную строку: SID|Индекс|Значение1|Значение2|...|
 		cmdSID := fmt.Sprintf("SID|%d|%s|", currIdx, cleanPayload)
 
 		resp, err := d.sendRaw(cmdSID)
