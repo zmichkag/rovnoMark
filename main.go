@@ -830,8 +830,6 @@ func main() {
 			// В) Очищаем физическую очередь принтера
 			p.ClearQueue()
 
-			// TODO передать rnd_text
-
 			report[pCfg.Name] = map[string]interface{}{
 				"status":             "cleared",
 				"last_printed_index": lastIdx,
