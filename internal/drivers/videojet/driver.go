@@ -424,6 +424,11 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 		cleanPayload := strings.ReplaceAll(payload, "<GS>", "\u001D")
 		cleanPayload = strings.ReplaceAll(cleanPayload, "\x1d", "\u001D")
 
+		// СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
+		if !strings.HasPrefix(cleanPayload, "~1") {
+			cleanPayload = "~1" + cleanPayload
+		}
+
 		currIdx := startIndex + i
 
 		// Формируем финальную строку: SID|Индекс|Значение1|Значение2|...|
