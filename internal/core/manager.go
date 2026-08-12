@@ -98,7 +98,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос", "line_id", lineID, "task_id", taskID)
 
-	ticker := time.NewTicker(30 * time.Millisecond)
+	ticker := time.NewTicker(15 * time.Millisecond)
 	defer ticker.Stop()
 
 	// 1. СТАРТОВЫЙ ВЗВОД: Заряжаем первичные 2 кода
@@ -108,12 +108,12 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 		slog.Error("VALENTIN-PUMPER: Ошибка первичной зарядки (Код 1)", "task_id", taskID, "err", err)
 		return
 	}
-	time.Sleep(15 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 
-	if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
-		slog.Error("VALENTIN-PUMPER: Ошибка первичной зарядки (Код 2)", "task_id", taskID, "err", err)
-		return
-	}
+	//if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
+	//	slog.Error("VALENTIN-PUMPER: Ошибка первичной зарядки (Код 2)", "task_id", taskID, "err", err)
+	//	return
+	//}
 
 	lastPrintedCount := -1
 
@@ -150,7 +150,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 						slog.Error("VALENTIN-PUMPER: Сбой дозарядки буфера", "err", err)
 						break
 					}
-					time.Sleep(10 * time.Millisecond)
+					time.Sleep(5 * time.Millisecond)
 				}
 			}
 		}
