@@ -246,6 +246,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		cleanCode = strings.ReplaceAll(cleanCode, "&lt;GS&gt;", "&#x1D;")
 		cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "&#x1D;")
 		cleanCode = strings.ReplaceAll(cleanCode, "\x1d", "&#x1D;")
+		cleanCode = "~1" + cleanCode
 
 		sb.WriteString(fmt.Sprintf(`<PackData><FieldData><FieldName>%s</FieldName><FieldValue>%s</FieldValue></FieldData></PackData>`,
 			targetField, cleanCode))
