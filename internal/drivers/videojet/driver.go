@@ -423,10 +423,7 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 		// Подготовка GS1-разделителя (замена <GS> или \x1d на ASCII 29)
 		cleanPayload := strings.ReplaceAll(payload, "<GS>", "\x1d")
 
-		//// 2. Вырезаем символ '|', чтобы защитить протокол CLARiTY от поломки
-		//cleanPayload = strings.ReplaceAll(cleanPayload, "|", "")
-
-		// 3. СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
+		// СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
 		if !strings.HasPrefix(cleanPayload, "~1") {
 			cleanPayload = "~1" + cleanPayload
 		}
