@@ -426,9 +426,9 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 		//// 2. Вырезаем символ '|', чтобы защитить протокол CLARiTY от поломки
 		//cleanPayload = strings.ReplaceAll(cleanPayload, "|", "")
 
-		// 3. ПРИНУДИТЕЛЬНО ДОБАВЛЯЕМ СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
-		if !strings.HasPrefix(cleanPayload, "\xe8") {
-			cleanPayload = "\xe8" + cleanPayload
+		// 3. СТАРТОВЫЙ FNC1 (ASCII 232) В НАЧАЛО
+		if !strings.HasPrefix(cleanPayload, "~") {
+			cleanPayload = "~" + cleanPayload
 		}
 
 		// 4. Формируем команду и отправляем в сокет
