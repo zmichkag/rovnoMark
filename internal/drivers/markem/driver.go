@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	MaxQueueLimit  = 100 // Аппаратный лимит буфера кодов SmartDate X60
-	SafeQueueLimit = 30  // Безопасный лимит для программного контроля буфера
+	MaxQueueLimit  = 150 // Аппаратный лимит буфера кодов SmartDate X60
+	SafeQueueLimit = 50  // Безопасный лимит для программного контроля буфера
 )
 
 type Driver struct {
