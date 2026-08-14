@@ -154,7 +154,7 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 }
 
 func (d *Driver) ClearQueue() error {
-	_, err := d.sendRaw("CQI") // Очищает все элементы очереди [cite: 610]
+	_, err := d.sendRaw("SCB") // Очищает все элементы очереди
 	return err
 }
 

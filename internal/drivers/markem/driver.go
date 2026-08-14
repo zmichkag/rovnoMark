@@ -45,7 +45,7 @@ func New(ip string, port int, actorName string) *Driver {
 		Port:       port,
 		ActorName:  actorName,
 		SenderName: "RovnoMarkGo",
-		Timeout:    5 * time.Second,
+		Timeout:    10 * time.Second,
 		actCounter: 50000,
 	}
 }
