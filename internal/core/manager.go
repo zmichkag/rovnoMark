@@ -187,7 +187,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл", "line_id", lineID, "task_id", taskID)
 
-	ticker := time.NewTicker(2000 * time.Millisecond) // Уменьшили с 5с до 200мс для скорости
+	ticker := time.NewTicker(1000 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -196,14 +196,13 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 			slog.Info("DEFAULT-PUMPER: Остановлен по контексту", "task_id", taskID)
 			return
 		case <-ticker.C:
-			// 1. Читаем статус задачи из БД
+			// 1. Проверяем статус задачи в БД
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
 				return
 			}
 
-			// ⛔️ ШЛЮЗ БЛОКИРОВКИ 1С:
-			// Если статус задачи 'ready' (инициализация в процессе), а НЕ 'active' — ждем!
+			// ⛔️ ШЛЮЗ БЛОКИРОВКИ: Ждем завершения инициализации 1С
 			if status == "ready" {
 				slog.Debug("PUMPER: Ожидание завершения стартовой сессии принтера...", "task_id", taskID)
 				continue
@@ -214,21 +213,18 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				continue
 			}
 
+			// 💡 Проходим по ВСЕМ принтерам линии независимо!
 			for _, pCfg := range printers {
-
 				pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 				if pPrinter == nil {
-					slog.Warn("Pumper: Принтер привязан к линии, но отсутствует в менеджере (оффлайн)", "printer", pCfg.Name)
 					continue
 				}
 
-				// 1. Устанавливаем желаемую планку буфера
 				maxBuffer := 100
 
-				// 2. Узнаем, сколько свободных слотов осталось до лимита
+				// 2. Проверяем емкость буфера конкретного принтера
 				freeSpace, err := pPrinter.GetBufferFreeSpace()
 				if err != nil {
-					slog.Warn("Pumper: Не удалось получить свободное место в буфере принтера", "printer", pCfg.Name, "err", err)
 					continue
 				}
 
@@ -238,28 +234,22 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				}
 
 				if targetLoad <= 0 {
-					slog.Debug("PUMPER: Буфер принтера заполнен (freeSpace=0), даем время на печать...", "printer", pCfg.Name)
-					time.Sleep(1 * time.Second)
-					continue // Буфер полон, переходим к следующему такту
-				}
-
-				// 3. Забираем коды из БД в переменную pending!
-				pending, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
-				if err != nil {
-					slog.Error("Pumper: Ошибка БД при выборке кодов", "task_id", taskID, "err", err)
+					time.Sleep(500 * time.Millisecond)
 					continue
 				}
 
-				if len(pending) == 0 {
-					continue // Ждем загрузки новых кодов из 1С
+				// 3. Достаем свободные коды из SQLite для ЭТОГО конкретного принтера
+				pending, err := tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
+				if err != nil || len(pending) == 0 {
+					// Если кодов пока нет — просто переходим к следующему принтеру на линии, НЕ ломая цикл!
+					continue
 				}
 
-				// 4. Подготовка данных с учетом специфики драйвера
+				// 4. Формируем данные
 				var compositePayloads []string
 				var compositeFields string
 
 				if pCfg.DriverType == "videojet" {
-					// Достаем имена и значения статических полей задачи
 					dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
 					staticJSONStr, _ := tp.Store.GetTaskStaticFieldsJSON(taskID)
 					var staticFields map[string]string
@@ -273,10 +263,9 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 						compositePayloads = append(compositePayloads, payload)
 					}
 				} else {
-					// Принтеры которы нужно только ЧЗ
 					compositeFields, _ = tp.Store.GetTaskDynamicField(taskID)
 					if compositeFields == "" {
-						compositeFields = "DATAMATRIX" // Фолбэк
+						compositeFields = "DATAMATRIX"
 					}
 
 					for _, item := range pending {
@@ -286,19 +275,19 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 
 				startIndex := pending[0].PrinterIndex
 
-				// Информационный лог
 				slog.Info("Pumper: Направляем пачку кодов в принтер",
 					"printer", pCfg.Name,
+					"task_id", taskID,
 					"count", len(compositePayloads),
 					"start_index", startIndex,
 				)
 
-				// 5. Отправка в принтер
+				// 5. Отправляем в сокет
 				loaded, err := pPrinter.PrintBatchIndexed(compositeFields, startIndex, compositePayloads)
 				if err == nil && loaded > 0 {
 					slog.Info("Pumper: Пачка успешно загружена в память устройства", "printer", pCfg.Name, "loaded_count", loaded)
 				} else if err != nil {
-					slog.Error("Pumper: Критическая ошибка отправки SID пакета в сокет", "printer", pCfg.Name, "err", err)
+					slog.Error("Pumper: Ошибка отправки пакета в сокет", "printer", pCfg.Name, "err", err)
 				}
 			}
 		}
