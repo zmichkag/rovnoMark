@@ -73,3 +73,14 @@ type LogFilter struct {
 	Limit     int       `json:"limit"`
 	Offset    int       `json:"offset"`
 }
+
+type TaskState string
+
+const (
+	TaskStateCreated      TaskState = "created"
+	TaskStateInitializing TaskState = "ready"
+	TaskStateActive       TaskState = "active"
+	TaskStateCompleted    TaskState = "completed"
+	TaskStateStopped      TaskState = "stopped"
+	TaskStateFailed       TaskState = "failed"
+)
