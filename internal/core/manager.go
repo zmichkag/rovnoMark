@@ -220,7 +220,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 					continue
 				}
 
-				maxBuffer := 100
+				maxBuffer := 30
 
 				// 2. Проверяем емкость буфера конкретного принтера
 				freeSpace, err := pPrinter.GetBufferFreeSpace()
