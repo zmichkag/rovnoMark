@@ -578,6 +578,13 @@ func main() {
 			"ОФФЛАЙН", "OFFLINE", "ОШИБКА", "ERROR", "REFUSED",
 		}
 
+		staticBytes, _ := json.Marshal(req.StaticFields)
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
+			return
+		}
+
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
@@ -630,6 +637,12 @@ func main() {
 				// Готовим составную строку полей "dm_data0;date01;date02;text01"
 				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
 
+				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии на %s: %v", pCfg.Name, err))
+					return
+				}
+
 				// InitSession отправит: SCB -> SMR -> SHO|dm_data0|date01|date02|text01|
 				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
@@ -638,13 +651,19 @@ func main() {
 			}
 		}
 
-		// 7. Фиксация задачи в БД
-		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
-			return
+		if err := store.SetTaskStatus(int(taskID), models.TaskStateActive); err != nil {
+			slog.Error("TASK-CREATE: Не удалось перевести задачу в active", "task_id", taskID, "err", err)
 		}
+
+		slog.Info("TASK-CREATE: Железо полностью готово, шлюз для Pumper открыт", "task_id", taskID)
+
+		//// 7. Фиксация задачи в БД
+		//staticBytes, _ := json.Marshal(req.StaticFields)
+		//taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
+		//if err != nil {
+		//	sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
+		//	return
+		//}
 
 		// 8. Ответ кливеру 1С
 		w.Header().Set("Content-Type", "application/json")

@@ -781,7 +781,7 @@ func (s *Store) SaveEventLog(lineID *int, printerID *int, eventType string, mess
 }
 
 // SetTaskStatus меняет статус всей партии (например, на 'completed' или 'stopped')
-func (s *Store) SetTaskStatus(taskID int, status string) error {
+func (s *Store) SetTaskStatus(taskID int, status models.TaskState) error {
 	_, err := s.db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err
 }

@@ -187,7 +187,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл", "line_id", lineID, "task_id", taskID)
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond) // Уменьшили с 5с до 200мс для скорости
 	defer ticker.Stop()
 
 	for {
@@ -196,10 +196,17 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 			slog.Info("DEFAULT-PUMPER: Остановлен по контексту", "task_id", taskID)
 			return
 		case <-ticker.C:
+			// 1. Читаем статус задачи из БД
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
-				slog.Info("DEFAULT-PUMPER: Задача завершена или остановлена", "task_id", taskID)
 				return
+			}
+
+			// ⛔️ ШЛЮЗ БЛОКИРОВКИ 1С:
+			// Если статус задачи 'ready' (инициализация в процессе), а НЕ 'active' — ждем!
+			if status == "ready" {
+				slog.Debug("PUMPER: Ожидание завершения стартовой сессии принтера...", "task_id", taskID)
+				continue
 			}
 
 			printers, err := tp.Store.GetPrintersByLine(lineID)
