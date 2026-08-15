@@ -15,7 +15,7 @@ import (
 
 const (
 	MaxQueueLimit  = 150 // Аппаратный лимит буфера кодов SmartDate X60
-	SafeQueueLimit = 50  // Безопасный лимит для программного контроля буфера
+	SafeQueueLimit = 100 // 💡 Увеличили софтовый лимит до 100, чтобы Pumper не застревал
 )
 
 type Driver struct {
@@ -46,7 +46,7 @@ func New(ip string, port int, actorName string) *Driver {
 		Port:       port,
 		ActorName:  actorName,
 		SenderName: "RovnoMarkGo",
-		Timeout:    10 * time.Second, // Увеличили общий таймаут
+		Timeout:    10 * time.Second,
 		actCounter: 50000,
 	}
 }
@@ -64,7 +64,6 @@ func encodeUTF16LE(s string) []byte {
 }
 
 func decodeUTF16LE(b []byte) string {
-	// Санитарная вычистка от случайных Null-байтов и непарных байтов
 	if len(b)%2 != 0 {
 		b = b[:len(b)-1]
 	}
@@ -125,7 +124,6 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 			d.conn = conn
 		}
 
-		// 💡 МЯГКИЙ ТАЙМАУТ: Даем 8 секунд вместо 4 на операцию
 		_ = d.conn.SetDeadline(time.Now().Add(8 * time.Second))
 		slog.Debug("MARKEM Out", "ip", d.Address, "act", act, "body", formattedBody)
 
@@ -148,7 +146,6 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 			_ = d.conn.SetDeadline(time.Now().Add(3 * time.Second))
 			n, err := d.conn.Read(chunk)
 			if err != nil {
-				// 💡 НЕ ЗАКРЫВАЕМ СОКЕТ СРАЗУ при обычной задержке
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					time.Sleep(100 * time.Millisecond)
 					continue
@@ -160,10 +157,8 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 			buffer.Write(chunk[:n])
 			decoded := decodeUTF16LE(buffer.Bytes())
 
-			// Ждем точный ответ с нашим act
 			if strings.Contains(decoded, actTagSingle) || strings.Contains(decoded, actTagDouble) {
 				if strings.Contains(decoded, "CmdPending") {
-					// Принтер просит еще времени на обработку
 					continue
 				}
 
@@ -178,14 +173,11 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 				return decoded, nil
 			}
 
-			// Если в ответе прилетел фоновый ивент (например CountsUpdateEvent или Ping),
-			// мы обновляем локальный кэш прямо на лету!
 			if strings.Contains(decoded, "countBatchGood") {
 				d.extractAndSaveHwCount(decoded)
 			}
 		}
 
-		// Если попытка 1 не удалась — сбрасываем коннект и пробуем повторить
 		d.closeConn()
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -193,7 +185,6 @@ func (d *Driver) sendSOAPWaitACK(bodyXML string) (string, error) {
 	return "", fmt.Errorf("failed to communicate with printer after retries")
 }
 
-// Вспомогательный разбор асинхронного счетчика из любого прилетевшего XML
 func (d *Driver) extractAndSaveHwCount(xmlStr string) {
 	reBatchGood := regexp.MustCompile(`<StringID>countBatchGood</StringID>\s*<Value>(\d+)</Value>`)
 	matches := reBatchGood.FindStringSubmatch(xmlStr)
@@ -217,13 +208,16 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 		jobName += ".job"
 	}
 
-	cmdSelect := `<SelectLocalJob act="{act}"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
-	if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
-		return fmt.Errorf("ошибка активации задания %s: %w", jobName, err)
+	// 💡 ЗАЩИТА ОТ ТАЙМАУТА: Если этот макет уже выбран на Маркеме, пропускаем сетевой вызов SelectLocalJob!
+	if d.curTemplate != template {
+		cmdSelect := `<SelectLocalJob act="{act}"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
+		if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
+			slog.Warn("MARKEM: Ошибка смены макета (пропускаем, если принтер уже печатает)", "ip", d.Address, "err", err)
+		}
+		d.curTemplate = template
 	}
-	d.curTemplate = template
 
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 
 	if len(fields) > 0 {
 		return d.UpdateStaticFields(fields)
@@ -295,7 +289,6 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	d.totalSent += len(codes)
 	d.stateMu.Unlock()
 
-	// 💡 МАКСИМАЛЬНАЯ НЕЖНОСТЬ: даем микропаузу 50мс, чтобы Маркем успел уложить коды в ОЗУ
 	time.Sleep(50 * time.Millisecond)
 
 	return len(codes), nil
@@ -303,7 +296,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 
 func (d *Driver) GetCurrentPrintCount() (string, error) {
 	d.stateMu.Lock()
-	// 💡 1. ДРОТТЛИНГ: Если с момента последнего реального запроса прошло меньше 1.5 сек — отдаем кэш!
+	// 💡 ДРОТТЛИНГ: Не чаще 1.5 сек на физический запрос
 	if time.Since(d.lastCountCheck) < 1500*time.Millisecond {
 		lastValid := d.baseCount + d.lastPrintedCalculated
 		d.stateMu.Unlock()
@@ -311,22 +304,19 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	}
 	d.stateMu.Unlock()
 
-	// 💡 2. Кэш устарел: делаем РОВНО ОДИН запрос в сокет
 	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="{act}"/>`)
 
 	d.stateMu.Lock()
-	d.lastCountCheck = time.Now() // Фиксируем время попытки опроса
+	d.lastCountCheck = time.Now()
 	d.stateMu.Unlock()
 
-	// 💡 3. МЯГКИЙ ФОЛЛБЕК: Если принтер не ответил (или занят) — НЕ валим систему, отдаем кэш
 	if err != nil {
 		d.stateMu.Lock()
 		defer d.stateMu.Unlock()
 		lastValid := d.baseCount + d.lastPrintedCalculated
-		return strconv.Itoa(lastValid), nil // Возвращаем nil в ошибке, чтобы Poller и Pumper не ругались
+		return strconv.Itoa(lastValid), nil
 	}
 
-	// 💡 4. Парсинг ответа от Маркема
 	reBatchGood := regexp.MustCompile(`<StringID>countBatchGood</StringID>\s*<Value>(\d+)</Value>`)
 	matches := reBatchGood.FindStringSubmatch(resp)
 
@@ -344,7 +334,6 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
-	// Самокоррекция при сбросе счетчика на железе
 	if current < d.baseCount && current != 0 {
 		d.baseCount = current
 	}
@@ -388,7 +377,6 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 func (d *Driver) GetStatus() (string, error) {
 	resp, err := d.sendSOAPWaitACK(`<RequestPackMLStatus act="{act}"/>`)
 	if err != nil {
-		// 💡 МЯГКИЙ СТАТУС: Если коннект временный, отдаем ОНЛАЙН вместо ОФФЛАЙН
 		return "ОНЛАЙН", nil
 	}
 
@@ -412,7 +400,6 @@ func (d *Driver) ClearQueue() error {
 	slog.Info("MARKEM: Очистка очереди кодов", "ip", d.Address)
 	_, err := d.sendSOAPWaitACK(`<ClearPackDataQueue act="{act}"/>`)
 	if err != nil {
-		// 💡 Даже если Маркем промолчал на очистку (бывает в паузе), мы все равно сбрасываем софтовый счетчик!
 		slog.Warn("MARKEM: Очистка очереди не вернула ACK, сбрасываем счетчики локально", "ip", d.Address, "err", err)
 	}
 
