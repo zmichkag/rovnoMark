@@ -572,22 +572,24 @@ func main() {
 			return
 		}
 
-		// 6. Handshake, проверку статусов и подготовка оборудования
+		// 6. Первичная фиксация задачи в БД со статусом 'ready' (ШЛЮЗ ЗАКРЫТ)
+		staticBytes, _ := json.Marshal(req.StaticFields)
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при создании задачи: "+err.Error())
+			return
+		}
+
+		// 7. Handshake, проверка статусов и подготовка оборудования
 		badStatuses := []string{
 			"TIMEOUT", "INITIALIZING", "STARTING",
 			"ОФФЛАЙН", "OFFLINE", "ОШИБКА", "ERROR", "REFUSED",
 		}
 
-		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
-			return
-		}
-
 		for _, pCfg := range printersInLine {
 			p := manager.GetPrinter(pCfg.ID)
 			if p == nil {
+				_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s не зарегистрирован в системе или отключен", pCfg.Name))
 				return
 			}
@@ -603,6 +605,7 @@ func main() {
 			for _, bad := range badStatuses {
 				if strings.Contains(checkString, bad) {
 					slog.Warn("Принтер забракован перед стартом задачи", "printer", pCfg.Name, "detected_status", status, "err", err)
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 					sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
 						"Принтер %s не готов к работе (Текущее состояние: %s). Проверьте питание, сеть или устраните ошибку на устройстве.",
 						pCfg.Name, status,
@@ -612,24 +615,23 @@ func main() {
 			}
 
 			// Конфигурация печати в зависимости от режима (ЧЗ / Статика)
-			// main.go (эндпоинт /api/task/create)
-
 			if req.DynamicFieldName == "" {
 				// Режим одиночной статической печати
 				p.ClearQueue()
 				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона на %s: %v", pCfg.Name, err))
 					return
 				}
 			} else {
 				// Режим сериализации (Честный ЗНАК)
-				//Для Videojet статику НЕ передаем в SelectTemplate, так как она уходит внутри SHO/SID
 				var selectFields map[string]string
 				if pCfg.DriverType != "videojet" {
 					selectFields = req.StaticFields
 				}
 
 				if err := p.SelectTemplate(req.TemplateName, selectFields); err != nil {
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 					return
 				}
@@ -637,35 +639,24 @@ func main() {
 				// Готовим составную строку полей "dm_data0;date01;date02;text01"
 				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
 
+				// Единый вызов инициализации сессии
 				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
 					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии на %s: %v", pCfg.Name, err))
 					return
 				}
-
-				// InitSession отправит: SCB -> SMR -> SHO|dm_data0|date01|date02|text01|
-				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
-					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии (SHO) на %s: %v", pCfg.Name, err))
-					return
-				}
 			}
 		}
 
+		// 8. 🟢 СЕССИЯ ЖЕЛЕЗА ПОЛНОСТЬЮ ИНИЦИАЛИЗИРОВАНА!
+		// Открываем шлюз подкачки кодов для Pumper
 		if err := store.SetTaskStatus(int(taskID), models.TaskStateActive); err != nil {
 			slog.Error("TASK-CREATE: Не удалось перевести задачу в active", "task_id", taskID, "err", err)
 		}
 
 		slog.Info("TASK-CREATE: Железо полностью готово, шлюз для Pumper открыт", "task_id", taskID)
 
-		//// 7. Фиксация задачи в БД
-		//staticBytes, _ := json.Marshal(req.StaticFields)
-		//taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
-		//if err != nil {
-		//	sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
-		//	return
-		//}
-
-		// 8. Ответ кливеру 1С
+		// 9. Ответ кливеру 1С
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
