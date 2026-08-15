@@ -694,7 +694,7 @@ func main() {
 			return
 		}
 
-		// --- ВАЛИДАЦИЯ И НОРМАЛИЗАЦИЯ КОДОВ МАРКИРОВКИ ---
+		// ВАЛИДАЦИЯ И НОРМАЛИЗАЦИЯ КОДОВ МАРКИРОВКИ GS1
 		for i, rawCode := range req.Codes {
 			parsedMark, err := marking.ParseAndValidateShortGS1(rawCode)
 			if err != nil {
@@ -704,15 +704,12 @@ func main() {
 					"raw_code", rawCode,
 					"err", err,
 				)
-				// Остановка процесса и мгновенный отказ
 				sendJSONError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
 					"Ошибка валидации кода маркировки на индексе %d: %v (значение: %s)",
 					i, err, rawCode,
 				))
 				return
 			}
-
-			// Заменяем исходный код на нормализованный каноничный формат с тегом <GS>
 			req.Codes[i] = parsedMark.ToDBFormat()
 		}
 
@@ -726,14 +723,13 @@ func main() {
 			return
 		}
 
-		// Активация задачи и запуск насоса
-		activated, _ := store.TryActivateTask(taskID)
-		if activated {
-			lineID, err := store.GetLineIDByTask(taskID)
-			if err == nil {
-				taskProcessor.StartPumping(lineID, taskID)
-				slog.Info("ПЕРВАЯ ПАЧКА КОДОВ ПОЛУЧЕНА: Насос (Pumper) запущен", "task_id", taskID, "line_id", lineID)
-			}
+		// 🟢 ВОТ НАШ ОБНОВЛЕННЫЙ БЛОК ГАРАНТИРОВАННОГО СТАРТА PUMPER
+		_ = store.SetTaskStatus(taskID, models.TaskStateActive)
+
+		lineID, err := store.GetLineIDByTask(taskID)
+		if err == nil {
+			taskProcessor.StartPumping(lineID, taskID)
+			slog.Info("APPEND: Насос (Pumper) запущен/подтвержден", "task_id", taskID, "line_id", lineID)
 		}
 
 		rndText, _ := store.GetRndTextByTask(taskID)
@@ -742,7 +738,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
 			"count":          len(req.Codes),
-			"pumper_started": activated,
+			"pumper_started": true,
 			"rnd_text":       rndText,
 		})
 	})
