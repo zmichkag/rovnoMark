@@ -19,16 +19,17 @@ const (
 )
 
 type Driver struct {
-	Address     string
-	Port        int
-	ActorName   string
-	SenderName  string
-	Timeout     time.Duration
-	mu          sync.Mutex // Защищает сетевые операции
-	stateMu     sync.Mutex // Защищает счетчики
-	conn        net.Conn
-	actCounter  int
-	curTemplate string
+	Address        string
+	Port           int
+	ActorName      string
+	SenderName     string
+	Timeout        time.Duration
+	mu             sync.Mutex // Защищает сетевые операции
+	stateMu        sync.Mutex // Защищает счетчики
+	conn           net.Conn
+	actCounter     int
+	curTemplate    string
+	lastCountCheck time.Time
 
 	// Внутренние счетчики
 	totalSent             int
@@ -301,15 +302,31 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 }
 
 func (d *Driver) GetCurrentPrintCount() (string, error) {
+	d.stateMu.Lock()
+	// 💡 1. ДРОТТЛИНГ: Если с момента последнего реального запроса прошло меньше 1.5 сек — отдаем кэш!
+	if time.Since(d.lastCountCheck) < 1500*time.Millisecond {
+		lastValid := d.baseCount + d.lastPrintedCalculated
+		d.stateMu.Unlock()
+		return strconv.Itoa(lastValid), nil
+	}
+	d.stateMu.Unlock()
+
+	// 💡 2. Кэш устарел: делаем РОВНО ОДИН запрос в сокет
 	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="{act}"/>`)
+
+	d.stateMu.Lock()
+	d.lastCountCheck = time.Now() // Фиксируем время попытки опроса
+	d.stateMu.Unlock()
+
+	// 💡 3. МЯГКИЙ ФОЛЛБЕК: Если принтер не ответил (или занят) — НЕ валим систему, отдаем кэш
 	if err != nil {
 		d.stateMu.Lock()
 		defer d.stateMu.Unlock()
-		// 💡 МЯГКИЙ ФОЛЛБЕК: При ошибке запроса НЕ ЛОМАЕМ работу, а берем последний валидный кэш
 		lastValid := d.baseCount + d.lastPrintedCalculated
-		return strconv.Itoa(lastValid), nil // Возвращаем nil в ошибку, чтобы Poller не ругался
+		return strconv.Itoa(lastValid), nil // Возвращаем nil в ошибке, чтобы Poller и Pumper не ругались
 	}
 
+	// 💡 4. Парсинг ответа от Маркема
 	reBatchGood := regexp.MustCompile(`<StringID>countBatchGood</StringID>\s*<Value>(\d+)</Value>`)
 	matches := reBatchGood.FindStringSubmatch(resp)
 
@@ -327,6 +344,7 @@ func (d *Driver) GetCurrentPrintCount() (string, error) {
 	d.stateMu.Lock()
 	defer d.stateMu.Unlock()
 
+	// Самокоррекция при сбросе счетчика на железе
 	if current < d.baseCount && current != 0 {
 		d.baseCount = current
 	}

@@ -187,7 +187,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("DEFAULT-PUMPER: Запущен пачечный цикл", "line_id", lineID, "task_id", taskID)
 
-	ticker := time.NewTicker(200 * time.Millisecond) // Уменьшили с 5с до 200мс для скорости
+	ticker := time.NewTicker(2000 * time.Millisecond) // Уменьшили с 5с до 200мс для скорости
 	defer ticker.Stop()
 
 	for {
@@ -223,7 +223,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				}
 
 				// 1. Устанавливаем желаемую планку буфера
-				maxBuffer := 50
+				maxBuffer := 100
 
 				// 2. Узнаем, сколько свободных слотов осталось до лимита
 				freeSpace, err := pPrinter.GetBufferFreeSpace()
@@ -238,7 +238,9 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				}
 
 				if targetLoad <= 0 {
-					continue // Буфер полон
+					slog.Debug("PUMPER: Буфер принтера заполнен (freeSpace=0), даем время на печать...", "printer", pCfg.Name)
+					time.Sleep(1 * time.Second)
+					continue // Буфер полон, переходим к следующему такту
 				}
 
 				// 3. Забираем коды из БД в переменную pending!
