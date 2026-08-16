@@ -6,6 +6,7 @@ services:
     command: ["/bin/marking-service", "--port", "8000", "--debug"]
     ports:
       - "8000:8000"
+    restart: unless-stopped
     environment:
       - TZ=Europe/Moscow
     volumes:
