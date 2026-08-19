@@ -52,7 +52,7 @@ cd openmark
 docker-compose up -d --build
 После запуска Web Dashboard доступен по адресу: http://localhost:8080
 
-🧩** Руководство для разработчиков (How to add a Driver)**
+**🧩 Руководство для разработчиков (How to add a Driver)**
 Для добавления поддержки нового оборудования (например, Bizerba, Markem-Imaje или Carl Valentin):
 
 Создайте новый пакет в директории internal/drivers/<vendor_name>/.
