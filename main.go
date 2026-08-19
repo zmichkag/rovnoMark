@@ -656,7 +656,7 @@ func main() {
 
 		slog.Info("TASK-CREATE: Железо полностью готово, шлюз для Pumper открыт", "task_id", taskID)
 
-		// 9. Ответ кливеру 1С
+		// 9. Ответ для 1С
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{

@@ -101,7 +101,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	ticker := time.NewTicker(15 * time.Millisecond)
 	defer ticker.Stop()
 
-	// 1. СТАРТОВЫЙ ВЗВОД: Заряжаем первичные 2 кода
+	//  Заряжаем
 	slog.Info("VALENTIN-PUMPER: Первичная заправка двух кодов в RAM принтера", "task_id", taskID)
 
 	if err := tp.pushSingleValentinCode(taskID, vDriver); err != nil {
@@ -202,7 +202,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				return
 			}
 
-			// ⛔️ ШЛЮЗ БЛОКИРОВКИ: Ждем завершения инициализации 1С
+			// ШЛЮЗ БЛОКИРОВКИ: Ждем завершения инициализации 1С
 			if status == "ready" {
 				slog.Debug("PUMPER: Ожидание завершения стартовой сессии принтера...", "task_id", taskID)
 				continue
@@ -213,7 +213,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				continue
 			}
 
-			// 💡 Проходим по ВСЕМ принтерам линии независимо!
+			// Проходим по ВСЕМ принтерам линии независимо
 			for _, pCfg := range printers {
 				pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 				if pPrinter == nil {
