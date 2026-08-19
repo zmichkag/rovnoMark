@@ -52,7 +52,7 @@ cd openmark
 docker-compose up -d --build
 После запуска Web Dashboard доступен по адресу: http://localhost:8080
 
-🧩 Руководство для разработчиков (How to add a Driver)
+🧩** Руководство для разработчиков (How to add a Driver)**
 Для добавления поддержки нового оборудования (например, Bizerba, Markem-Imaje или Carl Valentin):
 
 Создайте новый пакет в директории internal/drivers/<vendor_name>/.
@@ -61,8 +61,8 @@ docker-compose up -d --build
 
 Зарегистрируйте новый драйвер в internal/core/manager.go.
 
-📄 Лицензирование
-Copyright (c) 2026 Aleksandr K.
+**📄 Лицензирование
+Copyright (c) 2026 [Aleksandr K.](zmichok@gmail.com)**
 
 Проект распространяется под лицензией GNU Affero General Public License v3.0 (AGPLv3).
 
@@ -70,4 +70,4 @@ Open Source: Вы можете свободно использовать, зап
 
 Ограничения: Запрещена закрытая коммерческая перепродажа кода или передача третьим лицам без открытия исходного кода ваших доработок.
 
-Commercial Licensing: По вопросам получения закрытой коммерческой лицензии обращаться к автору проекта.
+**Commercial Licensing: По вопросам получения закрытой коммерческой лицензии обращаться к автору проекта.**
