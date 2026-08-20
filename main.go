@@ -102,7 +102,7 @@ func main() {
 			var taskID int
 			var lineID int
 
-			// 1. Извлекаем task_id (в мапе он лежит как int)
+			// 1. Извлекаем task_id
 			if idVal, ok := taskMap["task_id"]; ok && idVal != nil {
 				idStr := fmt.Sprintf("%v", idVal)
 				if parsedID, errParse := strconv.Atoi(idStr); errParse == nil {
@@ -110,7 +110,7 @@ func main() {
 				}
 			}
 
-			// 2. Сразу извлекаем готовый line_id (чтобы не дергать БД лишний раз)
+			// 2. Сразу извлекаем готовый line_id
 			if lineVal, ok := taskMap["line_id"]; ok && lineVal != nil {
 				lineStr := fmt.Sprintf("%v", lineVal)
 				if parsedLineID, errParse := strconv.Atoi(lineStr); errParse == nil {
@@ -572,7 +572,7 @@ func main() {
 			return
 		}
 
-		// 6. Первичная фиксация задачи в БД со статусом 'ready' (ШЛЮЗ ЗАКРЫТ)
+		// 6. Первичная фиксация задачи в БД со статусом 'ready' (ШЛЮЗ ЗАКРЫТ, накачка кодами не возможна)
 		staticBytes, _ := json.Marshal(req.StaticFields)
 		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
 		if err != nil {
@@ -648,7 +648,7 @@ func main() {
 			}
 		}
 
-		// 8. 🟢 СЕССИЯ ЖЕЛЕЗА ПОЛНОСТЬЮ ИНИЦИАЛИЗИРОВАНА!
+		// 8. СЕССИЯ ЖЕЛЕЗА ПОЛНОСТЬЮ ИНИЦИАЛИЗИРОВАНА!
 		// Открываем шлюз подкачки кодов для Pumper
 		if err := store.SetTaskStatus(int(taskID), models.TaskStateActive); err != nil {
 			slog.Error("TASK-CREATE: Не удалось перевести задачу в active", "task_id", taskID, "err", err)
