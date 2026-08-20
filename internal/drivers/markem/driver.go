@@ -208,7 +208,7 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 		jobName += ".job"
 	}
 
-	// 💡 ЗАЩИТА ОТ ТАЙМАУТА: Если этот макет уже выбран на Маркеме, пропускаем сетевой вызов SelectLocalJob!
+	//  Если этот макет уже выбран на Маркеме, пропускаем сетевой вызов SelectLocalJob!
 	if d.curTemplate != template {
 		cmdSelect := `<SelectLocalJob act="{act}"><JobFileName>` + escapeXML(jobName) + `</JobFileName></SelectLocalJob>`
 		if _, err := d.sendSOAPWaitACK(cmdSelect); err != nil {
@@ -296,7 +296,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 
 func (d *Driver) GetCurrentPrintCount() (string, error) {
 	d.stateMu.Lock()
-	// 💡 ДРОТТЛИНГ: Не чаще 1.5 сек на физический запрос
+
 	if time.Since(d.lastCountCheck) < 1500*time.Millisecond {
 		lastValid := d.baseCount + d.lastPrintedCalculated
 		d.stateMu.Unlock()
