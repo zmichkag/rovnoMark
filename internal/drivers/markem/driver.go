@@ -195,6 +195,7 @@ func (d *Driver) extractAndSaveHwCount(xmlStr string) {
 			d.lastPrintedCalculated = current - d.baseCount
 		}
 		d.stateMu.Unlock()
+
 	}
 }
 
