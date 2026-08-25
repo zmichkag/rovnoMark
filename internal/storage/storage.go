@@ -561,7 +561,6 @@ func (s *Store) AppendTaskCodes(taskID int, codes []string) error {
 	return tx.Commit()
 }
 
-// FetchAndAssignCodes атомарно забирает коды, назначает им ID принтера, порядковый индекс и ставит статус 'in_buffer'
 func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]models.TaskCode, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -569,12 +568,12 @@ func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]mod
 	}
 	defer tx.Rollback()
 
-	// 1. Узнаем последний индекс ИМЕННО ЭТОГО принтера в этой задаче
+	// Узнаем последний индекс конкретного принтера в этой задаче
 	var lastIndex int
-	tx.QueryRow(`SELECT COALESCE(MAX(printer_index), -1) FROM task_codes 
+	tx.QueryRow(`SELECT COALESCE(MAX(printer_index), 0) FROM task_codes 
 	             WHERE task_id = ? AND printer_id = ?`, taskID, printerID).Scan(&lastIndex)
 
-	// 2. Выбираем свободные коды
+	// Выбираем свободные коды
 	rows, err := tx.Query(`
 		SELECT id, code FROM task_codes 
 		WHERE task_id = ? AND status = 'pending' AND printer_id IS NULL 
@@ -595,7 +594,7 @@ func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]mod
 		return nil, nil
 	}
 
-	// 3. Присваиваем этим кодам ID принтера и индексы
+	// Присваиваем независимые индексы каждому принтеру отдельно
 	for i, tc := range list {
 		nextIdx := lastIndex + 1 + i
 		tx.Exec(`UPDATE task_codes SET printer_id = ?, printer_index = ?, status = 'in_buffer' 
@@ -606,13 +605,13 @@ func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]mod
 	return list, tx.Commit()
 }
 
-// Синхронизация статуса 'printed' на основе индекса SID от принтера
-func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
+// Синхронизация статуса 'printed' на основе индекса от принтера
+func (s *Store) MarkAsPrinted(taskID int, printerID int, lastIndex int) (int64, error) {
 	res, err := s.db.Exec(`
 		UPDATE task_codes 
 		SET status = 'printed', printed_at = CURRENT_TIMESTAMP 
-		WHERE task_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
-		taskID, lastIndex)
+		WHERE task_id = ? AND printer_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
+		taskID, printerID, lastIndex)
 	if err != nil {
 		return 0, err
 	}

@@ -854,7 +854,7 @@ func main() {
 					}
 
 					// Фиксируем подтвержденные данные в БД
-					affected, errMark := store.MarkAsPrinted(taskID, lastIdx)
+					affected, errMark := store.MarkAsPrinted(taskID, cfg.ID, lastIdx)
 					if errMark != nil {
 						slog.Error("[STOP] Ошибка обновления статусов кодов в БД", "task_id", taskID, "printer_id", cfg.ID, "err", errMark)
 					}
