@@ -1022,3 +1022,11 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// TODO 2200 отдали и 2200 напечатали. А при остановке пришло 2187. Нет ли здесь какой-нибудь тонкости?
+// task_id|line_id|line_name|template_name|task_status|started_at|last_code_printed_at|stop_event_at|total_codes|printed_count|in_buffer_count|pending_count
+//1754|22|ДМК VEGATRONIC 7|CHZ|stopped|2026-08-24 19:31:48|2026-08-24 22:29:40||2200|2200|0|0
+
+// TODO эндпоинт для работы с тасками
+
+// TODO эндпоинт для работы с кодами
