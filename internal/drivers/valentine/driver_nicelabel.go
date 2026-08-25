@@ -38,12 +38,12 @@ func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 	}
 }
 
-// InitSession проверяет/поднимает монопольный сокет и запускает первичную подготовку макета
+// InitSession проверяет/поднимает монопольный сокет и сбрасывает счетчики сессии перед новым стартом
 func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Только поднимаем сокет, если закрыт. Повторно SelectTemplate НЕ ВЫЗЫВАЕМ!
+	// 1. Поднимаем сокет, если закрыт
 	if d.conn == nil {
 		addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 		conn, err := net.DialTimeout("tcp", addr, d.Timeout)
@@ -53,11 +53,19 @@ func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFiel
 		d.optimizeSocket(conn)
 		d.conn = conn
 	}
+
+	d.lastCount = 0
+	d.lastRawFBBC = 0
+
+	slog.Info("VALENTIN-INIT: Сессия успешно поднята, локальный одометр обнулен",
+		"printer_id", d.ID,
+		"addr", d.Address,
+	)
+
 	return nil
 }
 
-// SelectTemplate атомарно (покомандно) загружает макет из Flash в ОЗУ и записывает поля 18 и 19
-// SelectTemplate атомарно загружает макет и записывает статические поля ровно в том виде, как их отдала 1С
+// SelectTemplate атомарно загружает макет и записывает статические поля
 func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -153,6 +161,7 @@ func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[strin
 		return fmt.Errorf("сбой отправки FBC: %w", err)
 	}
 
+	d.lastCount = 0
 	d.lastRawFBBC = 0
 
 	slog.Info("VALENTIN-DIRECT: Инициализация завершена, оригинальные даты 1С зафиксированы в ОЗУ", "printer_id", d.ID)
@@ -353,9 +362,18 @@ func (d *NiceLabelDriver) traceCommand(desc string, data []byte) {
 	)
 }
 
+// ClearQueue очищает локальные счетчики при остановке/сбросе задачи
+func (d *NiceLabelDriver) ClearQueue() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.lastCount = 0
+	d.lastRawFBBC = 0
+	return nil
+}
+
 // --- ЗАГЛУШКИ СОВМЕСТИМОСТИ ИНТЕРФЕЙСА ---
 
-func (d *NiceLabelDriver) ClearQueue() error                                 { return nil }
 func (d *NiceLabelDriver) GetStatus() (string, error)                        { return "ГОТОВ", nil }
 func (d *NiceLabelDriver) GetBufferFreeSpace() (int, error)                  { return 1, nil }
 func (d *NiceLabelDriver) GetLastPrintedIndex() (int, error)                 { return d.lastCount, nil }
