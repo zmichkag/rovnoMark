@@ -417,10 +417,11 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 						if errTask == nil && activeTaskID > 0 {
 							lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
 							if errIdx == nil && lastPrintedIdx >= 0 {
-								affected, errMark := store.MarkAsPrinted(activeTaskID, lastPrintedIdx)
+								affected, errMark := store.MarkAsPrinted(activeTaskID, cfg.ID, lastPrintedIdx)
 								if errMark == nil && affected > 0 {
 									slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
 										"printer", cfg.Name,
+										"printer_id", cfg.ID,
 										"task_id", activeTaskID,
 										"last_index", lastPrintedIdx,
 										"confirmed_now", affected,
