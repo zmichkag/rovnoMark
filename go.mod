@@ -1,6 +1,6 @@
 module rovnoMark
 
-go 1.21.0
+go 1.22
 
 require modernc.org/sqlite v1.57.0
 
