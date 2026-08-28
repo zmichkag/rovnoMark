@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -914,31 +917,39 @@ func main() {
 			return
 		}
 
-		// Читаем параметры из запроса
-		query := r.URL.Query()
-		taskIDStr := query.Get("task_id")
-
-		// 1. ПРОВЕРКА НА ЧУШЬ (ВАЛИДАЦИЯ ПАРАМЕТРОВ)
-		var taskID int
-		var err error
-
-		if taskIDStr != "" {
-			lineID, err = strconv.Atoi(taskIDStr)
-			if err != nil || taskID < 0 {
-				sendJSONError(w, http.StatusBadRequest, "Неверный формат параметра task_id. Ожидается целое положительное число.")
-				return
-			}
-		}
-
-		// Передаем в метод БД
-		tasks, err := store.GetTaskInfo(taskID)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка при обращении к БД: "+err.Error())
+		// Читаем параметры из URL
+		taskIDStr := r.URL.Query().Get("task_id")
+		if taskIDStr == "" {
+			sendJSONError(w, http.StatusBadRequest, "Параметр task_id обязателен")
 			return
 		}
 
+		// 1. ВАЛИДАЦИЯ ПАРАМЕТРА
+		taskID, err := strconv.Atoi(taskIDStr)
+		if err != nil || taskID <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "Неверный формат параметра task_id. Ожидается целое положительное число.")
+			return
+		}
+
+		// 2. ВЫЗОВ ХРАНИЛИЩА (Передаем r.Context() для отмены при разрыве связи)
+		taskInfo, err := store.GetTaskInfo(r.Context(), taskID)
+		if err != nil {
+			// Если задача не найдена в БД
+			if errors.Is(err, sql.ErrNoRows) {
+				sendJSONError(w, http.StatusNotFound, fmt.Sprintf("Задача с ID %d не найдена", taskID))
+				return
+			}
+
+			// Внутренняя ошибка базы — логируем подробно, клиенту отдаем общую ошибку
+			log.Printf("[ERROR] GetTaskInfo failed for task_id=%d: %v", taskID, err)
+			sendJSONError(w, http.StatusInternalServerError, "Внутренняя ошибка сервера при получении данных задачи")
+			return
+		}
+
+		// 3. УСПЕШНЫЙ ОТВЕТ
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tasks)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(taskInfo)
 	})
 
 	// Получение списка активных задач
