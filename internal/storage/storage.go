@@ -785,6 +785,76 @@ func (s *Store) SetTaskStatus(taskID int, status models.TaskState) error {
 	return err
 }
 
+// GetTaskInfo возвращает агрегированную информацию по задаче маркировки
+func (s *Store) GetTaskInfo(taskID int) (map[string]interface{}, error) {
+	query := `
+		SELECT 
+			t.id AS task_id,
+			t.line_id,
+			COALESCE(l.name, 'Неизвестная линия') AS line_name,
+			t.template_name,
+			t.status AS task_status,
+			t.created_at AS started_at,
+			
+			MAX(tc.printed_at) AS last_code_printed_at,
+			
+			(
+				SELECT e.timestamp 
+				FROM event_log e 
+				WHERE e.line_id = t.line_id 
+				  AND e.message LIKE '%' || CAST(t.id AS TEXT) || '%' 
+				  AND (e.message LIKE '%stopped%' OR e.message LIKE '%остановк%')
+				ORDER BY e.id DESC 
+				LIMIT 1
+			) AS stop_event_at,
+
+			COUNT(tc.id) AS total_codes,
+			COUNT(CASE WHEN tc.status = 'printed' THEN 1 END) AS printed_count,
+			COUNT(CASE WHEN tc.status = 'in_buffer' THEN 1 END) AS in_buffer_count,
+			COUNT(CASE WHEN tc.status = 'pending' THEN 1 END) AS pending_count
+
+		FROM tasks t
+		LEFT JOIN lines l ON t.line_id = l.id
+		LEFT JOIN task_codes tc ON t.id = tc.task_id
+		WHERE t.id = ?;`
+
+	var (
+		tID, lineID                                           int
+		lineName, templateName, taskStatus, startedAt         string
+		lastPrintedAt, stopEventAt                            sql.NullString
+		totalCodes, printedCount, inBufferCount, pendingCount int
+	)
+
+	err := s.db.QueryRow(query, taskID).Scan(
+		&tID, &lineID, &lineName, &templateName, &taskStatus, &startedAt,
+		&lastPrintedAt, &stopEventAt,
+		&totalCodes, &printedCount, &inBufferCount, &pendingCount,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("task %d not found", taskID)
+		}
+		return nil, err
+	}
+
+	result := map[string]interface{}{
+		"task_id":              tID,
+		"line_id":              lineID,
+		"line_name":            lineName,
+		"template_name":        templateName,
+		"task_status":          taskStatus,
+		"started_at":           startedAt,
+		"last_code_printed_at": lastPrintedAt.String,
+		"stop_event_at":        stopEventAt.String,
+		"total_codes":          totalCodes,
+		"printed_count":        printedCount,
+		"in_buffer_count":      inBufferCount,
+		"pending_count":        pendingCount,
+	}
+
+	return result, nil
+}
+
 // UpdateCodeStatusByID атомарно обновляет статус и индекс конкретного кода по его уникальному ID (для Valentin)
 func (s *Store) UpdateCodeStatusByID(id int, status string, printerIndex int) error {
 	query := `UPDATE task_codes SET status = ?, printer_index = ? WHERE id = ?`
