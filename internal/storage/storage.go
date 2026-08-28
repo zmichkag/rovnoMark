@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -786,7 +788,7 @@ func (s *Store) SetTaskStatus(taskID int, status models.TaskState) error {
 }
 
 // GetTaskInfo возвращает агрегированную информацию по задаче маркировки
-func (s *Store) GetTaskInfo(taskID int) (map[string]interface{}, error) {
+func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interface{}, error) {
 	query := `
 		SELECT 
 			t.id AS task_id,
@@ -825,7 +827,7 @@ func (s *Store) GetTaskInfo(taskID int) (map[string]interface{}, error) {
 		totalCodes, printedCount, inBufferCount, pendingCount int
 	)
 
-	err := s.db.QueryRow(query, taskID).Scan(
+	err := s.db.QueryRowContext(ctx, query, taskID).Scan(
 		&tID, &lineID, &lineName, &templateName, &taskStatus, &startedAt,
 		&lastPrintedAt, &stopEventAt,
 		&totalCodes, &printedCount, &inBufferCount, &pendingCount,
