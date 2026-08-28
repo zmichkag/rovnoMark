@@ -908,6 +908,39 @@ func main() {
 		json.NewEncoder(w).Encode(response)
 	})
 
+	http.HandleFunc("/api/task/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только метод GET")
+			return
+		}
+
+		// Читаем параметры из запроса
+		query := r.URL.Query()
+		taskIDStr := query.Get("task_id")
+
+		// 1. ПРОВЕРКА НА ЧУШЬ (ВАЛИДАЦИЯ ПАРАМЕТРОВ)
+		var taskID int
+		var err error
+
+		if taskIDStr != "" {
+			lineID, err = strconv.Atoi(taskIDStr)
+			if err != nil || taskID < 0 {
+				sendJSONError(w, http.StatusBadRequest, "Неверный формат параметра task_id. Ожидается целое положительное число.")
+				return
+			}
+		}
+
+		// Передаем в метод БД
+		tasks, err := store.GetTaskInfo(taskID)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка при обращении к БД: "+err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tasks)
+	})
+
 	// Получение списка активных задач
 	http.HandleFunc("/api/task/active", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
