@@ -22,6 +22,7 @@ type Printer interface {
 	PrintTemplate(template string, fields map[string]string) error
 	PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error)
 	GetLastPrintedIndex() (int, error)
+	GetTotalPrints() (int64, error)
 	GetTemplates() ([]string, error)
 	GetTemplateFields(templateName string) ([]string, error)
 	GetRemainingRibbon() (string, error)
@@ -29,8 +30,8 @@ type Printer interface {
 	GetPrintSpeed() (string, error)
 	GetCurrentPrintCount() (string, error)
 	GetCurrentTemplate() (string, error)
-	ClearQueue() error                // Очистка очереди (команда CQI)
-	GetBufferFreeSpace() (int, error) // Сколько кодов еще можно дослать
+	ClearQueue() error
+	GetBufferFreeSpace() (int, error)
 	UpdateStaticFields(fields map[string]string) error
 	InitSession(fieldName string, maxQueue int, staticFields map[string]string) error
 	SelectTemplate(template string, fields map[string]string) error

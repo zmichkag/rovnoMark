@@ -90,7 +90,9 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
+	query := `SELECT id, name, ip, port, driver_type, COALESCE(raw_body, ''), is_active 
+	          FROM printers WHERE is_deleted = 0`
+	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +101,7 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.RawBody, &p.IsActive); err != nil {
 			continue
 		}
 		list = append(list, p)
@@ -732,13 +734,15 @@ func New(path string) *Store {
 	var linesTableExists int
 	db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lines'").Scan(&linesTableExists)
 
-	// Если есть старая таблица, но нет новой (lines) - делаем миграцию
+	// Если есть старая таблица, но нет новой - делаем миграцию
 	if oldTableExists > 0 && linesTableExists == 0 {
 		log.Println("=== ОБНАРУЖЕНА СТАРАЯ БАЗА. ЗАПУСК МИГРАЦИИ НА ВЕРСИЮ 1.3 ===")
 		db.Exec("ALTER TABLE printers RENAME TO printers_v1_backup;")
 	}
 
 	db.Exec("ALTER TABLE tasks ADD COLUMN rnd_text TEXT DEFAULT '';")
+
+	db.Exec("ALTER TABLE printers ADD COLUMN raw_body TEXT DEFAULT '';")
 
 	// --- 2. СОЗДАНИЕ НОВОЙ СТРУКТУРЫ ---
 	createTables(db)
@@ -885,6 +889,7 @@ func createTables(db *sql.DB) {
 		ip TEXT NOT NULL,
 		port INTEGER,
 		driver_type TEXT,
+		raw_body TEXT DEFAULT '',
 		is_active BOOLEAN DEFAULT 1,
 		is_deleted BOOLEAN DEFAULT 0
 	);`)
@@ -935,6 +940,23 @@ func createTables(db *sql.DB) {
 		printed_at DATETIME,
 		FOREIGN KEY(task_id) REFERENCES tasks(id)
 	);`)
+
+	// Таблица фиксации общего счетчика принтеров при старте и стопе заданий
+	db.Exec(`CREATE TABLE IF NOT EXISTS task_printer_counters (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id INTEGER NOT NULL,
+		line_id INTEGER NOT NULL,
+		printer_id INTEGER NOT NULL,
+		event_type TEXT NOT NULL, -- 'start' или 'stop'
+		counter_value INTEGER NOT NULL,
+		recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(task_id) REFERENCES tasks(id),
+		FOREIGN KEY(line_id) REFERENCES lines(id),
+		FOREIGN KEY(printer_id) REFERENCES printers(id)
+	);`)
+
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer 
+		ON task_printer_counters(task_id, printer_id);`)
 
 	// Таблица периодических снимков состояния
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (
@@ -1009,4 +1031,21 @@ func runMigration(db *sql.DB) {
 	// 5. Удаляем бэкап
 	db.Exec("DROP TABLE printers_v1_backup")
 	log.Println("=== МИГРАЦИЯ УСПЕШНО ЗАВЕРШЕНА ===")
+}
+
+// RecordPrinterCounterSnapshot сохраняет значение абсолютного счетчика принтера (start / stop)
+func (s *Store) RecordPrinterCounterSnapshot(taskID, lineID, printerID int, eventType string, counterValue int64) error {
+	query := `
+		INSERT INTO task_printer_counters (task_id, line_id, printer_id, event_type, counter_value, recorded_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+	_, err := s.db.Exec(query, taskID, lineID, printerID, eventType, counterValue)
+	if err != nil {
+		slog.Error("SQL: Ошибка сохранения одометра",
+			"task_id", taskID,
+			"printer_id", printerID,
+			"event_type", eventType,
+			"err", err,
+		)
+	}
+	return err
 }

@@ -181,3 +181,7 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	r, e := d.sendRaw("SPLGAT")
 	return CleanResponse(r), e
 }
+
+func (d *Driver) GetTotalPrints() (int64, error) {
+	return 0, nil
+}

@@ -443,3 +443,12 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 	slog.Info("VIDEOJET: Пачка успешно загружена", "ip", d.Address, "loaded", successCount, "total", len(codes))
 	return successCount, nil
 }
+
+func (d *Driver) GetTotalPrints() (int64, error) {
+	countStr, err := d.GetCurrentPrintCount()
+	if err != nil {
+		return 0, err
+	}
+	val, _ := strconv.ParseInt(countStr, 10, 64)
+	return val, nil
+}

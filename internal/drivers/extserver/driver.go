@@ -3,33 +3,16 @@ package extserver
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"sync"
+	"text/template"
 	"time"
 )
 
-// PrintPayload — структура для XML-обертки запросов печати
-type PrintPayload struct {
-	XMLName    xml.Name          `xml:"PrintRequest"`
-	Template   string            `xml:"Template,omitempty"`
-	EventType  string            `xml:"EventType"`
-	Fields     map[string]string `xml:"Fields,omitempty"`
-	Codes      []string          `xml:"Codes>Code,omitempty"`
-	StartIndex int               `xml:"StartIndex,omitempty"`
-}
-
-// ServerResponse — структура для парсинга ответов от внешнего Print Engine
-type ServerResponse struct {
-	XMLName xml.Name `xml:"Response"`
-	Status  string   `xml:"Status"`
-	Error   string   `xml:"Error,omitempty"`
-}
-
-// Driver реализует контракт core.Printer для внешних серверов печати (NiceLabel, MES и др.)
+// Driver реализует виртуальный драйвер внешнего сервера печати (NiceLabel, MES, ERP)
 type Driver struct {
 	endpointURL string
 	timeout     time.Duration
@@ -37,7 +20,7 @@ type Driver struct {
 
 	mu               sync.RWMutex
 	curTemplate      string
-	customURLSuffix  string
+	templateBody     string // Сырой шаблон из БД (raw_body), содержащий Go-теги {{.PLU}}, {{.Codes}} и т.д.
 	lastPrintedIndex int
 }
 
@@ -62,44 +45,59 @@ func New(ip string, port int) *Driver {
 	}
 }
 
+// SetTemplateBody загружает виртуальный шаблон (XML/JSON/Raw) из SQLite
+func (d *Driver) SetTemplateBody(body string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.templateBody = body
+}
+
 // ============================================================================
 // 1. Управление печатью (Боевые методы)
 // ============================================================================
 
-func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
+func (d *Driver) SelectTemplate(templateName string, fields map[string]string) error {
 	d.mu.Lock()
-	d.curTemplate = template
-	url := d.endpointURL + d.customURLSuffix
+	d.curTemplate = templateName
+	rawTpl := d.templateBody
 	d.mu.Unlock()
 
-	payload := PrintPayload{
-		Template:  template,
-		EventType: "PrintSummary",
-		Fields:    fields,
+	// Готовим контекст подстановки для шаблонизатора
+	data := make(map[string]interface{})
+	for k, v := range fields {
+		data[k] = v
+	}
+	data["TemplateName"] = templateName
+	data["EventType"] = "PrintSummary"
+
+	payload, err := d.renderTemplate(rawTpl, data)
+	if err != nil {
+		return fmt.Errorf("ошибка рендеринга виртуального шаблона: %w", err)
 	}
 
-	return d.sendXMLRequest(url, payload)
-}
-
-func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
-	return nil
+	return d.sendPayload(payload)
 }
 
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	d.mu.Lock()
-	url := d.endpointURL + d.customURLSuffix
-	template := d.curTemplate
+	templateName := d.curTemplate
+	rawTpl := d.templateBody
 	d.mu.Unlock()
 
-	payload := PrintPayload{
-		Template:   template,
-		EventType:  "PrintBatch",
-		StartIndex: startIndex,
-		Codes:      codes,
-		Fields:     map[string]string{"fieldName": fieldName},
+	data := map[string]interface{}{
+		"TemplateName": templateName,
+		"EventType":    "PrintBatch",
+		"FieldName":    fieldName,
+		"StartIndex":   startIndex,
+		"Codes":        codes,
 	}
 
-	err := d.sendXMLRequest(url, payload)
+	payload, err := d.renderTemplate(rawTpl, data)
+	if err != nil {
+		return 0, fmt.Errorf("ошибка рендеринга пачки: %w", err)
+	}
+
+	err = d.sendPayload(payload)
 	if err != nil {
 		return 0, err
 	}
@@ -111,8 +109,12 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	return len(codes), nil
 }
 
-func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
-	return d.SelectTemplate(template, fields)
+func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
+	return nil
+}
+
+func (d *Driver) PrintTemplate(templateName string, fields map[string]string) error {
+	return d.SelectTemplate(templateName, fields)
 }
 
 func (d *Driver) UpdateStaticFields(fields map[string]string) error {
@@ -129,7 +131,7 @@ func (d *Driver) ClearQueue() error {
 
 func (d *Driver) GetStatus() (string, error) {
 	d.mu.RLock()
-	url := d.endpointURL + d.customURLSuffix
+	url := d.endpointURL
 	d.mu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
@@ -146,7 +148,7 @@ func (d *Driver) GetStatus() (string, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return "ГОТОВ", nil
 	}
 
@@ -154,7 +156,7 @@ func (d *Driver) GetStatus() (string, error) {
 }
 
 func (d *Driver) GetBufferFreeSpace() (int, error) {
-	return 999, nil
+	return 999, nil // Аппаратного буфера нет, отдаем свободный канал
 }
 
 func (d *Driver) GetLastPrintedIndex() (int, error) {
@@ -184,42 +186,46 @@ func (d *Driver) GetTemplates() ([]string, error) {
 	if d.curTemplate != "" {
 		return []string{d.curTemplate}, nil
 	}
-	return []string{"EXT_SERVER_TEMPLATE"}, nil
+	return []string{"VIRTUAL_XML_TEMPLATE"}, nil
 }
 
 func (d *Driver) GetTemplateFields(templateName string) ([]string, error) {
 	return []string{"PLU", "Weight", "DATAMATRIX"}, nil
 }
 
-func (d *Driver) GetRemainingRibbon() (string, error) {
-	return "N/A", nil
-}
-
-func (d *Driver) GetPrintSpeed() (string, error) {
-	return "N/A", nil
-}
-
-func (d *Driver) GetQueueCapacity(queueName string) (string, error) {
-	return "N/A", nil
-}
-
-func (d *Driver) SetTemplateBody(body string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.customURLSuffix = body
-}
+func (d *Driver) GetRemainingRibbon() (string, error)       { return "N/A", nil }
+func (d *Driver) GetPrintSpeed() (string, error)            { return "N/A", nil }
+func (d *Driver) GetQueueCapacity(q string) (string, error) { return "N/A", nil }
 
 // ============================================================================
-// Вспомогательные методы
+// Вспомогательная логика интерполяции и сети
 // ============================================================================
 
-func (d *Driver) sendXMLRequest(url string, payload interface{}) error {
-	xmlData, err := xml.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("ошибка маршалинга XML: %w", err)
+func (d *Driver) renderTemplate(rawBody string, data map[string]interface{}) ([]byte, error) {
+	if rawBody == "" {
+		// Дефолтный фоллбэк, если шаблон из БД не был передан
+		rawBody = `<PrintRequest><Template>{{.TemplateName}}</Template><EventType>{{.EventType}}</EventType></PrintRequest>`
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(xmlData))
+	tmpl, err := template.New("ext_tpl").Parse(rawBody)
+	if err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func (d *Driver) sendPayload(payload []byte) error {
+	d.mu.RLock()
+	url := d.endpointURL
+	d.mu.RUnlock()
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(payload))
 	if err != nil {
 		return fmt.Errorf("ошибка создания HTTP-запроса: %w", err)
 	}
@@ -233,18 +239,15 @@ func (d *Driver) sendXMLRequest(url string, payload interface{}) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("внешний сервер вернул статус HTTP %d", resp.StatusCode)
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err == nil && len(bodyBytes) > 0 {
-		var sResp ServerResponse
-		if errUnmarshal := xml.Unmarshal(bodyBytes, &sResp); errUnmarshal == nil {
-			if sResp.Status == "error" || sResp.Error != "" {
-				return fmt.Errorf("ошибка Print Engine: %s", sResp.Error)
-			}
-		}
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ошибка внешнего сервера (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	return nil
+}
+
+func (d *Driver) GetTotalPrints() (int64, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return int64(d.lastPrintedIndex), nil
 }
