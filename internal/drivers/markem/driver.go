@@ -468,6 +468,38 @@ func (d *Driver) GetLastPrintedIndex() (int, error) {
 	return printedSinceStart, nil
 }
 
+// GetTotalPrints возвращает абсолютный аппаратный счетчик отпечатков (countTotalGood)
+func (d *Driver) GetTotalPrints() (int64, error) {
+	resp, err := d.sendSOAPWaitACK(`<RequestCounts act="{act}"/>`)
+	if err != nil {
+		return 0, fmt.Errorf("ошибка запроса RequestCounts: %w", err)
+	}
+
+	// Ищем блок <Total><StringID>countTotalGood</StringID><Value>(\d+)</Value>
+	reTotalGood := regexp.MustCompile(`<Total>\s*<StringID>countTotalGood</StringID>\s*<Value>(\d+)</Value>\s*</Total>`)
+	matches := reTotalGood.FindStringSubmatch(resp)
+	if len(matches) > 1 {
+		total, parseErr := strconv.ParseInt(matches[1], 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("ошибка парсинга countTotalGood (%s): %w", matches[1], parseErr)
+		}
+		return total, nil
+	}
+
+	// Запасной парсинг, если порядок тегов внутри <Total> инвертирован
+	reFallback := regexp.MustCompile(`<StringID>countTotalGood</StringID>\s*<Value>(\d+)</Value>`)
+	matchesFallback := reFallback.FindStringSubmatch(resp)
+	if len(matchesFallback) > 1 {
+		total, parseErr := strconv.ParseInt(matchesFallback[1], 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("ошибка парсинга countTotalGood: %w", parseErr)
+		}
+		return total, nil
+	}
+
+	return 0, fmt.Errorf("тег countTotalGood не найден в ответе принтера: %s", resp)
+}
+
 func (d *Driver) GetCurrentTemplate() (string, error) {
 	if d.curTemplate != "" {
 		return d.curTemplate, nil

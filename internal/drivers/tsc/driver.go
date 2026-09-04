@@ -280,3 +280,7 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	}
 	return d.CurTemplate, nil
 }
+
+func (d *Driver) GetTotalPrints() (int64, error) {
+	return 0, nil
+}

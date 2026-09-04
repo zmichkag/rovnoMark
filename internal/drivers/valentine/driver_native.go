@@ -26,6 +26,9 @@ func NewNativeDriver(ip string, port int) *NativeDriver {
 
 // Реализация интерфейса core.Printer (заглушки)
 
+func (d *NiceLabelDriver) GetTotalPrints() (int64, error) {
+	return int64(d.lastCount), nil
+}
 func (d *NativeDriver) GetStatus() (string, error) {
 	// TODO: Прямой опрос состояния ядра принтера
 	return "ГОТОВ", nil

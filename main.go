@@ -16,6 +16,7 @@ import (
 	"os"
 	"rovnoMark/internal/core"
 	"rovnoMark/internal/core/marking"
+	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
 	"sync"
 	"sync/atomic"
@@ -89,6 +90,8 @@ func main() {
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "markem" {
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
+		} else if cfg.DriverType == "ext_server" || cfg.DriverType == "nicelabel_http" {
+			manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
 		}
 	}
 
@@ -135,6 +138,48 @@ func main() {
 		slog.Error("Ошибка проверки активных задач при старте", "err", err)
 	}
 
+	// 3. API для дашборда (Мониторинг)
+	http.HandleFunc("/api/printers", func(w http.ResponseWriter, r *http.Request) {
+		states, logs := manager.GetDashboardData()
+		configs, _ := store.GetAllPrinters()
+		lines, _ := store.GetAllLines()
+		lineMap, _ := store.GetPrinterLineMap()
+
+		type PrinterInfo struct {
+			models.PrinterConfig
+			models.PrinterState
+		}
+		type LineGroup struct {
+			models.LineConfig
+			Printers []PrinterInfo `json:"printers"`
+		}
+
+		grouped := make(map[int][]PrinterInfo)
+		var allForUI []PrinterInfo
+		for _, cfg := range configs {
+			info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
+			allForUI = append(allForUI, info)
+			if lineID, ok := lineMap[cfg.ID]; ok {
+				grouped[lineID] = append(grouped[lineID], info)
+			}
+		}
+
+		var responseLines []LineGroup
+		for _, l := range lines {
+			responseLines = append(responseLines, LineGroup{
+				LineConfig: l,
+				Printers:   grouped[l.ID],
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"lines":        responseLines,
+			"all_printers": allForUI,
+			"logs":         logs,
+		})
+	})
+
 	// 2. API для добавления нового принтера
 	http.HandleFunc("/api/printers/add", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -161,6 +206,13 @@ func main() {
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		case "markem":
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
+		//case "ext_server", "nicelabel_http":
+		//	drv := extserver.New(cfg.IP, cfg.Port)
+		//	// Если в БД сохранена строка шаблона, передаем её в драйвер
+		//	if cfg.RawBody != "" {
+		//		drv.SetTemplateBody(cfg.RawBody)
+		//	}
+		//	manager.AddPrinter(cfg, drv)
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
@@ -249,48 +301,6 @@ func main() {
 			"count":  len(logs),
 			"filter": filter,
 			"items":  logs,
-		})
-	})
-
-	// 3. API для дашборда (Мониторинг)
-	http.HandleFunc("/api/printers", func(w http.ResponseWriter, r *http.Request) {
-		states, logs := manager.GetDashboardData()
-		configs, _ := store.GetAllPrinters()
-		lines, _ := store.GetAllLines()
-		lineMap, _ := store.GetPrinterLineMap()
-
-		type PrinterInfo struct {
-			models.PrinterConfig
-			models.PrinterState
-		}
-		type LineGroup struct {
-			models.LineConfig
-			Printers []PrinterInfo `json:"printers"`
-		}
-
-		grouped := make(map[int][]PrinterInfo)
-		var allForUI []PrinterInfo
-		for _, cfg := range configs {
-			info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
-			allForUI = append(allForUI, info)
-			if lineID, ok := lineMap[cfg.ID]; ok {
-				grouped[lineID] = append(grouped[lineID], info)
-			}
-		}
-
-		var responseLines []LineGroup
-		for _, l := range lines {
-			responseLines = append(responseLines, LineGroup{
-				LineConfig: l,
-				Printers:   grouped[l.ID],
-			})
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"lines":        responseLines,
-			"all_printers": allForUI,
-			"logs":         logs,
 		})
 	})
 
@@ -651,6 +661,35 @@ func main() {
 			}
 		}
 
+		// Фиксация стартовых одометров всех принтеров линии
+		for _, pCfg := range printersInLine {
+			p := manager.GetPrinter(pCfg.ID)
+			if p == nil {
+				continue
+			}
+
+			totalPrints, errTotal := p.GetTotalPrints()
+			if errTotal != nil {
+				slog.Warn("[TASK-CREATE] Не удалось получить стартовый одометр",
+					"printer", pCfg.Name,
+					"task_id", taskID,
+					"err", errTotal,
+				)
+				// Если счетчик не отдался, пишем -1, чтобы зафиксировать факт сбоя связи со счетчиком
+				totalPrints = -1
+			}
+
+			_ = store.RecordPrinterCounterSnapshot(int(taskID), lineID, pCfg.ID, "start", totalPrints)
+			_ = store.SaveEventLog(&lineID, &pCfg.ID, "info", fmt.Sprintf("СТАРТ ЗАДАЧИ #%d: одометр %s = %d", taskID, pCfg.Name, totalPrints))
+
+			slog.Info("Зафиксирован стартовый одометр",
+				"task_id", taskID,
+				"line_id", lineID,
+				"printer", pCfg.Name,
+				"counter", totalPrints,
+			)
+		}
+
 		// 8. СЕССИЯ ЖЕЛЕЗА ПОЛНОСТЬЮ ИНИЦИАЛИЗИРОВАНА!
 		// Открываем шлюз подкачки кодов для Pumper
 		if err := store.SetTaskStatus(int(taskID), models.TaskStateActive); err != nil {
@@ -828,18 +867,26 @@ func main() {
 					return
 				}
 
-				// Выполняем снятие остатков и очистку очереди с защитой по контексту
+				// Выполняем снятие остатков и очистку очереди в единой горутине
 				doneChan := make(chan struct{})
 				var lastIdx int
+				var finalTotal int64 = -1
 				var pollErr error
 
 				go func() {
-					// Получаем физический индекс и чистим очередь
+					defer close(doneChan)
+
+					// 1. Получаем индекс последней отпечатанной партии
 					lastIdx, pollErr = p.GetLastPrintedIndex()
-					if pollErr == nil {
-						_ = p.ClearQueue()
+					if pollErr != nil {
+						return
 					}
-					close(doneChan)
+
+					// 2. Снимаем абсолютный общий одометр на момент остановки
+					finalTotal, _ = p.GetTotalPrints()
+
+					// 3. Очищаем физическую очередь принтера
+					_ = p.ClearQueue()
 				}()
 
 				select {
@@ -856,7 +903,15 @@ func main() {
 						return
 					}
 
-					// Фиксируем подтвержденные данные в БД
+					// 4. Фиксируем одометр в task_printer_counters и event_log
+					if finalTotal >= 0 {
+						_ = store.RecordPrinterCounterSnapshot(taskID, lineID, cfg.ID, "stop", finalTotal)
+						_ = store.SaveEventLog(&lineID, &cfg.ID, "info", fmt.Sprintf("СТОП ЗАДАЧИ #%d: одометр %s = %d", taskID, cfg.Name, finalTotal))
+					} else {
+						slog.Warn("[STOP] Не удалось прочитать общий одометр", "printer", cfg.Name)
+					}
+
+					// 5. Фиксируем подтвержденные данные кодов в БД
 					affected, errMark := store.MarkAsPrinted(taskID, cfg.ID, lastIdx)
 					if errMark != nil {
 						slog.Error("[STOP] Ошибка обновления статусов кодов в БД", "task_id", taskID, "printer_id", cfg.ID, "err", errMark)
@@ -867,6 +922,7 @@ func main() {
 					report[cfg.Name] = map[string]interface{}{
 						"status":             "cleared",
 						"last_printed_index": lastIdx,
+						"total_prints":       finalTotal,
 						"confirmed_codes":    affected,
 					}
 					reportMu.Unlock()
