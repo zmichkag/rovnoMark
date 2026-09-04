@@ -90,7 +90,7 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	query := `SELECT id, name, ip, port, driver_type, COALESCE(raw_body, ''), is_active 
+	query := `SELECT id, name, ip, port, driver_type, is_active 
 	          FROM printers WHERE is_deleted = 0`
 	rows, err := s.db.Query(query)
 	if err != nil {
@@ -101,7 +101,7 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.RawBody, &p.IsActive); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
 			continue
 		}
 		list = append(list, p)
