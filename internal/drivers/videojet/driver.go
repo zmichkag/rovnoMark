@@ -158,40 +158,32 @@ func (d *Driver) ClearQueue() error {
 	return err
 }
 
-// GetBufferFreeSpace возвращает количество свободных слотов для записей (SGM - SRC)
+// GetBufferFreeSpace возвращает количество свободных слотов для записей
 func (d *Driver) GetBufferFreeSpace() (int, error) {
-	// 1. Узнаем лимит записей в буфере (SGM)
-	rawMax, err := d.sendRaw("SGM")
-	if err != nil {
-		return 0, fmt.Errorf("ошибка SGM: %v", err)
-	}
-	partsMax := strings.Split(rawMax, "|")
-	if len(partsMax) < 2 {
-		return 0, fmt.Errorf("неверный ответ SGM: %s", rawMax)
-	}
-	maxRecords, err := strconv.Atoi(strings.TrimSpace(partsMax[1]))
-	if err != nil {
-		return 0, fmt.Errorf("ошибка парсинга SGM: %v", err)
-	}
-
-	// 2. Узнаем, сколько записей уже лежит в буфере (SRC)
+	// SGM на Videojet константен (1000 записей). Запрашиваем только реальную очередь (SRC).
 	rawBusy, err := d.sendRaw("SRC")
 	if err != nil {
 		return 0, fmt.Errorf("ошибка SRC: %v", err)
 	}
-	partsBusy := strings.Split(rawBusy, "|")
-	if len(partsBusy) < 2 {
-		return 0, fmt.Errorf("неверный ответ SRC: %s", rawBusy)
+
+	parts := strings.Split(rawBusy, "|")
+	if len(parts) < 2 || parts[0] != "SRC" {
+		// Если прилетело не эхо команды SRC — сбрасываем сокет, чтобы вылечить десинхрон!
+		d.mu.Lock()
+		if d.conn != nil {
+			d.conn.Close()
+			d.conn = nil
+		}
+		d.mu.Unlock()
+		return 0, fmt.Errorf("десинхронизация сокета: ожидали SRC, получили %q", rawBusy)
 	}
-	busyRecords, err := strconv.Atoi(strings.TrimSpace(partsBusy[1]))
+
+	busyRecords, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 	if err != nil {
 		return 0, fmt.Errorf("ошибка парсинга SRC: %v", err)
 	}
 
-	// 3. Вычисляем свободное место (Слоты)
-	freeSpace := maxRecords - busyRecords
-
-	// Защита от отрицательных значений на всякий случай
+	freeSpace := 1000 - busyRecords
 	if freeSpace < 0 {
 		freeSpace = 0
 	}
