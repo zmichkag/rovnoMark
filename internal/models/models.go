@@ -9,6 +9,7 @@ type PrinterConfig struct {
 	IP         string `json:"ip"`
 	Port       int    `json:"port"`
 	DriverType string `json:"driver_type"`
+	Role       string `json:"role"`
 	IsActive   bool   `json:"is_active"`
 	IsDeleted  bool   `json:"is_deleted"`
 }
@@ -40,14 +41,21 @@ type LogEntry struct {
 	Event   string `json:"event"`
 }
 
-// TaskCode представляет одну единицу маркировки в базе данных
+// InboundCodeItem представляет универсальный элемент кода от 1С
+type InboundCodeItem struct {
+	Code  string `json:"code"`
+	ExtID string `json:"ext_id"`
+}
+
+// TaskCode представляет единицу маркировки в БД
 type TaskCode struct {
 	ID           int       `json:"id"`
 	TaskID       int       `json:"task_id"`
 	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
+	ExternalID   string    `json:"ext_id"`        // Идентификатор/порядковый номер из 1C (может быть пустым)
 	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'
-	PrinterIndex int       `json:"printer_index"` // Индекс SID от принтера
+	PrinterIndex int       `json:"printer_index"` // Индекс партии/пакета для принтера
 	PrintedAt    time.Time `json:"printed_at"`
 }
 

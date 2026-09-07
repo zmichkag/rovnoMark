@@ -62,6 +62,9 @@ func main() {
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
 	flag.Parse()
 
+	validateGS1 := flag.Bool("validate-gs1", false, "включить жесткую валидацию структуры GS1 DataMatrix кодов от 1С")
+	flag.Parse()
+
 	logLevel := new(slog.LevelVar)
 	if *debugMode {
 		logLevel.Set(slog.LevelDebug)
@@ -71,9 +74,9 @@ func main() {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
-	slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode)
+	slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode, "validate_gs1", *validateGS1)
 
-	store := storage.New("rovnoMark.db")
+	store := storage.New("./data")
 	manager := core.NewPrinterManager()
 	taskProcessor := &core.TaskProcessor{
 		Store:   store,
@@ -526,188 +529,6 @@ func main() {
 		json.NewEncoder(w).Encode(fields)
 	})
 
-	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
-			return
-		}
-
-		// 1. Валидация Query-параметра line_id
-		lineIDStr := r.URL.Query().Get("line_id")
-		lineID, err := strconv.Atoi(lineIDStr)
-		if err != nil || lineID <= 0 {
-			sendJSONError(w, http.StatusBadRequest, "Missing or invalid line_id parameter in URL")
-			return
-		}
-
-		// 2. Вычитывание и логирование сырого Body от 1С
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err != nil {
-			slog.Error("TASK-CREATE: Ошибка чтения Body от 1С", "err", err)
-			sendJSONError(w, http.StatusBadRequest, "Failed to read request body")
-			return
-		}
-
-		slog.Info("TASK-CREATE [RAW JSON FROM 1C]:",
-			"line_id", lineID,
-			"raw_body", string(bodyBytes),
-		)
-
-		// 3. Декодирование структуры из прочитанных байт
-		var req struct {
-			TemplateName     string            `json:"template_name"`
-			DynamicFieldName string            `json:"dynamic_field_name"`
-			StaticFields     map[string]string `json:"static_fields"`
-			RndText          string            `json:"rnd_text"`
-		}
-
-		if err := json.Unmarshal(bodyBytes, &req); err != nil {
-			slog.Warn("TASK-CREATE: Ошибка парсинга JSON от 1С", "raw", string(bodyBytes), "err", err)
-			sendJSONError(w, http.StatusBadRequest, "Invalid JSON structure")
-			return
-		}
-
-		// 4. Проверка состояния линии (активные задачи)
-		activeID, err := store.GetActiveTaskByLine(lineID)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
-			return
-		}
-		if activeID != 0 {
-			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", lineID, activeID))
-			return
-		}
-
-		// 5. Проверка наличия принтеров на линии
-		printersInLine, err := store.GetPrintersByLine(lineID)
-		if err != nil || len(printersInLine) == 0 {
-			sendJSONError(w, http.StatusNotFound, "Линия пуста или не найдена")
-			return
-		}
-
-		// 6. Первичная фиксация задачи в БД со статусом 'ready' (ШЛЮЗ ЗАКРЫТ, накачка кодами не возможна)
-		staticBytes, _ := json.Marshal(req.StaticFields)
-		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
-		if err != nil {
-			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при создании задачи: "+err.Error())
-			return
-		}
-
-		// 7. Handshake, проверка статусов и подготовка оборудования
-		badStatuses := []string{
-			"TIMEOUT", "INITIALIZING", "STARTING",
-			"ОФФЛАЙН", "OFFLINE", "ОШИБКА", "ERROR", "REFUSED",
-		}
-
-		for _, pCfg := range printersInLine {
-			p := manager.GetPrinter(pCfg.ID)
-			if p == nil {
-				_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
-				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s не зарегистрирован в системе или отключен", pCfg.Name))
-				return
-			}
-
-			status, err := p.GetStatus()
-			var checkString string
-			if err != nil {
-				checkString = strings.ToUpper(err.Error())
-			} else {
-				checkString = strings.ToUpper(status)
-			}
-
-			for _, bad := range badStatuses {
-				if strings.Contains(checkString, bad) {
-					slog.Warn("Принтер забракован перед стартом задачи", "printer", pCfg.Name, "detected_status", status, "err", err)
-					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
-					sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
-						"Принтер %s не готов к работе (Текущее состояние: %s). Проверьте питание, сеть или устраните ошибку на устройстве.",
-						pCfg.Name, status,
-					))
-					return
-				}
-			}
-
-			// Конфигурация печати в зависимости от режима (ЧЗ / Статика)
-			if req.DynamicFieldName == "" {
-				// Режим одиночной статической печати
-				p.ClearQueue()
-				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
-					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
-					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона на %s: %v", pCfg.Name, err))
-					return
-				}
-			} else {
-				// Режим сериализации (Честный ЗНАК)
-				var selectFields map[string]string
-				if pCfg.DriverType != "videojet" {
-					selectFields = req.StaticFields
-				}
-
-				if err := p.SelectTemplate(req.TemplateName, selectFields); err != nil {
-					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
-					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
-					return
-				}
-
-				// Готовим составную строку полей "dm_data0;date01;date02;text01"
-				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
-
-				// Единый вызов инициализации сессии
-				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
-					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
-					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии на %s: %v", pCfg.Name, err))
-					return
-				}
-			}
-		}
-
-		// Фиксация стартовых одометров всех принтеров линии
-		for _, pCfg := range printersInLine {
-			p := manager.GetPrinter(pCfg.ID)
-			if p == nil {
-				continue
-			}
-
-			totalPrints, errTotal := p.GetTotalPrints()
-			if errTotal != nil {
-				slog.Warn("[TASK-CREATE] Не удалось получить стартовый одометр",
-					"printer", pCfg.Name,
-					"task_id", taskID,
-					"err", errTotal,
-				)
-				// Если счетчик не отдался, пишем -1, чтобы зафиксировать факт сбоя связи со счетчиком
-				totalPrints = -1
-			}
-
-			_ = store.RecordPrinterCounterSnapshot(int(taskID), lineID, pCfg.ID, "start", totalPrints)
-			_ = store.SaveEventLog(&lineID, &pCfg.ID, "info", fmt.Sprintf("СТАРТ ЗАДАЧИ #%d: одометр %s = %d", taskID, pCfg.Name, totalPrints))
-
-			slog.Info("Зафиксирован стартовый одометр",
-				"task_id", taskID,
-				"line_id", lineID,
-				"printer", pCfg.Name,
-				"counter", totalPrints,
-			)
-		}
-
-		// 8. СЕССИЯ ЖЕЛЕЗА ПОЛНОСТЬЮ ИНИЦИАЛИЗИРОВАНА!
-		// Открываем шлюз подкачки кодов для Pumper
-		if err := store.SetTaskStatus(int(taskID), models.TaskStateActive); err != nil {
-			slog.Error("TASK-CREATE: Не удалось перевести задачу в active", "task_id", taskID, "err", err)
-		}
-
-		slog.Info("TASK-CREATE: Железо полностью готово, шлюз для Pumper открыт", "task_id", taskID)
-
-		// 9. Ответ для 1С
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "ready",
-			"task_id":  taskID,
-			"rnd_text": req.RndText,
-		})
-	})
-
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
@@ -721,51 +542,79 @@ func main() {
 			return
 		}
 
-		var req struct {
-			Codes []string `json:"codes"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			slog.Warn("Append: ошибка JSON", "err", err)
-			sendJSONError(w, http.StatusBadRequest, "Ошибка в теле JSON")
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			slog.Error("Append: ошибка чтения тела запроса", "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Failed to read request body")
 			return
 		}
 
-		if len(req.Codes) == 0 {
+		var rawReq struct {
+			Codes []json.RawMessage `json:"codes"`
+		}
+
+		if err := json.Unmarshal(bodyBytes, &rawReq); err != nil {
+			slog.Warn("Append: ошибка JSON", "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Ошибка в структуре JSON")
+			return
+		}
+
+		if len(rawReq.Codes) == 0 {
 			sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
 			return
 		}
 
-		// ВАЛИДАЦИЯ И НОРМАЛИЗАЦИЯ КОДОВ МАРКИРОВКИ GS1
-		for i, rawCode := range req.Codes {
-			parsedMark, err := marking.ParseAndValidateShortGS1(rawCode)
-			if err != nil {
-				slog.Warn("Append: забракован невалидный код от 1С",
-					"task_id", taskID,
-					"index", i,
-					"raw_code", rawCode,
-					"err", err,
-				)
-				sendJSONError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
-					"Ошибка валидации кода маркировки на индексе %d: %v (значение: %s)",
-					i, err, rawCode,
-				))
-				return
+		inboundItems := make([]models.InboundCodeItem, 0, len(rawReq.Codes))
+
+		for i, rawItem := range rawReq.Codes {
+			var item models.InboundCodeItem
+
+			// Поддержка простого массива строк и массива объектов {code, ext_id}
+			var simpleCode string
+			if errStr := json.Unmarshal(rawItem, &simpleCode); errStr == nil {
+				item.Code = simpleCode
+				item.ExtID = ""
+			} else {
+				if errObj := json.Unmarshal(rawItem, &item); errObj != nil {
+					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Неверный формат элемента на индексе %d", i))
+					return
+				}
 			}
-			req.Codes[i] = parsedMark.ToDBFormat()
+
+			// ОПЦИОНАЛЬНАЯ ВАЛИДАЦИЯ КОДОВ МАРКИРОВКИ GS1
+			if *validateGS1 {
+				parsedMark, errVal := marking.ParseAndValidateShortGS1(item.Code)
+				if errVal != nil {
+					slog.Warn("Append: забракован невалидный код от 1С (валидация активна)",
+						"task_id", taskID,
+						"index", i,
+						"ext_id", item.ExtID,
+						"raw_code", item.Code,
+						"err", errVal,
+					)
+					sendJSONError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
+						"Ошибка валидации кода маркировки на индексе %d (ext_id: %s): %v (значение: %s)",
+						i, item.ExtID, errVal, item.Code,
+					))
+					return
+				}
+				item.Code = parsedMark.ToDBFormat()
+			} else {
+				// Без валидации: только трим пробельных символов
+				item.Code = strings.TrimSpace(item.Code)
+			}
+
+			inboundItems = append(inboundItems, item)
 		}
 
-		slog.Info("[APPEND-DIAG] Все коды прошeли валидацию GS1 и подготовлены к записи", "task_id", taskID, "count", len(req.Codes))
-
-		// Сохранение проверенных кодов в БД SQLite
-		err = store.AppendTaskCodes(taskID, req.Codes)
+		// Сохранение кодов в БД SQLite
+		err = store.AppendTaskCodes(taskID, inboundItems)
 		if err != nil {
 			slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
 			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 			return
 		}
 
-		// 🟢 ВОТ НАШ ОБНОВЛЕННЫЙ БЛОК ГАРАНТИРОВАННОГО СТАРТА PUMPER
 		_ = store.SetTaskStatus(taskID, models.TaskStateActive)
 
 		lineID, err := store.GetLineIDByTask(taskID)
@@ -779,9 +628,10 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":         "received",
-			"count":          len(req.Codes),
+			"count":          len(inboundItems),
 			"pumper_started": true,
 			"rnd_text":       rndText,
+			"gs1_validated":  *validateGS1,
 		})
 	})
 
