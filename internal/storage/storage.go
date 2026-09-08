@@ -198,15 +198,19 @@ func createCodesTables(db *sql.DB) {
 		status TEXT DEFAULT 'pending',
 		printer_id INTEGER,           
 		printer_index INTEGER,          
-		printed_at DATETIME
+		printed_at DATETIME,
+		CONSTRAINT unq_task_code UNIQUE (task_id, code)
 	);`)
 
-	// Частичный индекс: ускоряет Pumper в сотни раз
+	// Уникальный индекс гарантирует отсечение дублей от 1С на уровне B-Tree
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_codes_unique_code 
+		ON task_codes(task_id, code);`)
+
+	// Частичный индекс для Pumper
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_active_queue 
 		ON task_codes(task_id, printer_id, printer_index) 
 		WHERE status IN ('pending', 'in_buffer');`)
 
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_code ON task_codes(code);`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_status ON task_codes(task_id, status);`)
 }
 

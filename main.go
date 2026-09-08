@@ -60,10 +60,8 @@ func sendJSONError(w http.ResponseWriter, code int, msg string) {
 func main() {
 	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
-	flag.Parse()
-
 	validateGS1 := flag.Bool("validate-gs1", false, "включить жесткую валидацию структуры GS1 DataMatrix кодов от 1С")
-	flag.Parse()
+	flag.Parse() // Вызываем ровно один раз после объявления всех флагов!
 
 	logLevel := new(slog.LevelVar)
 	if *debugMode {
@@ -527,6 +525,186 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(fields)
+	})
+
+	http.HandleFunc("/api/task/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
+			return
+		}
+
+		// 1. Валидация Query-параметра line_id
+		lineIDStr := r.URL.Query().Get("line_id")
+		lineID, err := strconv.Atoi(lineIDStr)
+		if err != nil || lineID <= 0 {
+			sendJSONError(w, http.StatusBadRequest, "Missing or invalid line_id parameter in URL")
+			return
+		}
+
+		// 2. Вычитывание и логирование сырого Body от 1С
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			slog.Error("TASK-CREATE: Ошибка чтения Body от 1С", "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+
+		slog.Info("TASK-CREATE [RAW JSON FROM 1C]:",
+			"line_id", lineID,
+			"raw_body", string(bodyBytes),
+		)
+
+		// 3. Декодирование структуры из прочитанных байт
+		var req struct {
+			TemplateName     string            `json:"template_name"`
+			DynamicFieldName string            `json:"dynamic_field_name"`
+			StaticFields     map[string]string `json:"static_fields"`
+			RndText          string            `json:"rnd_text"`
+		}
+
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			slog.Warn("TASK-CREATE: Ошибка парсинга JSON от 1С", "raw", string(bodyBytes), "err", err)
+			sendJSONError(w, http.StatusBadRequest, "Invalid JSON structure")
+			return
+		}
+
+		// 4. Проверка состояния линии (активные задачи)
+		activeID, err := store.GetActiveTaskByLine(lineID)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка проверки занятости линии")
+			return
+		}
+		if activeID != 0 {
+			sendJSONError(w, http.StatusConflict, fmt.Sprintf("Линия %d уже занята задачей %d. Сначала остановите её.", lineID, activeID))
+			return
+		}
+
+		// 5. Проверка наличия принтеров на линии
+		printersInLine, err := store.GetPrintersByLine(lineID)
+		if err != nil || len(printersInLine) == 0 {
+			sendJSONError(w, http.StatusNotFound, "Линия пуста или не найдена")
+			return
+		}
+
+		// 6. Первичная фиксация задачи в БД со статусом 'ready'
+		staticBytes, _ := json.Marshal(req.StaticFields)
+		taskID, err := store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
+		if err != nil {
+			sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при создании задачи: "+err.Error())
+			return
+		}
+
+		// 7. Handshake, проверка статусов и подготовка оборудования
+		badStatuses := []string{
+			"TIMEOUT", "INITIALIZING", "STARTING",
+			"ОФФЛАЙН", "OFFLINE", "ОШИБКА", "ERROR", "REFUSED",
+		}
+
+		for _, pCfg := range printersInLine {
+			p := manager.GetPrinter(pCfg.ID)
+			if p == nil {
+				_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
+				sendJSONError(w, http.StatusConflict, fmt.Sprintf("Принтер %s не зарегистрирован в системе или отключен", pCfg.Name))
+				return
+			}
+
+			status, err := p.GetStatus()
+			var checkString string
+			if err != nil {
+				checkString = strings.ToUpper(err.Error())
+			} else {
+				checkString = strings.ToUpper(status)
+			}
+
+			for _, bad := range badStatuses {
+				if strings.Contains(checkString, bad) {
+					slog.Warn("Принтер забракован перед стартом задачи", "printer", pCfg.Name, "detected_status", status, "err", err)
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
+					sendJSONError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+						"Принтер %s не готов к работе (Текущее состояние: %s). Проверьте питание, сеть или устраните ошибку на устройстве.",
+						pCfg.Name, status,
+					))
+					return
+				}
+			}
+
+			// Конфигурация печати в зависимости от режима (ЧЗ / Статика)
+			if req.DynamicFieldName == "" {
+				// Режим одиночной статической печати
+				p.ClearQueue()
+				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона на %s: %v", pCfg.Name, err))
+					return
+				}
+			} else {
+				// Режим сериализации (Честный ЗНАК)
+				var selectFields map[string]string
+				if pCfg.DriverType != "videojet" {
+					selectFields = req.StaticFields
+				}
+
+				if err := p.SelectTemplate(req.TemplateName, selectFields); err != nil {
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
+					return
+				}
+
+				// Готовим составную строку полей
+				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
+
+				// Единый вызов инициализации сессии железа
+				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
+					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
+					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии на %s: %v", pCfg.Name, err))
+					return
+				}
+			}
+		}
+
+		// 8. Фиксация стартовых одометров всех принтеров линии
+		for _, pCfg := range printersInLine {
+			p := manager.GetPrinter(pCfg.ID)
+			if p == nil {
+				continue
+			}
+
+			totalPrints, errTotal := p.GetTotalPrints()
+			if errTotal != nil {
+				slog.Warn("[TASK-CREATE] Не удалось получить стартовый одометр",
+					"printer", pCfg.Name,
+					"task_id", taskID,
+					"err", errTotal,
+				)
+				totalPrints = -1
+			}
+
+			_ = store.RecordPrinterCounterSnapshot(int(taskID), lineID, pCfg.ID, "start", totalPrints)
+			_ = store.SaveEventLog(&lineID, &pCfg.ID, "info", fmt.Sprintf("СТАРТ ЗАДАЧИ #%d: одометр %s = %d", taskID, pCfg.Name, totalPrints))
+
+			slog.Info("Зафиксирован стартовый одометр",
+				"task_id", taskID,
+				"line_id", lineID,
+				"printer", pCfg.Name,
+				"counter", totalPrints,
+			)
+		}
+
+		// 9. Сессия железа полностью инициализирована: переводим в active
+		if err := store.SetTaskStatus(int(taskID), models.TaskStateActive); err != nil {
+			slog.Error("TASK-CREATE: Не удалось перевести задачу в active", "task_id", taskID, "err", err)
+		}
+
+		slog.Info("TASK-CREATE: Железо полностью готово, шлюз для Pumper открыт", "task_id", taskID)
+
+		// 10. Ответ для 1С
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "ready",
+			"task_id":  taskID,
+			"rnd_text": req.RndText,
+		})
 	})
 
 	http.HandleFunc("/api/task/append", func(w http.ResponseWriter, r *http.Request) {
