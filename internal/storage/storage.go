@@ -18,16 +18,17 @@ import (
 )
 
 type Store struct {
-	db       *sql.DB      // Master DB (метаданные, задачи, линии)
-	codesMu  sync.RWMutex // Защита дескриптора активного шарда кодов
-	codesDB  *sql.DB      // Активный месячный шард для task_codes
-	curMonth string       // YYYY_MM текущего активного шарда
-	dataDir  string       // Папка для хранения файлов баз
+	db       *sql.DB
+	codesMu  sync.RWMutex
+	codesDB  *sql.DB
+	curMonth string
+	dataDir  string
 }
 
-// ============================================================================
-// 1. Инициализация и ротация хранилища
-// ============================================================================
+const (
+	TargetMasterSchemaVersion = 1
+	TargetCodesSchemaVersion  = 1
+)
 
 func New(baseDir string) *Store {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
@@ -46,10 +47,9 @@ func New(baseDir string) *Store {
 	db.Exec("PRAGMA synchronous = NORMAL;")
 	db.Exec("PRAGMA foreign_keys = ON;")
 
-	createMasterTables(db)
-
-	addColumnIfNotExists(db, "tasks", "rnd_text", "TEXT DEFAULT ''")
-	addColumnIfNotExists(db, "printers", "raw_body", "TEXT DEFAULT ''")
+	if err := MigrateMaster(db); err != nil {
+		log.Fatalf("Критическая ошибка миграции Master БД: %v", err)
+	}
 
 	store := &Store{
 		db:      db,
@@ -85,7 +85,8 @@ func (s *Store) rotateCodesDBIfNeeded() {
 	}
 
 	if s.codesDB != nil {
-		slog.Info("Ротация хранилища кодов: закрываем шард", "prev_month", s.curMonth)
+		slog.Info("Ротация хранилища кодов: контрольная точка и закрытие", "prev_month", s.curMonth)
+		_, _ = s.codesDB.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		_ = s.codesDB.Close()
 	}
 
@@ -104,142 +105,218 @@ func (s *Store) rotateCodesDBIfNeeded() {
 	shardDB.Exec("PRAGMA wal_autocheckpoint = 4000;")
 	shardDB.Exec("PRAGMA mmap_size = 1073741824;")
 
-	createCodesTables(shardDB)
-	addColumnIfNotExists(shardDB, "task_codes", "ext_id", "TEXT DEFAULT ''")
+	if err := MigrateCodesShard(shardDB); err != nil {
+		log.Fatalf("Критическая ошибка миграции шарда кодов %s: %v", shardPath, err)
+	}
 
 	s.codesDB = shardDB
 	s.curMonth = monthKey
 	slog.Info("Активный шард кодов подключен", "month", monthKey, "path", shardPath)
 }
 
-// ============================================================================
-// 2. Схемы таблиц и вспомогательные функции
-// ============================================================================
-
-func createMasterTables(db *sql.DB) {
-	db.Exec(`CREATE TABLE IF NOT EXISTS lines (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT NOT NULL,
-		description TEXT,
-		is_active BOOLEAN DEFAULT 1,
-		is_deleted BOOLEAN DEFAULT 0
-	);`)
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS printers (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT NOT NULL,
-		ip TEXT NOT NULL,
-		port INTEGER,
-		driver_type TEXT,
-		raw_body TEXT DEFAULT '',
-		is_active BOOLEAN DEFAULT 1,
-		is_deleted BOOLEAN DEFAULT 0
-	);`)
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS line_printers (
-		line_id INTEGER,
-		printer_id INTEGER,
-		role TEXT,
-		PRIMARY KEY (line_id, printer_id)
-	);`)
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS event_log (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-		line_id INTEGER,
-		printer_id INTEGER,
-		event_type TEXT,
-		message TEXT
-	);`)
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		line_id INTEGER,
-		template_name TEXT,
-		dynamic_field_name TEXT,
-		rnd_text TEXT, 
-		status TEXT DEFAULT 'active',
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		static_fields_json TEXT
-	);`)
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS task_printer_counters (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id INTEGER NOT NULL,
-		line_id INTEGER NOT NULL,
-		printer_id INTEGER NOT NULL,
-		event_type TEXT NOT NULL,
-		counter_value INTEGER NOT NULL,
-		recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);`)
-
-	db.Exec(`CREATE TABLE IF NOT EXISTS printer_telemetry (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-		printer_id INTEGER,
-		cur_count TEXT,
-		ribbon TEXT,
-		status TEXT,
-		template TEXT
-	);`)
-
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_telemetry_time ON printer_telemetry(timestamp);`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_event_log_composite ON event_log(line_id, event_type, timestamp);`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer ON task_printer_counters(task_id, printer_id);`)
-}
-
-func createCodesTables(db *sql.DB) {
-	db.Exec(`CREATE TABLE IF NOT EXISTS task_codes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		task_id INTEGER,
-		code TEXT NOT NULL,
-		ext_id TEXT DEFAULT '',
-		status TEXT DEFAULT 'pending',
-		printer_id INTEGER,           
-		printer_index INTEGER,          
-		printed_at DATETIME,
-		CONSTRAINT unq_task_code UNIQUE (task_id, code)
-	);`)
-
-	// Уникальный индекс гарантирует отсечение дублей от 1С на уровне B-Tree
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_codes_unique_code 
-		ON task_codes(task_id, code);`)
-
-	// Частичный индекс для Pumper
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_active_queue 
-		ON task_codes(task_id, printer_id, printer_index) 
-		WHERE status IN ('pending', 'in_buffer');`)
-
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_codes_status ON task_codes(task_id, status);`)
-}
-
-func addColumnIfNotExists(db *sql.DB, tableName, columnName, colType string) {
-	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
-	rows, err := db.Query(query)
-	if err != nil {
-		return
+func MigrateMaster(db *sql.DB) error {
+	var currentVersion int
+	if err := db.QueryRow("PRAGMA user_version;").Scan(&currentVersion); err != nil {
+		return fmt.Errorf("ошибка чтения PRAGMA user_version Master БД: %w", err)
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dfltValue interface{}
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil {
-			if strings.EqualFold(name, columnName) {
-				return
-			}
+	if currentVersion >= TargetMasterSchemaVersion {
+		slog.Debug("Схема Master БД актуальна", "user_version", currentVersion)
+		return nil
+	}
+
+	slog.Info("Обновление схемы Master БД", "from", currentVersion, "target", TargetMasterSchemaVersion)
+
+	migrations := map[int]string{
+		1: `
+		CREATE TABLE IF NOT EXISTS lines (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			description TEXT,
+			is_active BOOLEAN DEFAULT 1,
+			is_deleted BOOLEAN DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS printers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			port INTEGER,
+			driver_type TEXT,
+			raw_body TEXT DEFAULT '',
+			is_active BOOLEAN DEFAULT 1,
+			is_deleted BOOLEAN DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS line_printers (
+			line_id INTEGER,
+			printer_id INTEGER,
+			role TEXT,
+			PRIMARY KEY (line_id, printer_id)
+		);
+
+		CREATE TABLE IF NOT EXISTS event_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			line_id INTEGER,
+			printer_id INTEGER,
+			event_type TEXT,
+			message TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			line_id INTEGER,
+			template_name TEXT,
+			dynamic_field_name TEXT,
+			rnd_text TEXT DEFAULT '', 
+			status TEXT DEFAULT 'active',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			static_fields_json TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS task_printer_counters (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL,
+			line_id INTEGER NOT NULL,
+			printer_id INTEGER NOT NULL,
+			event_type TEXT NOT NULL,
+			counter_value INTEGER NOT NULL,
+			recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS printer_telemetry (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			printer_id INTEGER,
+			cur_count TEXT,
+			ribbon TEXT,
+			status TEXT,
+			template TEXT
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_telemetry_time ON printer_telemetry(timestamp);
+		CREATE INDEX IF NOT EXISTS idx_event_log_composite ON event_log(line_id, event_type, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer ON task_printer_counters(task_id, printer_id);
+		`,
+	}
+
+	for v := currentVersion + 1; v <= TargetMasterSchemaVersion; v++ {
+		sqlStep, ok := migrations[v]
+		if !ok {
+			return fmt.Errorf("отсутствует DDL для Master версии %d", v)
 		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("ошибка открытия транзакции миграции Master v%d: %w", v, err)
+		}
+
+		if _, err := tx.Exec(sqlStep); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("сбой применения миграции Master v%d: %w", v, err)
+		}
+
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d;", v)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("сбой фиксации Master user_version=%d: %w", v, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("ошибка коммита миграции Master v%d: %w", v, err)
+		}
+		slog.Info("Успешно применена миграция Master БД", "version", v)
 	}
 
-	alterQuery := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, colType)
-	_, _ = db.Exec(alterQuery)
+	return nil
 }
 
-// ============================================================================
-// 3. Боевая работа с кодами (Месячный шард)
-// ============================================================================
+func MigrateCodesShard(db *sql.DB) error {
+	var currentVersion int
+	if err := db.QueryRow("PRAGMA user_version;").Scan(&currentVersion); err != nil {
+		return fmt.Errorf("ошибка чтения PRAGMA user_version шарда кодов: %w", err)
+	}
+
+	if currentVersion >= TargetCodesSchemaVersion {
+		slog.Debug("Схема шарда кодов актуальна", "user_version", currentVersion)
+		return nil
+	}
+
+	slog.Info("Обновление схемы шарда кодов", "from", currentVersion, "target", TargetCodesSchemaVersion)
+
+	migrations := map[int]string{
+		1: `
+		CREATE TABLE IF NOT EXISTS task_codes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER,
+			code TEXT NOT NULL,
+			ext_id TEXT DEFAULT '',
+			status TEXT DEFAULT 'pending',
+			printer_id INTEGER,           
+			printer_index INTEGER,          
+			printed_at DATETIME,
+			CONSTRAINT unq_task_code UNIQUE (task_id, code)
+		);
+
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_task_codes_unique_code 
+			ON task_codes(task_id, code);
+
+		CREATE INDEX IF NOT EXISTS idx_task_codes_active_queue 
+			ON task_codes(task_id, printer_id, printer_index) 
+			WHERE status IN ('pending', 'in_buffer');
+
+		CREATE INDEX IF NOT EXISTS idx_task_codes_status 
+			ON task_codes(task_id, status);
+		`,
+	}
+
+	for v := currentVersion + 1; v <= TargetCodesSchemaVersion; v++ {
+		sqlStep, ok := migrations[v]
+		if !ok {
+			return fmt.Errorf("отсутствует DDL для шарда кодов версии %d", v)
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("ошибка открытия транзакции миграции шарда v%d: %w", v, err)
+		}
+
+		if _, err := tx.Exec(sqlStep); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("сбой применения миграции шарда v%d: %w", v, err)
+		}
+
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d;", v)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("сбой фиксации user_version=%d шарда: %w", v, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("ошибка коммита миграции шарда v%d: %w", v, err)
+		}
+		slog.Info("Успешно применена миграция шарда кодов", "version", v)
+	}
+
+	return nil
+}
+
+func (s *Store) Close() error {
+	s.codesMu.Lock()
+	if s.codesDB != nil {
+		_, _ = s.codesDB.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+		_ = s.codesDB.Close()
+		s.codesDB = nil
+	}
+	s.codesMu.Unlock()
+
+	if s.db != nil {
+		_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+		err := s.db.Close()
+		s.db = nil
+		return err
+	}
+	return nil
+}
 
 func (s *Store) AppendTaskCodes(taskID int, items []models.InboundCodeItem) error {
 	db := s.getCodesDB()
@@ -265,7 +342,6 @@ func (s *Store) AppendTaskCodes(taskID int, items []models.InboundCodeItem) erro
 	return tx.Commit()
 }
 
-// FetchAndAssignCodesAlternating выбирает коды строго под чётность роли принтера
 func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role string, limit int) ([]models.TaskCode, error) {
 	db := s.getCodesDB()
 	tx, err := db.Begin()
@@ -274,19 +350,16 @@ func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role s
 	}
 	defer tx.Rollback()
 
-	// 1. Определяем требуемый остаток от деления (0 для чётных, 1 для нечётных)
-	targetModulo := 1 // ODD / PRIMARY по умолчанию
+	targetModulo := 1
 	uRole := strings.ToUpper(strings.TrimSpace(role))
 	if uRole == "EVEN" || uRole == "SECONDARY" || uRole == "LANE_2" {
 		targetModulo = 0
 	}
 
-	// 2. Получаем последний индекс конкретного принтера
 	var lastIndex int
 	tx.QueryRow(`SELECT COALESCE(MAX(printer_index), 0) FROM task_codes 
 	             WHERE task_id = ? AND printer_id = ?`, taskID, printerID).Scan(&lastIndex)
 
-	// 3. Выборка кодов:
 	query := `
 		SELECT id, code, COALESCE(ext_id, '') 
 		FROM task_codes 
@@ -321,8 +394,6 @@ func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role s
 		return nil, nil
 	}
 
-	// 4. Фиксируем захват кодов принтером.
-	// ext_id НЕ ТРОГАЕМ: если 1С прислала пустоту, оставляем пустоту!
 	stmtUpdate, err := tx.Prepare(`
 		UPDATE task_codes 
 		SET printer_id = ?, 
@@ -338,7 +409,6 @@ func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role s
 		nextIdx := lastIndex + 1 + i
 		list[i].PrinterIndex = nextIdx
 
-		// Обновляем только привязку к принтеру, его очередь и статус
 		if _, errExec := stmtUpdate.Exec(printerID, nextIdx, list[i].ID); errExec != nil {
 			return nil, errExec
 		}
@@ -347,7 +417,6 @@ func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role s
 	return list, tx.Commit()
 }
 
-// FetchAndAssignCodes — базовый метод раздачи (без разделения на чет/нечет)
 func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]models.TaskCode, error) {
 	db := s.getCodesDB()
 	tx, err := db.Begin()
@@ -507,10 +576,6 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 	}, nil
 }
 
-// ============================================================================
-// 4. Методы Master DB (Задачи, линии, лог, телеметрия)
-// ============================================================================
-
 func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string, rndText string) (int64, error) {
 	res, err := s.db.Exec(`
 		INSERT INTO tasks (line_id, template_name, dynamic_field_name, static_fields_json, rnd_text, status) 
@@ -613,7 +678,6 @@ func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		// Сканируем все 6 колонок, включая Role:
 		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.Role); err != nil {
 			slog.Error("GetPrintersByLine scan error", "err", err)
 			continue
