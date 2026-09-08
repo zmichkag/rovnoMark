@@ -96,7 +96,7 @@ func main() {
 		}
 	}
 
-	//go manager.BackgroundPoller(store)
+	go manager.BackgroundPoller(store)
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
 	// АВТОЗАПУСК НАСОСОВ
