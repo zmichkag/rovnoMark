@@ -201,9 +201,17 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 					targetLoad = 30
 				}
 
+				var pending []models.TaskCode
+				var assignErr error
+
 				// Выборка с учетом четности роли конкретного принтера
-				pending, err := tp.Store.FetchAndAssignCodesAlternating(taskID, pCfg.ID, pCfg.Role, targetLoad)
-				if err != nil || len(pending) == 0 {
+				if len(printers) == 1 {
+					pending, assignErr = tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
+				} else {
+					pending, assignErr = tp.Store.FetchAndAssignCodesAlternating(taskID, pCfg.ID, pCfg.Role, targetLoad)
+				}
+
+				if assignErr != nil || len(pending) == 0 {
 					continue
 				}
 
