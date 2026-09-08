@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"rovnoMark/internal/models"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -322,30 +321,25 @@ func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role s
 		return nil, nil
 	}
 
-	// 4. Фиксируем захват кодов принтером и генерируем ext_id, если 1С его не прислала
+	// 4. Фиксируем захват кодов принтером.
+	// ext_id НЕ ТРОГАЕМ: если 1С прислала пустоту, оставляем пустоту!
 	stmtUpdate, err := tx.Prepare(`
 		UPDATE task_codes 
 		SET printer_id = ?, 
-		    printer_index = ?, 
-		    status = 'in_buffer',
-		    ext_id = CASE WHEN ext_id = '' THEN ? ELSE ext_id END
+			printer_index = ?, 
+			status = 'in_buffer'
 		WHERE id = ?`)
 	if err != nil {
 		return nil, err
 	}
 	defer stmtUpdate.Close()
 
-	for i, tc := range list {
+	for i := range list {
 		nextIdx := lastIndex + 1 + i
 		list[i].PrinterIndex = nextIdx
 
-		fallbackExtID := tc.ExternalID
-		if fallbackExtID == "" {
-			fallbackExtID = strconv.Itoa(tc.ID)
-			list[i].ExternalID = fallbackExtID
-		}
-
-		if _, errExec := stmtUpdate.Exec(printerID, nextIdx, fallbackExtID, tc.ID); errExec != nil {
+		// Обновляем только привязку к принтеру, его очередь и статус
+		if _, errExec := stmtUpdate.Exec(printerID, nextIdx, list[i].ID); errExec != nil {
 			return nil, errExec
 		}
 	}
