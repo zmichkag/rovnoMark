@@ -1,9 +1,9 @@
-# docker-compose.yml
 services:
   rovnomark:
     build: .
     container_name: rovnomark-app-test
-    command: ["/bin/marking-service", "--port", "8000", "--debug"]
+    # Флаги можно передавать прямо здесь или оставить дефолты из CMD
+    command: ["/bin/marking-service", "--port", "8000", "--debug", "--data-dir", "/app/data"]
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -11,7 +11,7 @@ services:
       - TZ=Europe/Moscow
     volumes:
       - ./data:/app/data
-      # МОНТИРУЕМ ПАПКУ ИНТЕРФЕЙСА:
+      # Если нужно монтировать кастомный UI:
       - ./ui2:/app/ui2
     logging:
       driver: "json-file"

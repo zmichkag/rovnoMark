@@ -61,7 +61,10 @@ func main() {
 	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
 	validateGS1 := flag.Bool("validate-gs1", false, "включить жесткую валидацию структуры GS1 DataMatrix кодов от 1С")
-	flag.Parse() // Вызываем ровно один раз после объявления всех флагов!
+	// ДОБАВЛЯЕМ ЭТОТ ФЛАГ:
+	dataDir := flag.String("data-dir", "./data", "путь к директории с базами данных SQLite")
+
+	flag.Parse()
 
 	logLevel := new(slog.LevelVar)
 	if *debugMode {
@@ -74,7 +77,7 @@ func main() {
 
 	slog.Info("Запуск сервиса РОВНО", "port", *port, "debug", *debugMode, "validate_gs1", *validateGS1)
 
-	store := storage.New("./data")
+	store := storage.New(*dataDir)
 	manager := core.NewPrinterManager()
 	taskProcessor := &core.TaskProcessor{
 		Store:   store,
