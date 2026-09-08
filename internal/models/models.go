@@ -13,7 +13,7 @@ type PrinterConfig struct {
 	IP         string `json:"ip"`
 	Port       int    `json:"port"`
 	DriverType string `json:"driver_type"`
-	Role       string `json:"role"` // PRIMARY, SECONDARY, ODD, EVEN, LANE_1, LANE_2[cite: 2, 3]
+	Role       string `json:"role"`
 	IsActive   bool   `json:"is_active"`
 	IsDeleted  bool   `json:"is_deleted"`
 }
