@@ -267,18 +267,32 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ------------------------------------------------------------------
+	// ШАГ 1: МГНОВЕННО ОТСЕКАЕМ НАСОСЫ (PUMPER)
+	// ------------------------------------------------------------------
 	if err := s.store.SetTaskStatus(taskID, models.TaskStateStopped); err != nil {
-		sendJSONError(w, http.StatusInternalServerError, "Ошибка при сохранении статуса задачи")
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка при сохранении статуса задачи: "+err.Error())
 		return
 	}
 
-	printers, _ := s.store.GetPrintersByLine(lineID)
+	slog.Info("[STOP] Статус задачи изменен на 'stopped'. Опрос и сведение баланса линии...",
+		"task_id", taskID, "line_id", lineID)
+
+	// ------------------------------------------------------------------
+	// ШАГ 2: ПАРАЛЛЕЛЬНЫЙ ОПРОС ОДОМЕТРОВ, СВЕРКА В БД И СБРОС БУФЕРОВ
+	// ------------------------------------------------------------------
+	printers, err := s.store.GetPrintersByLine(lineID)
+	if err != nil {
+		slog.Error("[STOP] Ошибка получения принтеров линии", "line_id", lineID, "err", err)
+	}
+
 	report := make(map[string]interface{})
 	var reportMu sync.Mutex
-	var totalConfirmed int64 = 0
+	var totalReturnedCodes int64 = 0
 	var printerErrors []string
 	var wg sync.WaitGroup
 
+	// Таймаут на физический опрос всех железок — максимум 3 секунды
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
@@ -291,7 +305,7 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 			if p == nil {
 				reportMu.Lock()
 				report[cfg.Name] = map[string]interface{}{"status": "offline_skipped"}
-				printerErrors = append(printerErrors, fmt.Sprintf("принтер %s оффлайн", cfg.Name))
+				printerErrors = append(printerErrors, fmt.Sprintf("принтер %s отключен от менеджера", cfg.Name))
 				reportMu.Unlock()
 				return
 			}
@@ -303,41 +317,61 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 
 			go func() {
 				defer close(doneChan)
+				// 1. Получаем индекс последней фактически отпечатанной этикетки
 				lastIdx, pollErr = p.GetLastPrintedIndex()
 				if pollErr != nil {
 					return
 				}
+				// 2. Снимаем абсолютный аппаратный счетчик
 				finalTotal, _ = p.GetTotalPrints()
-				_ = p.ClearQueue()
 			}()
 
 			select {
 			case <-doneChan:
 				if pollErr != nil {
+					slog.Error("[STOP] Ошибка чтения одометра", "printer", cfg.Name, "err", pollErr)
 					reportMu.Lock()
 					report[cfg.Name] = map[string]interface{}{"status": "error", "error": pollErr.Error()}
-					printerErrors = append(printerErrors, fmt.Sprintf("ошибка %s: %v", cfg.Name, pollErr))
+					printerErrors = append(printerErrors, fmt.Sprintf("ошибка опроса %s: %v", cfg.Name, pollErr))
 					reportMu.Unlock()
 					return
 				}
 
+				// 3. Записываем снапшот одометра в Master DB для истории аудита
 				if finalTotal >= 0 {
 					_ = s.store.RecordPrinterCounterSnapshot(taskID, lineID, cfg.ID, "stop", finalTotal)
-					_ = s.store.SaveEventLog(&lineID, &cfg.ID, "info", fmt.Sprintf("СТОП ЗАДАЧИ #%d: одометр %s = %d", taskID, cfg.Name, finalTotal))
+					_ = s.store.SaveEventLog(&lineID, &cfg.ID, "info",
+						fmt.Sprintf("СТОП ЗАДАЧИ #%d: одометр %s = %d", taskID, cfg.Name, finalTotal))
 				}
 
-				affected, _ := s.store.MarkAsPrinted(taskID, cfg.ID, lastIdx)
+				// 4. АТОМАРНАЯ СВЕРКА В SQLite:
+				// - printer_index <= lastIdx -> 'printed'
+				// - остальное из буфера -> возвращается в 'pending'
+				res, errReconcile := s.store.ReconcileAndFinalizeTaskCodes(taskID, cfg.ID, lastIdx)
+				if errReconcile != nil {
+					slog.Error("[STOP] Сбой сведения баланса в БД", "printer", cfg.Name, "err", errReconcile)
+				}
+
+				// 5. ОЧИСТКА БУФЕРА ЖЕЛЕЗКИ СТРОГО ПОСЛЕ ФИКСАЦИИ В БД
+				_ = p.ClearQueue()
+
+				returned := 0
+				if res != nil {
+					returned = res.ReturnedCodes
+				}
+
 				reportMu.Lock()
-				atomic.AddInt64(&totalConfirmed, affected)
+				atomic.AddInt64(&totalReturnedCodes, int64(returned))
 				report[cfg.Name] = map[string]interface{}{
-					"status":             "cleared",
-					"last_printed_index": lastIdx,
-					"total_prints":       finalTotal,
-					"confirmed_codes":    affected,
+					"status":              "cleared",
+					"last_printed_index":  lastIdx,
+					"hardware_counter":    finalTotal,
+					"reverted_to_pending": returned,
 				}
 				reportMu.Unlock()
 
 			case <-ctx.Done():
+				slog.Warn("[STOP] Принтер завис и не ответил за 3 секунды", "printer", cfg.Name)
 				reportMu.Lock()
 				report[cfg.Name] = map[string]interface{}{"status": "timeout"}
 				printerErrors = append(printerErrors, fmt.Sprintf("принтер %s не ответил по таймауту", cfg.Name))
@@ -348,21 +382,40 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
-	rndText, _ := s.store.GetRndTextByTask(taskID)
-	resp := map[string]interface{}{
-		"task_id":         taskID,
-		"line_id":         lineID,
-		"status":          "stopped",
-		"timestamp":       time.Now().Format(time.RFC3339),
-		"total_confirmed": totalConfirmed,
-		"printers_report": report,
-		"rnd_text":        rndText,
-	}
-	if len(printerErrors) > 0 {
-		resp["warnings"] = printerErrors
+	// ------------------------------------------------------------------
+	// ШАГ 3: ИТОГОВЫЙ СРЕЗ ПАРТИИ ИЗ БАЗЫ (ИСТИНА ПЕРВОЙ ИНСТАНЦИИ)
+	// ------------------------------------------------------------------
+	taskInfo, errInfo := s.store.GetTaskInfo(r.Context(), taskID)
+	totalPrinted := 0
+	totalPending := 0
+	if errInfo == nil {
+		if val, ok := taskInfo["printed_count"].(int); ok {
+			totalPrinted = val
+		}
+		if val, ok := taskInfo["pending_count"].(int); ok {
+			totalPending = val
+		}
 	}
 
-	sendJSON(w, http.StatusOK, resp)
+	rndText, _ := s.store.GetRndTextByTask(taskID)
+
+	response := map[string]interface{}{
+		"task_id":               taskID,
+		"line_id":               lineID,
+		"status":                "stopped",
+		"timestamp":             time.Now().Format(time.RFC3339),
+		"total_confirmed":       totalPrinted,       // Честное суммарное количество напечатанных кодов
+		"remaining_pending":     totalPending,       // Сколько кодов готово к повторной печати
+		"buffer_reverted_total": totalReturnedCodes, // Сколько кодов было спасено из очередей
+		"printers_report":       report,
+		"rnd_text":              rndText,
+	}
+
+	if len(printerErrors) > 0 {
+		response["warnings"] = printerErrors
+	}
+
+	sendJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleTaskInfo(w http.ResponseWriter, r *http.Request) {
