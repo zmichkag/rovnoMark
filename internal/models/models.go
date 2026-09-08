@@ -1,20 +1,24 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
 
-// Физическое устройство
+// PrinterConfig описывает конфигурацию физического печатающего устройства
 type PrinterConfig struct {
 	ID         int    `json:"id"`
 	Name       string `json:"name"`
 	IP         string `json:"ip"`
 	Port       int    `json:"port"`
 	DriverType string `json:"driver_type"`
-	Role       string `json:"role"`
+	Role       string `json:"role"` // PRIMARY, SECONDARY, ODD, EVEN, LANE_1, LANE_2[cite: 2, 3]
 	IsActive   bool   `json:"is_active"`
 	IsDeleted  bool   `json:"is_deleted"`
 }
 
-// Конфигурация линии
+// LineConfig описывает производственную линию
 type LineConfig struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
@@ -23,7 +27,7 @@ type LineConfig struct {
 	IsDeleted   bool   `json:"is_deleted"`
 }
 
-// Состояние принтера (Телеметрия)
+// PrinterState хранит оперативное состояние и телеметрию принтера в ОЗУ
 type PrinterState struct {
 	LastTemplate   string
 	LastStaticHash string
@@ -35,6 +39,7 @@ type PrinterState struct {
 	CurTemplate    string `json:"cur_template"`
 }
 
+// LogEntry представляет строковый лог для веб-интерфейса и дашборда
 type LogEntry struct {
 	Time    string `json:"time"`
 	Printer string `json:"printer"`
@@ -44,22 +49,46 @@ type LogEntry struct {
 // InboundCodeItem представляет универсальный элемент кода от 1С
 type InboundCodeItem struct {
 	Code  string `json:"code"`
-	ExtID int    `json:"ext_id"`
+	ExtID string `json:"ext_id"`
 }
 
-// TaskCode представляет единицу маркировки в БД
+// UnmarshalJSON безопасно читает ext_id как число (11), строку ("11") или null
+func (item *InboundCodeItem) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Code  string          `json:"code"`
+		ExtID json.RawMessage `json:"ext_id"`
+	}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	item.Code = raw.Code
+
+	if len(raw.ExtID) > 0 {
+		val := strings.TrimSpace(string(raw.ExtID))
+		if val != "null" {
+			// Отрезаем кавычки, если пришла строка, или оставляем число как строку
+			item.ExtID = strings.Trim(val, `"`)
+		}
+	}
+
+	return nil
+}
+
+// TaskCode представляет единицу маркировки в шарде БД
 type TaskCode struct {
 	ID           int       `json:"id"`
 	TaskID       int       `json:"task_id"`
 	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
 	ExternalID   string    `json:"ext_id"`        // Идентификатор/порядковый номер из 1C (может быть пустым)
-	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'
+	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'[cite: 1, 2, 3]
 	PrinterIndex int       `json:"printer_index"` // Индекс партии/пакета для принтера
 	PrintedAt    time.Time `json:"printed_at"`
 }
 
-// EventLogItem представляет запись системного или аппаратного события в БД
+// EventLogItem представляет запись системного или аппаратного события в Master DB
 type EventLogItem struct {
 	ID        int       `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
