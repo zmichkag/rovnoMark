@@ -25,6 +25,11 @@ type Store struct {
 	dataDir  string
 }
 
+type ReconcileResult struct {
+	TotalPrinted  int `json:"total_printed"`
+	ReturnedCodes int `json:"returned_codes"`
+}
+
 const (
 	TargetMasterSchemaVersion = 1
 	TargetCodesSchemaVersion  = 1
@@ -488,6 +493,69 @@ func (s *Store) GetPendingCodes(taskID int, limit int) ([]models.TaskCode, error
 		codes = append(codes, c)
 	}
 	return codes, nil
+}
+
+// ReconcileAndFinalizeTaskCodes атомарно фиксирует напечатанное и возвращает остатки буфера в очередь
+func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastIndex int) (*ReconcileResult, error) {
+	db := s.getCodesDB()
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка открытия транзакции сверки: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Фиксируем как напечатанные те коды, индекс которых подтвержден одометром железки
+	if lastIndex > 0 {
+		_, err = tx.Exec(`
+			UPDATE task_codes 
+			SET status = 'printed', 
+			    printed_at = CURRENT_TIMESTAMP 
+			WHERE task_id = ? 
+			  AND printer_id = ? 
+			  AND printer_index <= ? 
+			  AND status = 'in_buffer'`,
+			taskID, printerID, lastIndex)
+		if err != nil {
+			return nil, fmt.Errorf("ошибка фиксации printed кодов: %w", err)
+		}
+	}
+
+	// 2. Все коды, которые принтер захватил в буфер, но НЕ успел напечатать,
+	// возвращаем обратно в статус 'pending' и снимаем привязку к принтеру!
+	resReverted, err := tx.Exec(`
+		UPDATE task_codes 
+		SET status = 'pending', 
+		    printer_id = NULL, 
+		    printer_index = NULL 
+		WHERE task_id = ? 
+		  AND printer_id = ? 
+		  AND status = 'in_buffer'`,
+		taskID, printerID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка возврата неотпечатанного буфера в pending: %w", err)
+	}
+
+	returnedCount, _ := resReverted.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("ошибка фиксации транзакции сверки: %w", err)
+	}
+
+	// 3. Получаем честное итоговое количество фактически напечатанных кодов по задаче из БД
+	var totalPrinted int
+	err = db.QueryRow(`
+		SELECT COUNT(id) 
+		FROM task_codes 
+		WHERE task_id = ? AND status = 'printed'`,
+		taskID).Scan(&totalPrinted)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка подсчета итоговых printed: %w", err)
+	}
+
+	return &ReconcileResult{
+		TotalPrinted:  totalPrinted,
+		ReturnedCodes: int(returnedCount),
+	}, nil
 }
 
 func (s *Store) MarkAsPrinted(taskID int, printerID int, lastIndex int) (int64, error) {
