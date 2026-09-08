@@ -44,7 +44,7 @@ type LogEntry struct {
 // InboundCodeItem представляет универсальный элемент кода от 1С
 type InboundCodeItem struct {
 	Code  string `json:"code"`
-	ExtID string `json:"ext_id"`
+	ExtID int    `json:"ext_id"`
 }
 
 // TaskCode представляет единицу маркировки в БД
