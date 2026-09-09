@@ -25,6 +25,43 @@
 * **Observability из коробки:** Интеграция с **Promtail / Grafana Loki** для централизованного сбора логов и мониторинга событий на линии.
 * **Web UI Dashboard:** Встроенный легкий интерфейс для операторов КИПиА и контроля состояния оборудования на линии.
 
+
+🏗 Архитектурная структура RovnoMark / AstraPrint
+
+1. **Ядро (internal/core)**
+- **Line & Task Orchestration:** Управление топологией «Линия» (координация четных/нечетных принтеров, конвейерный насос Pumper).
+- **TaskProcessor:** Фоновая асинхронная прокачка партий кодов из SQLite в буферы оборудования с контролем свободного места (GetBufferFreeSpace) и подтверждением через одометры.
+- **PrinterManager:** Потокобезопасный реестр активных соединений (sync.RWMutex) и сборщик телеметрии.
+- **Интерфейс core.Printer:** Аппаратный контракт с методами управления сессиями (InitSession, PrintBatchIndexed, ClearQueue, GetTotalPrints).
+- **Marking (core/marking):** Парсинг и верификация структуры кодов маркировки GS1 DataMatrix.
+
+2. **Драйверы оборудования (internal/drivers)**
+- **videojet**: Протокол Zipher/CLARiTY (команды GST, SHO, SID, SLR).
+- **markem:** Протокол SOAP/XML поверх TCP в кодировке UTF-16LE (SmartDate X60/X40).
+- **valentine:** Драйверы CVPL Native и NiceLabel Direct .
+- **savema:** Бинарный протокол SPPL.
+- **tsc:** Генератор и шаблонизатор команд TSPL.
+- **extserver:** Виртуальный HTTP/XML шлюз для внешних контроллеров печати.
+
+3. **Хранилище (internal/storage)**
+- **Master DB (openMark_master.db):** Конфигурации линий, привязки, задачи, журнал аудита и телеметрия.
+- **Monthly Sharding:** Изолированные помесячные базы кодов (codes_YYYY_MM.db) с защитой от разрастания WAL и B-Tree индексов.
+- **Миграции:** Управление схемой данных строго через PRAGMA user_version.
+- **Надежность:** Режим WAL, синхронизация NORMAL, busy_timeout 5000 мс, принудительный wal_checkpoint(TRUNCATE) при остановке.
+
+4. **Транспорт и интерфейс (internal/api & UI)**
+- **API Server:** Изолированный роутер без глобального ServeMux.
+- **1C/MES Gateway:** Эндпоинты /api/task/create, /api/task/append, /api/task/stop, /api/system/info.
+- **Quality Control & Live:** Эндпоинты /api/code/info (ОКК) и /api/dashboard/live.
+- **Embedded UI:** Три автономных SPA-интерфейса в embed.FS (Инженерная панель, Диспетчер линий /frontend2, Терминал ОКК /okk).
+
+5. **Метаданные и White-label (internal/version, internal/brand)**
+- Сквозной контроль версий бинарника (Version, GitCommit, BuildDate) через -ldflags.
+- Конфигурация торговой марки шлюза на лету через GATEWAY_BRAND_NAME или при сборке.
+
+6. **Сервисный контур Windows**
+- Нативная служба Windows (Windows Service) с поддержкой SCM-команд.
+- Интеграция с Windows Event Log при авариях связи и сбоях сокетов.
 ---
 
 ## 📁 Структура проекта
