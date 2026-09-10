@@ -11,11 +11,11 @@ type PrinterConfig struct {
 	ID         int    `json:"id"`
 	Name       string `json:"name"`
 	IP         string `json:"ip"`
-	Port       int    `json:"port"`
-	DriverType string `json:"driver_type"`
-	Role       string `json:"role"`
-	IsActive   bool   `json:"is_active"`
-	IsDeleted  bool   `json:"is_deleted"`
+	Port       int    `json:"port"`        // Port is the network port number used to connect to the printer device.
+	DriverType string `json:"driver_type"` // DriverType specifies the software driver or protocol used to communicate with the physical printer device.
+	Role       string `json:"role"`        // Role describes the printer's specific function or purpose.
+	IsActive   bool   `json:"is_active"`   // IsActive indicates if the printer configuration is currently enabled and operational.
+	IsDeleted  bool   `json:"is_deleted"`  // IsDeleted indicates if the printer configuration has been soft-deleted.
 }
 
 // LineConfig описывает производственную линию
@@ -81,11 +81,11 @@ type TaskCode struct {
 	ID           int       `json:"id"`
 	TaskID       int       `json:"task_id"`
 	PrinterID    int       `json:"printer_id"`
-	Code         string    `json:"code"`
+	Code         string    `json:"code"`          // Code is the actual string value of the marking unit.
 	ExternalID   string    `json:"ext_id"`        // Идентификатор/порядковый номер из 1C (может быть пустым)
 	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'[cite: 1, 2, 3]
 	PrinterIndex int       `json:"printer_index"` // Индекс партии/пакета для принтера
-	PrintedAt    time.Time `json:"printed_at"`
+	PrintedAt    time.Time `json:"printed_at"`    // PrintedAt records the timestamp when the code was marked as printed.
 }
 
 // EventLogItem представляет запись системного или аппаратного события в Master DB
@@ -111,6 +111,7 @@ type LogFilter struct {
 	Offset    int       `json:"offset"`
 }
 
+// TaskState represents the current state or lifecycle stage of a task.
 type TaskState string
 
 const (
@@ -119,5 +120,5 @@ const (
 	TaskStateActive       TaskState = "active"
 	TaskStateCompleted    TaskState = "completed"
 	TaskStateStopped      TaskState = "stopped"
-	TaskStateFailed       TaskState = "failed"
+	TaskStateFailed       TaskState = "failed" // TaskStateFailed indicates that the task execution has encountered an unrecoverable error and stopped.
 )
