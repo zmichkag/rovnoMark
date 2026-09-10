@@ -91,19 +91,29 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запуск циклического буфера через паузу (FD)", "task_id", taskID)
 
-	const (
-		initialBuffer = 5
-		replenishStep = 3
+	cfg, exists := tp.Manager.GetPrinterConfig(printerID)
+	initialLoop := 5
+	replenishStep := 3
+	if exists {
+		if cfg.LeadLoop > 0 {
+			initialLoop = cfg.LeadLoop
+		}
+		if cfg.BufferLimit > 0 {
+			replenishStep = cfg.BufferLimit
+		}
+	}
+
+	slog.Info("VALENTIN-PUMPER: Инициализация контура",
+		"task_id", taskID,
+		"initial_loop", initialLoop,
+		"replenish_step", replenishStep,
 	)
 
-	// 1. ХОЛОДНЫЙ СТАРТ: 5 этикеток без ожидания датчика
-	_ = vDriver.SetDispenserMode(0) // Отключаем датчик
-	tp.pushValentinBurst(taskID, printerID, role, vDriver, initialBuffer)
-
-	// Включаем ожидание датчика
-	_ = vDriver.SetDispenserMode(2)
+	// 1. ХОЛОДНЫЙ СТАРТ: выплевываем стартовую петлю без ожидания датчика
+	_ = vDriver.SetDispenserMode(0)
+	tp.pushValentinBurst(taskID, printerID, role, vDriver, initialLoop)
+	_ = vDriver.SetDispenserMode(2) // Возврат датчика
 
 	lastHwCount := -1
 	ticker := time.NewTicker(30 * time.Millisecond)
@@ -132,26 +142,15 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 				continue
 			}
 
-			// СРАБОТАЛ ДАТЧИК (одометр вырос)
 			if hwCount > lastHwCount {
 				lastHwCount = hwCount
 				_, _ = tp.Store.MarkAsPrinted(taskID, printerID, hwCount)
 
-				slog.Info("VALENTIN: Сход этикетки. Активация цикла дозаливки через паузу", "hw_count", hwCount)
-
-				// 1. Мгновенная пауза — блокируем появление дублей
+				// Алгоритм паузы и пополнения настроенным шагом
 				_ = vDriver.SetPause(true)
-
-				// 2. Смена режима
 				_ = vDriver.SetDispenserMode(0)
-
-				// 3. Печать 3 штук в хвост петли
 				tp.pushValentinBurst(taskID, printerID, role, vDriver, replenishStep)
-
-				// 4. Возврат режима датчика
 				_ = vDriver.SetDispenserMode(2)
-
-				// 5. Снятие с паузы
 				_ = vDriver.SetPause(false)
 			}
 		}
@@ -236,9 +235,14 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 					continue
 				}
 
+				maxLimit := pCfg.BufferLimit
+				if maxLimit <= 0 {
+					maxLimit = 30 // Дефолт
+				}
+
 				targetLoad := freeSpace
-				if targetLoad > 30 {
-					targetLoad = 30
+				if targetLoad > maxLimit {
+					targetLoad = maxLimit
 				}
 
 				var pending []models.TaskCode
