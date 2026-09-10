@@ -67,9 +67,9 @@ $env:GOOS = "windows"
 $env:GOARCH = "amd64"
 go build -ldflags $LdFlags -o "bin/$AppName-windows-amd64.exe" ./cmd/gateway/
 
-# Linux amd64
-$env:GOOS = "linux"
-$env:GOARCH = "amd64"
-go build -ldflags $LdFlags -o "bin/$AppName-linux-amd64" ./cmd/gateway/
+## Linux amd64
+#$env:GOOS = "linux"
+#$env:GOARCH = "amd64"
+#go build -ldflags $LdFlags -o "bin/$AppName-linux-amd64" ./cmd/gateway/
 
 Write-Host "Done! Artifacts generated in bin/" -ForegroundColor Green
