@@ -308,6 +308,13 @@ type PrinterManager struct {
 	logs     []models.LogEntry
 }
 
+func (pm *PrinterManager) GetPrinterConfig(id int) (models.PrinterConfig, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	cfg, ok := pm.configs[id]
+	return cfg, ok
+}
+
 func NewPrinterManager() *PrinterManager {
 	return &PrinterManager{
 		printers: make(map[int]Printer),
