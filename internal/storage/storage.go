@@ -706,34 +706,52 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	query := `SELECT id, name, ip, port, driver_type, is_active, 
-	                 COALESCE(buffer_limit, 30), COALESCE(lead_loop, 5) 
+	                 COALESCE(buffer_limit, 30) AS buffer_limit, 
+	                 COALESCE(lead_loop, 5) AS lead_loop 
 	          FROM printers WHERE is_active = 1 and is_deleted = 0`
-	rows, err := s.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
 	var list []models.PrinterConfig
-	for rows.Next() {
-		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive, &p.BufferLimit, &p.LeadLoop); err == nil {
-			list = append(list, p)
-		}
-	}
-	return list, nil
+	err := s.db.Select(&list, query)
+	return list, err
 }
 
 func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
-	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
-	var id interface{} = p.ID
-	if p.ID == 0 {
-		id = nil
+	// Задаем значения по умолчанию
+	if p.BufferLimit <= 0 {
+		p.BufferLimit = 30
 	}
-	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive)
+	if p.LeadLoop < 0 {
+		p.LeadLoop = 5
+	}
+
+	// Если ID равен 0, передаем nil, чтобы SQLite сам выдал новый номер
+	var idVal any = p.ID
+	if p.ID == 0 {
+		idVal = nil
+	}
+
+	// Собираем данные в карту
+	params := map[string]any{
+		"id":           idVal,
+		"name":         p.Name,
+		"ip":           p.IP,
+		"port":         p.Port,
+		"driver_type":  p.DriverType,
+		"is_active":    p.IsActive,
+		"buffer_limit": p.BufferLimit,
+		"lead_loop":    p.LeadLoop,
+	}
+
+	// Запрос с именованными параметрами
+	query := `INSERT OR REPLACE INTO printers 
+		(id, name, ip, port, driver_type, is_active, buffer_limit, lead_loop) 
+		VALUES (:id, :name, :ip, :port, :driver_type, :is_active, :buffer_limit, :lead_loop)`
+	res, err := s.db.NamedExec(query, params)
 	if err != nil {
 		return 0, err
 	}
+
+	//  Возвращаем ID
 	if p.ID == 0 {
 		return res.LastInsertId()
 	}
@@ -756,26 +774,16 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 }
 
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
-	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, COALESCE(lp.role, 'PRIMARY') 
+	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, COALESCE(lp.role, 'PRIMARY') AS role, 
+       COALESCE(buffer_limit, 30) AS buffer_limit, 
+	   COALESCE(lead_loop, 5) AS lead_loop  
 		FROM printers p
 		JOIN line_printers lp ON p.id = lp.printer_id
 		WHERE lp.line_id = ? AND p.is_active = 1`
-	rows, err := s.db.Query(query, lineID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 
 	var list []models.PrinterConfig
-	for rows.Next() {
-		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.Role); err != nil {
-			slog.Error("GetPrintersByLine scan error", "err", err)
-			continue
-		}
-		list = append(list, p)
-	}
-	return list, nil
+	err := s.db.Select(&list, query, lineID)
+	return list, err
 }
 
 func (s *Store) GetPrinterLineMap() (map[int]int, error) {
