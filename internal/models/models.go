@@ -8,16 +8,16 @@ import (
 
 // PrinterConfig описывает конфигурацию физического печатающего устройства
 type PrinterConfig struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	IP          string `json:"ip"`
-	Port        int    `json:"port"`         // Port is the network port number used to connect to the printer device.
-	DriverType  string `json:"driver_type"`  // DriverType specifies the software driver or protocol used to communicate with the physical printer device.
-	BufferLimit int    `json:"buffer_limit"` // Целевая емкость буфера опережения
-	LeadLoop    int    `json:"lead_loop"`    // Стартовая петля (начальный выстрел)
-	Role        string `json:"role"`         // Role describes the printer's specific function or purpose.
-	IsActive    bool   `json:"is_active"`    // IsActive indicates if the printer configuration is currently enabled and operational.
-	IsDeleted   bool   `json:"is_deleted"`   // IsDeleted indicates if the printer configuration has been soft-deleted.
+	ID          int    `json:"id" db:"id"`
+	Name        string `json:"name" db:"name"`
+	IP          string `json:"ip" db:"ip"`
+	Port        int    `json:"port" db:"port"`
+	DriverType  string `json:"driver_type" db:"driver_type"`
+	BufferLimit int    `json:"buffer_limit" db:"buffer_limit"`
+	LeadLoop    int    `json:"lead_loop" db:"lead_loop"`
+	Role        string `json:"role" db:"role"`
+	IsActive    bool   `json:"is_active" db:"is_active"`
+	IsDeleted   bool   `json:"is_deleted" db:"is_deleted"`
 }
 
 // LineConfig описывает производственную линию
