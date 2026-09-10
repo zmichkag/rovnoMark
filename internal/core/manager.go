@@ -36,6 +36,24 @@ type Printer interface {
 	SelectTemplate(template string, fields map[string]string) error
 }
 
+type ScanResult struct {
+	Code      string // Считанный DataMatrix / Barcode
+	RawData   []byte // Сырые байты (важно для криптохвостов и FNC1)
+	Quality   string // Оценка грейда ISO/IEC (A, B, C, D, F) если умеет камера
+	IsNoRead  bool   // Флаг ошибки чтения (No-Read)
+	TriggerID string // Привязка к оптическому датчику / такту
+	Timestamp time.Time
+}
+
+type Scanner interface {
+	GetStatus(ctx context.Context) (DeviceStatus, error)
+	// Subscribe возвращает канал, в который драйвер пушит события чтения
+	Subscribe(ctx context.Context) (<-chan ScanResult, error)
+	// SoftwareTrigger вызывает программный спуск затвора (если нет фотодатчика)
+	SoftwareTrigger(ctx context.Context) error
+	Close() error
+}
+
 type TaskProcessor struct {
 	Store       *storage.Store
 	Manager     *PrinterManager
