@@ -91,23 +91,33 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос", "line_id", lineID, "printer_id", printerID)
+	slog.Info("VALENTIN-PUMPER: Запуск циклического буфера через паузу (FD)", "task_id", taskID)
 
-	ticker := time.NewTicker(20 * time.Millisecond)
+	const (
+		initialBuffer = 5
+		replenishStep = 3
+	)
+
+	// 1. ХОЛОДНЫЙ СТАРТ: 5 этикеток без ожидания датчика
+	_ = vDriver.SetDispenserMode(0) // Отключаем датчик
+	tp.pushValentinBurst(taskID, printerID, role, vDriver, initialBuffer)
+
+	// Включаем ожидание датчика
+	_ = vDriver.SetDispenserMode(2)
+
+	lastHwCount := -1
+	ticker := time.NewTicker(30 * time.Millisecond)
 	defer ticker.Stop()
-
-	// Первичная заправка одного кода
-	_ = tp.pushSingleValentinCode(taskID, printerID, role, vDriver)
-
-	lastPrintedCount := -1
 
 	for {
 		select {
 		case <-ctx.Done():
+			_ = vDriver.SetPause(true)
 			return
 		case <-ticker.C:
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
+				_ = vDriver.SetPause(true)
 				return
 			}
 
@@ -115,26 +125,56 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 			if err != nil {
 				continue
 			}
-			currentCount, _ := strconv.Atoi(countStr)
+			hwCount, _ := strconv.Atoi(countStr)
 
-			if lastPrintedCount == -1 {
-				lastPrintedCount = currentCount
+			if lastHwCount == -1 {
+				lastHwCount = hwCount
 				continue
 			}
 
-			if currentCount > lastPrintedCount {
-				delta := currentCount - lastPrintedCount
-				lastPrintedCount = currentCount
+			// СРАБОТАЛ ДАТЧИК (одометр вырос)
+			if hwCount > lastHwCount {
+				lastHwCount = hwCount
+				_, _ = tp.Store.MarkAsPrinted(taskID, printerID, hwCount)
 
-				for i := 0; i < delta; i++ {
-					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver); err != nil {
-						slog.Error("VALENTIN-PUMPER: Сбой дозарядки буфера", "err", err)
-						break
-					}
-					time.Sleep(5 * time.Millisecond)
-				}
+				slog.Info("VALENTIN: Сход этикетки. Активация цикла дозаливки через паузу", "hw_count", hwCount)
+
+				// 1. Мгновенная пауза — блокируем появление дублей
+				_ = vDriver.SetPause(true)
+
+				// 2. Смена режима
+				_ = vDriver.SetDispenserMode(0)
+
+				// 3. Печать 3 штук в хвост петли
+				tp.pushValentinBurst(taskID, printerID, role, vDriver, replenishStep)
+
+				// 4. Возврат режима датчика
+				_ = vDriver.SetDispenserMode(2)
+
+				// 5. Снятие с паузы
+				_ = vDriver.SetPause(false)
 			}
 		}
+	}
+}
+
+func (tp *TaskProcessor) pushValentinBurst(taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver, count int) {
+	codes, err := tp.Store.FetchAndAssignCodesAlternating(taskID, printerID, role, count)
+	if err != nil || len(codes) == 0 {
+		return
+	}
+
+	rawCodes := make([]string, len(codes))
+	for i, c := range codes {
+		rawCodes[i] = c.Code
+	}
+
+	startIndex := codes[0].PrinterIndex
+	dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
+
+	_, err = vDriver.PrintBatchIndexed(dynamicField, startIndex, rawCodes)
+	if err != nil {
+		slog.Error("VALENTIN: Сбой дозаливки пачки", "err", err)
 	}
 }
 
