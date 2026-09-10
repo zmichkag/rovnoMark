@@ -14,15 +14,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	db       *sql.DB
+	db       *sqlx.DB
 	codesMu  sync.RWMutex
 	codesDB  *sql.DB
 	curMonth string
 	dataDir  string
+}
+
+type Printer struct {
+	ID          int64  `db:"id"`
+	Name        string `db:"name"`
+	IP          string `db:"ip"`
+	Port        int    `db:"port"`
+	DriverType  string `db:"driver_type"`
+	RawBody     string `db:"raw_body"`
+	IsActive    bool   `db:"is_active"`
+	IsDeleted   bool   `db:"is_deleted"`
+	BufferLimit int    `db:"buffer_limit"`
+	LeadLoop    int    `db:"lead_loop"`
 }
 
 type ReconcileResult struct {
@@ -56,8 +70,10 @@ func New(baseDir string) *Store {
 		log.Fatalf("Критическая ошибка миграции Master БД: %v", err)
 	}
 
+	sqlxDB := sqlx.NewDb(db, "sqlite")
+
 	store := &Store{
-		db:      db,
+		db:      sqlxDB,
 		dataDir: baseDir,
 	}
 
@@ -689,7 +705,9 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 }
 
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	query := `SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0`
+	query := `SELECT id, name, ip, port, driver_type, is_active, 
+	                 COALESCE(buffer_limit, 30), COALESCE(lead_loop, 5) 
+	          FROM printers WHERE is_active = 1 and is_deleted = 0`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -699,7 +717,7 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err == nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive, &p.BufferLimit, &p.LeadLoop); err == nil {
 			list = append(list, p)
 		}
 	}
