@@ -13,7 +13,7 @@ import (
 )
 
 type gatewayService struct {
-	serverRunner func(ctx context.Context, elog *eventlog.Log) error
+	serverRunner func(ctx context.Context, elog EventLogger) error
 	name         string
 }
 
@@ -21,9 +21,11 @@ func (s *gatewayService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	changes <- svc.Status{State: svc.StartPending}
 
-	elog, err := eventlog.Open(s.name)
+	var elog EventLogger
+	el, err := eventlog.Open(s.name)
 	if err == nil {
-		defer elog.Close()
+		defer el.Close()
+		elog = el
 		_ = elog.Info(1, fmt.Sprintf("Служба %s запускается", s.name))
 	} else {
 		slog.Warn("Не удалось открыть Windows Event Log", "err", err)
@@ -58,10 +60,8 @@ func (s *gatewayService) Execute(args []string, r <-chan svc.ChangeRequest, chan
 					_ = elog.Info(2, "Получен сигнал остановки службы. Инициирован Graceful Shutdown...")
 				}
 
-				// Сигнализируем рабочему контуру о завершении
 				cancel()
 
-				// Ожидаем остановки HTTP-сервера, сброса WAL и закрытия пула соединений
 				select {
 				case <-serverStopped:
 					if elog != nil {
@@ -86,7 +86,7 @@ func isWindowsService() bool {
 	return isSvc
 }
 
-func runWindowsService(name string, runner func(ctx context.Context, elog *eventlog.Log) error) error {
+func runWindowsService(name string, runner func(ctx context.Context, elog EventLogger) error) error {
 	s := &gatewayService{
 		serverRunner: runner,
 		name:         name,

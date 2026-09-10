@@ -14,8 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/windows/svc/eventlog"
-
 	"rovnoMark/internal/api"
 	"rovnoMark/internal/brand"
 	"rovnoMark/internal/core"
@@ -29,7 +27,7 @@ import (
 
 	"rovnoMark/ui"
 	"rovnoMark/ui2"
-	"rovnoMark/ui_okk"
+	okk "rovnoMark/ui_okk"
 )
 
 const serviceName = "RovnoMarkGateway"
@@ -48,7 +46,8 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
-	runner := func(ctx context.Context, elog *eventlog.Log) error {
+	// Сигнатура раннера теперь опирается на общий EventLogger
+	runner := func(ctx context.Context, elog EventLogger) error {
 		return runApp(ctx, *port, *dataDir, *validateGS1, *debugMode, elog)
 	}
 
@@ -71,7 +70,7 @@ func main() {
 	}
 }
 
-func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, debugMode bool, elog *eventlog.Log) error {
+func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, debugMode bool, elog EventLogger) error {
 	slog.Info(fmt.Sprintf("Запуск шлюза маркировки [%s]", brand.GetName()),
 		"version", version.Version,
 		"commit", version.GitCommit,

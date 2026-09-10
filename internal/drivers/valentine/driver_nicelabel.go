@@ -1,6 +1,7 @@
 package valentine
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,17 +12,17 @@ import (
 )
 
 type NiceLabelDriver struct {
-	Name        string        // Имя макета / PLU
-	ID          int           // ID принтера в базе данных
-	Address     string        // IP-адрес принтера (например, 192.168.x.x)
+	ID          int           // ID принтера в БД
+	Address     string        // IP-адрес
 	Port        int           // RAW TCP порт (9100)
 	Timeout     time.Duration // Сетевой таймаут сокета
-	conn        net.Conn      // Активная монопольная TCP-сессия
-	mu          sync.Mutex    // Мьютекс для защиты сокета при многопоточном вызове
-	curTemplate string        // Активный выбранный шаблон
-	lastCount   int           // Виртуальный нарастающий итог для фронтенда/1С
-	lastRawFBBC int           // Последнее физическое значение из регистра FBBC
-	isPumping   bool          // Флаг активности реалтайм-насоса кодов
+	curTemplate string        // Текущий выбранный макет
+
+	mu   sync.Mutex // Защита монопольного доступа к сокету
+	conn net.Conn   // Активный сокет
+
+	lastCount   int // Виртуальный одометр
+	lastRawFBBC int // Последнее сырое значение из FBBC
 }
 
 func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
@@ -29,146 +30,84 @@ func NewNiceLabelDriver(id int, ip string, port int) *NiceLabelDriver {
 		ID:          id,
 		Address:     ip,
 		Port:        port,
-		Timeout:     3 * time.Second,
+		Timeout:     2 * time.Second,
 		conn:        nil,
 		curTemplate: "",
 		lastCount:   0,
 		lastRawFBBC: 0,
-		isPumping:   false,
 	}
 }
 
-// InitSession проверяет/поднимает монопольный сокет и сбрасывает счетчики сессии перед новым стартом
+// InitSession поднимает соединение и сбрасывает счетчики
 func (d *NiceLabelDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// 1. Поднимаем сокет, если закрыт
-	if d.conn == nil {
-		addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-		conn, err := net.DialTimeout("tcp", addr, d.Timeout)
-		if err != nil {
-			return fmt.Errorf("ошибка подключения к принтеру %s: %w", addr, err)
-		}
-		d.optimizeSocket(conn)
-		d.conn = conn
+	if err := d.ensureConnectionLocked(); err != nil {
+		return fmt.Errorf("valentin [%s]: ошибка инициализации сокета: %w", d.Address, err)
 	}
 
 	d.lastCount = 0
 	d.lastRawFBBC = 0
 
-	slog.Info("VALENTIN-INIT: Сессия успешно поднята, локальный одометр обнулен",
-		"printer_id", d.ID,
-		"addr", d.Address,
-	)
-
+	slog.Info("VALENTIN: Сессия успешно открыта", "printer_id", d.ID, "addr", d.Address)
 	return nil
 }
 
-// SelectTemplate атомарно загружает макет и записывает статические поля
+// SelectTemplate выбирает макет из памяти (FMB) и обновляет статические поля
 func (d *NiceLabelDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	slog.Info("VALENTIN-INIT: Получены данные статики от 1С",
-		"printer_id", d.ID,
-		"template", template,
-		"raw_static_fields", staticFields,
-	)
-
 	if template != "" {
 		d.curTemplate = template
 	} else if d.curTemplate == "" {
-		return fmt.Errorf("критическая ошибка: передан пустой код макета (PLU)")
+		return fmt.Errorf("valentin [%d]: имя макета не задано", d.ID)
 	}
 
-	if d.conn == nil {
-		if err := d.reconnectNoLock(); err != nil {
-			return fmt.Errorf("ошибка реконнекта при выборе макета: %w", err)
+	if err := d.ensureConnectionLocked(); err != nil {
+		return fmt.Errorf("valentin [%s]: сбой связи: %w", d.Address, err)
+	}
+
+	// Пакетируем выбор макета (FMB) и установку статических полей в один сетевой буфер
+	var buf bytes.Buffer
+
+	// 1. Выбор файла из Flash-карты/ОЗУ: SOH + FMB---r + template + ETB
+	buf.WriteByte(SOH)
+	buf.WriteString(fmt.Sprintf("FMB---r%s", d.curTemplate))
+	buf.WriteByte(ETB)
+
+	// 2. Запись полей (поддерживаются как BV[Name], так и BM[Index])
+	for k, v := range staticFields {
+		cleanVal := strings.ReplaceAll(v, "|", "")
+		buf.WriteByte(SOH)
+		if _, err := strconv.Atoi(k); err == nil {
+			buf.WriteString(fmt.Sprintf("BM[%s]%s", k, cleanVal))
+		} else {
+			buf.WriteString(fmt.Sprintf("BV[%s]%s", k, cleanVal))
 		}
+		buf.WriteByte(ETB)
 	}
 
-	// 1. ИЗВЛЕКАЕМ ДАТЫ СТРОГО ИЗ 1С
-	dateProd, ok1 := staticFields["date01"]
-	dateExp, ok2 := staticFields["date02"]
-	text01, ok3 := staticFields["text01"]
+	// 3. Первичный взвод в готовность к приему триггера (FBC)
+	buf.WriteByte(SOH)
+	buf.WriteString("FBC---r--------")
+	buf.WriteByte(ETB)
 
-	// ВАЛИДАЦИЯ: Если 1С не передала обязательные поля — жестко бракуем запуск!
-	if !ok1 || strings.TrimSpace(dateProd) == "" {
-		return fmt.Errorf("ошибка валидации 1С: поле дата производства 'data01' не заполнено")
-	}
-	if !ok2 || strings.TrimSpace(dateExp) == "" {
-		return fmt.Errorf("ошибка валидации 1С: поле дата годности 'data02' не заполнено")
-	}
-	if !ok3 || strings.TrimSpace(text01) == "" {
-		return fmt.Errorf("ошибка валидации 1С: строка смены не заполнена")
-	}
-
-	slog.Info("VALENTIN-DIRECT: Покомандная активация макета и запись точных дат из 1С",
-		"printer_id", d.ID,
-		"template", d.curTemplate,
-		"date_prod", dateProd,
-		"date_exp", dateExp,
-		"text01", text01,
-	)
-
-	// --- ШАГ 1: Выбираем макет из Flash (FMB) ---
-	cmdFMB := []byte(fmt.Sprintf("%cFMB---r%s%c", SOH, d.curTemplate, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("Select Layout (FMB)", cmdFMB)
-	if _, err := d.conn.Write(cmdFMB); err != nil {
-		d.closeConnNoLock()
-		return fmt.Errorf("сбой отправки FMB: %w", err)
-	}
-	time.Sleep(20 * time.Millisecond) // Пауза на переключение графического буфера в RAM
-
-	// --- ШАГ 2: Записываем точную дату производства в поле 18 (BM[18]) ---
-	cmdBM18 := []byte(fmt.Sprintf("%cBM[18]%s%c", SOH, dateProd, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("Field 18 DateProd (BM)", cmdBM18)
-	if _, err := d.conn.Write(cmdBM18); err != nil {
-		d.closeConnNoLock()
-		return fmt.Errorf("сбой отправки BM[18]: %w", err)
-	}
-	time.Sleep(10 * time.Millisecond)
-
-	// --- ШАГ 3: Записываем точную дату годности в поле 19 (BM[19]) ---
-	cmdBM19 := []byte(fmt.Sprintf("%cBM[19]%s%c", SOH, dateExp, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(" Field 19 DateExp (BM)", cmdBM19)
-	if _, err := d.conn.Write(cmdBM19); err != nil {
-		d.closeConnNoLock()
-		return fmt.Errorf("сбой отправки BM[19]: %w", err)
-	}
-	time.Sleep(10 * time.Millisecond)
-
-	cmdBM21 := []byte(fmt.Sprintf("%cBM[21]%s%c", SOH, text01, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("Field 21 text01 (BM)", cmdBM21)
-	if _, err := d.conn.Write(cmdBM21); err != nil {
-		d.closeConnNoLock()
-		return fmt.Errorf(
-			"сбой отправки BM[21]: %w", err)
-	}
-	time.Sleep(10 * time.Millisecond)
-
-	// --- ШАГ 4: Первичный взвод в режим ожидания датчика (FBC) ---
-	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand("Arm Printer (FBC)", cmdFBC)
-	if _, err := d.conn.Write(cmdFBC); err != nil {
-		d.closeConnNoLock()
-		return fmt.Errorf("сбой отправки FBC: %w", err)
+	_ = d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	if _, err := d.conn.Write(buf.Bytes()); err != nil {
+		d.closeConnLocked()
+		return fmt.Errorf("valentin [%d]: сбой загрузки шаблона %s: %w", d.ID, d.curTemplate, err)
 	}
 
 	d.lastCount = 0
 	d.lastRawFBBC = 0
 
-	slog.Info("VALENTIN-DIRECT: Инициализация завершена, оригинальные даты 1С зафиксированы в ОЗУ", "printer_id", d.ID)
+	slog.Info("VALENTIN: Макет и статика успешно загружены", "printer_id", d.ID, "template", d.curTemplate)
 	return nil
 }
 
-// PrintBatchIndexed осуществляет отправку строго динамического блока BM[20] (Честный Знак)
+// PrintBatchIndexed осуществляет атомарную запись DataMatrix и взвод триггера
 func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -177,192 +116,217 @@ func (d *NiceLabelDriver) PrintBatchIndexed(fieldName string, startIndex int, co
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.conn == nil {
-		if err := d.reconnectNoLock(); err != nil {
-			return 0, fmt.Errorf("ошибка сокета перед реактивным тактом: %w", err)
-		}
+	if err := d.ensureConnectionLocked(); err != nil {
+		return 0, fmt.Errorf("valentin [%s]: ошибка сокета перед отправкой кода: %w", d.Address, err)
 	}
 
-	targetCode := codes[0]
-	cleanCode := targetCode
-
-	// 1. Отрезаем хвост с техническими метаданными 1С (если есть '|')
-	if idx := strings.Index(cleanCode, "|"); idx != -1 {
-		cleanCode = cleanCode[:idx]
+	rawCode := codes[0]
+	// Отсечение метаданных 1С (хвост после '|')
+	if idx := strings.Index(rawCode, "|"); idx != -1 {
+		rawCode = rawCode[:idx]
 	}
 
-	// 2. Заменяем текстовую заглушку "<GS>" бинарный байт 0x1D (ASCII 29)
-	cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d")
-	cleanCode = "~1" + cleanCode
-
+	// Замена текстового маркера на бинарный ASCII 29 (GS)
+	cleanCode := strings.ReplaceAll(rawCode, "<GS>", "\x1d")
 	cleanCode = strings.TrimSpace(cleanCode)
 
-	//// Ставим паузу
-	//cmdFDPause := []byte(fmt.Sprintf("%cFD----r0%c", SOH, ETB))
-	//d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	//d.traceCommand(fmt.Sprintf("PUMPER TACT %d [0/3]: Set Stop (FD)", startIndex), cmdFDPause)
-	//if _, err := d.conn.Write(cmdFDPause); err != nil {
-	//	d.closeConnNoLock()
-	//	return 0, fmt.Errorf("сбой отправки FD: %w", err)
-	//}
-
-	// Обновляем динамический DataMatrix BM[20] ---
-	cmdBM20 := []byte(fmt.Sprintf("%cBM[20]%s%c", SOH, cleanCode, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [1/3]: Set DataMatrix (BM20)", startIndex), cmdBM20)
-	if _, err := d.conn.Write(cmdBM20); err != nil {
-		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки BM20: %w", err)
+	// Если динамическое поле не передано, по умолчанию берем поле "20"
+	targetField := fieldName
+	if targetField == "" {
+		targetField = "20"
 	}
 
-	// 🛑 ВАЖНО: Физическая пауза 15мс для перерисовки графического блока в RAM!
-	time.Sleep(2 * time.Millisecond)
+	// Формируем атомарный фрейм: обновление поля + мгновенный взвод FBC
+	var frame bytes.Buffer
 
-	////Снимаем паузу
-	//cmdFD := []byte(fmt.Sprintf("%cFD----r1%c", SOH, ETB))
-	//d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	//d.traceCommand(fmt.Sprintf("PUMPER TACT %d [2/3]: Set Wait (FD)", startIndex), cmdFD)
-	//if _, err := d.conn.Write(cmdFD); err != nil {
-	//	d.closeConnNoLock()
-	//	return 0, fmt.Errorf("сбой отправки FD: %w", err)
-	//}
+	frame.WriteByte(SOH)
+	if _, err := strconv.Atoi(targetField); err == nil {
+		frame.WriteString(fmt.Sprintf("BM[%s]%s", targetField, cleanCode))
+	} else {
+		frame.WriteString(fmt.Sprintf("BV[%s]%s", targetField, cleanCode))
+	}
+	frame.WriteByte(ETB)
 
-	// 🛑 ВАЖНО: Пауза 10мс перед взводом
-	//time.Sleep(10 * time.Millisecond)
+	frame.WriteByte(SOH)
+	frame.WriteString("FBC---r--------")
+	frame.WriteByte(ETB)
 
-	// --- ШАГ 3: Взвод триггера на фотодатчик (FBC) ---
-	cmdFBC := []byte(fmt.Sprintf("%cFBC---r--------%c", SOH, ETB))
-	d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
-	d.traceCommand(fmt.Sprintf("PUMPER TACT %d [3/3]: Arm Trigger (FBC)", startIndex), cmdFBC)
-	if _, err := d.conn.Write(cmdFBC); err != nil {
-		d.closeConnNoLock()
-		return 0, fmt.Errorf("сбой отправки FBC: %w", err)
+	_ = d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+	if _, err := d.conn.Write(frame.Bytes()); err != nil {
+		d.closeConnLocked()
+		return 0, fmt.Errorf("valentin [%d]: ошибка записи пакета в сокет: %w", d.ID, err)
 	}
 
-	slog.Info("VALENTIN-DIRECT: Код BM[20] успешно взведен на датчик", "printer_id", d.ID, "index", startIndex)
 	return 1, nil
 }
 
-// GetCurrentPrintCount опрашивает FBBC с жестким фильтром мусора от тачскрина
+// GetCurrentPrintCount опрашивает регистр отпечатанных этикеток (FBBC)
 func (d *NiceLabelDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.conn == nil {
-		if err := d.reconnectNoLock(); err != nil {
-			return strconv.Itoa(d.lastCount), fmt.Errorf("сокет закрыт: %w", err)
-		}
-	}
-
-	d.conn.SetDeadline(time.Now().Add(d.Timeout))
-	cmd := fmt.Sprintf("%cFBBC--w%c", SOH, ETB)
-
-	if _, err := d.conn.Write([]byte(cmd)); err != nil {
-		d.closeConnNoLock()
+	if err := d.ensureConnectionLocked(); err != nil {
 		return strconv.Itoa(d.lastCount), err
 	}
 
-	buf := make([]byte, 128)
-	n, err := d.conn.Read(buf)
+	// Запрос регистра отпечатанных этикеток: SOH + FBBC--w + ETB
+	cmd := []byte{SOH, 'F', 'B', 'B', 'C', '-', '-', 'w', ETB}
+	_ = d.conn.SetDeadline(time.Now().Add(d.Timeout))
+
+	if _, err := d.conn.Write(cmd); err != nil {
+		d.closeConnLocked()
+		return strconv.Itoa(d.lastCount), err
+	}
+
+	resp, err := d.readFrameLocked()
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return strconv.Itoa(d.lastCount), nil
 		}
-		d.closeConnNoLock()
+		d.closeConnLocked()
 		return strconv.Itoa(d.lastCount), err
 	}
 
-	rawResponse := string(buf[:n])
-
-	// 🛑 ЖЕСТКИЙ ФИЛЬТР: Игнорируем пакеты дисплея (TD) и всё, где нет маркера ответа 'A'
-	if strings.Contains(rawResponse, "TD\"") || !strings.Contains(rawResponse, "A") {
-		return strconv.Itoa(d.lastCount), nil
-	}
-
-	// Парсим только цифры после маркера 'A'
-	cleanResp := strings.Trim(rawResponse, string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
-	aIdx := strings.Index(cleanResp, "A")
+	// Ответ принтера: SOH + A + NNNN + ... + ETB
+	aIdx := strings.Index(resp, "A")
 	if aIdx == -1 {
 		return strconv.Itoa(d.lastCount), nil
 	}
 
-	numStr := ""
-	for _, char := range cleanResp[aIdx+1:] {
-		if char >= '0' && char <= '9' {
-			numStr += string(char)
-		} else {
+	var sb strings.Builder
+	for _, ch := range resp[aIdx+1:] {
+		if ch >= '0' && ch <= '9' {
+			sb.WriteRune(ch)
+		} else if sb.Len() > 0 {
 			break
 		}
 	}
 
-	if numStr == "" {
+	if sb.Len() == 0 {
 		return strconv.Itoa(d.lastCount), nil
 	}
 
-	rawCount, _ := strconv.Atoi(numStr)
+	rawCount, err := strconv.Atoi(sb.String())
+	if err != nil {
+		return strconv.Itoa(d.lastCount), nil
+	}
 
-	// 🛑 ЛОГИКА ЗАЩИТЫ СЧЕТЧИКА (Блокировка полетов в космос):
+	// Логика расчета дельты и защита от сброса внутреннего счетчика
 	if rawCount < d.lastRawFBBC {
-		// Принтер сбросил счетчик (например, из-за команды FBC).
-		// Фиксируем новый ноль, виртуальный счетчик НЕ трогаем.
 		d.lastRawFBBC = rawCount
-		return strconv.Itoa(d.lastCount), nil
-	}
-
-	if rawCount > d.lastRawFBBC {
+	} else if rawCount > d.lastRawFBBC {
 		delta := rawCount - d.lastRawFBBC
-		// Защита от аномальных скачков (больше 10 за один такт опроса быть не может)
-		if delta < 10 {
-			d.lastCount += delta
-		}
+		d.lastCount += delta
 		d.lastRawFBBC = rawCount
 	}
 
 	return strconv.Itoa(d.lastCount), nil
 }
 
-// optimizeSocket отключает задержки алгоритма Nagle и включает сетевой KeepAlive
-func (d *NiceLabelDriver) optimizeSocket(conn net.Conn) {
-	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		_ = tcpConn.SetNoDelay(true)
-		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(5 * time.Second)
+// GetStatus производит опрос состояния принтера через регистр ошибок FCMH (стр. 92)
+func (d *NiceLabelDriver) GetStatus() (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.ensureConnectionLocked(); err != nil {
+		return "ОФФЛАЙН", err
+	}
+
+	// Запрос регистра ошибок: SOH + FCMH--w + ETB (Мануал, стр. 92)
+	cmd := []byte{SOH, 'F', 'C', 'M', 'H', '-', '-', 'w', ETB}
+	_ = d.conn.SetDeadline(time.Now().Add(d.Timeout))
+
+	if _, err := d.conn.Write(cmd); err != nil {
+		d.closeConnLocked()
+		return "ОФФЛАЙН", err
+	}
+
+	resp, err := d.readFrameLocked()
+	if err != nil {
+		d.closeConnLocked()
+		return "ОФФЛАЙН", err
+	}
+
+	// Ожидаемый ответ: (SOH)ANNNN0000...(ETB)
+	aIdx := strings.Index(resp, "A")
+	if aIdx == -1 || len(resp) < aIdx+5 {
+		// Если принтер ответил, но специфичный кадр не распарсился — не бракуем принтер
+		return "ГОТОВ", nil
+	}
+
+	errCode := resp[aIdx+1 : aIdx+5]
+
+	// 0000 означает отсутствие активных ошибок
+	if errCode == "0000" {
+		return "ГОТОВ", nil
+	}
+
+	// Известные критические коды ошибок Valentin CVPL:
+	switch errCode {
+	case "0001", "0020":
+		return "ОШИБКА: РИББОН", nil
+	case "0002", "0021":
+		return "ОШИБКА: МАТЕРИАЛ", nil
+	case "0004", "0035":
+		return "ОШИБКА: ТЕРМОГОЛОВКА", nil
+	default:
+		slog.Warn("VALENTIN: Получен код предупреждения/ошибки", "printer_id", d.ID, "code", errCode)
+		// Если это не фатальный отказ оборудования, даем работать
+		return "ГОТОВ", nil
 	}
 }
 
-func (d *NiceLabelDriver) reconnectNoLock() error {
+// readFrameLocked читает байты до разделителя ETB
+func (d *NiceLabelDriver) readFrameLocked() (string, error) {
+	var buf bytes.Buffer
+	b := make([]byte, 1)
+
+	for {
+		n, err := d.conn.Read(b)
+		if err != nil {
+			return buf.String(), err
+		}
+		if n == 0 {
+			continue
+		}
+
+		if b[0] == ETB {
+			break
+		}
+		if b[0] != SOH && b[0] != '\r' && b[0] != '\n' {
+			buf.WriteByte(b[0])
+		}
+	}
+	return buf.String(), nil
+}
+
+func (d *NiceLabelDriver) ensureConnectionLocked() error {
+	if d.conn != nil {
+		return nil
+	}
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
 		return err
 	}
-	d.optimizeSocket(conn)
+
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(5 * time.Second)
+	}
+
 	d.conn = conn
 	return nil
 }
 
-func (d *NiceLabelDriver) closeConnNoLock() {
+func (d *NiceLabelDriver) closeConnLocked() {
 	if d.conn != nil {
-		d.conn.Close()
+		_ = d.conn.Close()
 		d.conn = nil
 	}
 }
 
-func (d *NiceLabelDriver) traceCommand(desc string, data []byte) {
-	view := string(data)
-	view = strings.ReplaceAll(view, string([]byte{SOH}), "[SOH]")
-	view = strings.ReplaceAll(view, string([]byte{ETB}), "[ETB]")
-	view = strings.ReplaceAll(view, "\r", "[CR]")
-	view = strings.ReplaceAll(view, "\n", "[LF]")
-
-	slog.Info("VALENTIN-TRACE [КОМАНДА В ПОРТ]: "+desc,
-		"printer_id", d.ID,
-		"ascii_payload", view,
-		"hex_dump", fmt.Sprintf("%x", data),
-	)
-}
-
-// ClearQueue очищает локальные счетчики при остановке/сбросе задачи
 func (d *NiceLabelDriver) ClearQueue() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -372,20 +336,29 @@ func (d *NiceLabelDriver) ClearQueue() error {
 	return nil
 }
 
-// --- ЗАГЛУШКИ СОВМЕСТИМОСТИ ИНТЕРФЕЙСА ---
+func (d *NiceLabelDriver) GetLastPrintedIndex() (int, error) {
+	return d.lastCount, nil
+}
 
-func (d *NiceLabelDriver) GetStatus() (string, error)                        { return "ГОТОВ", nil }
-func (d *NiceLabelDriver) GetBufferFreeSpace() (int, error)                  { return 1, nil }
-func (d *NiceLabelDriver) GetLastPrintedIndex() (int, error)                 { return d.lastCount, nil }
-func (d *NiceLabelDriver) UpdateStaticFields(f map[string]string) error      { return nil }
-func (d *NiceLabelDriver) PrintTemplate(t string, f map[string]string) error { return nil }
-func (d *NiceLabelDriver) GetTemplates() ([]string, error)                   { return []string{d.curTemplate}, nil }
+func (d *NiceLabelDriver) GetBufferFreeSpace() (int, error) {
+	return 1, nil
+}
+
+func (d *NiceLabelDriver) GetTemplates() ([]string, error) {
+	return []string{d.curTemplate}, nil
+}
+
 func (d *NiceLabelDriver) GetTemplateFields(t string) ([]string, error) {
-	return []string{"18", "19", "20"}, nil
+	return []string{"20", "date01", "date02", "text01"}, nil
 }
-func (d *NiceLabelDriver) GetRemainingRibbon() (string, error) { return "N/A", nil }
-func (d *NiceLabelDriver) GetQueueCapacity(q string) (string, error) {
-	return "N/A", nil
+
+func (d *NiceLabelDriver) GetRemainingRibbon() (string, error)       { return "N/A", nil }
+func (d *NiceLabelDriver) GetQueueCapacity(q string) (string, error) { return "N/A", nil }
+func (d *NiceLabelDriver) GetPrintSpeed() (string, error)            { return "N/A", nil }
+func (d *NiceLabelDriver) GetCurrentTemplate() (string, error)       { return d.curTemplate, nil }
+func (d *NiceLabelDriver) UpdateStaticFields(f map[string]string) error {
+	return d.SelectTemplate("", f)
 }
-func (d *NiceLabelDriver) GetPrintSpeed() (string, error)      { return "N/A", nil }
-func (d *NiceLabelDriver) GetCurrentTemplate() (string, error) { return d.curTemplate, nil }
+func (d *NiceLabelDriver) PrintTemplate(t string, f map[string]string) error {
+	return d.SelectTemplate(t, f)
+}
