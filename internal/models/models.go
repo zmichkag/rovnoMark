@@ -8,14 +8,16 @@ import (
 
 // PrinterConfig описывает конфигурацию физического печатающего устройства
 type PrinterConfig struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	IP         string `json:"ip"`
-	Port       int    `json:"port"`        // Port is the network port number used to connect to the printer device.
-	DriverType string `json:"driver_type"` // DriverType specifies the software driver or protocol used to communicate with the physical printer device.
-	Role       string `json:"role"`        // Role describes the printer's specific function or purpose.
-	IsActive   bool   `json:"is_active"`   // IsActive indicates if the printer configuration is currently enabled and operational.
-	IsDeleted  bool   `json:"is_deleted"`  // IsDeleted indicates if the printer configuration has been soft-deleted.
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	IP          string `json:"ip"`
+	Port        int    `json:"port"`         // Port is the network port number used to connect to the printer device.
+	DriverType  string `json:"driver_type"`  // DriverType specifies the software driver or protocol used to communicate with the physical printer device.
+	BufferLimit int    `json:"buffer_limit"` // Целевая емкость буфера опережения
+	LeadLoop    int    `json:"lead_loop"`    // Стартовая петля (начальный выстрел)
+	Role        string `json:"role"`         // Role describes the printer's specific function or purpose.
+	IsActive    bool   `json:"is_active"`    // IsActive indicates if the printer configuration is currently enabled and operational.
+	IsDeleted   bool   `json:"is_deleted"`   // IsDeleted indicates if the printer configuration has been soft-deleted.
 }
 
 // LineConfig описывает производственную линию
@@ -94,10 +96,10 @@ type EventLogItem struct {
 	Timestamp time.Time `json:"timestamp"`
 	LineID    *int      `json:"line_id,omitempty"`
 	LineName  string    `json:"line_name,omitempty"`
-	PrinterID *int      `json:"printer_id,omitempty"`
-	Printer   string    `json:"printer_name,omitempty"`
-	EventType string    `json:"event_type"` // 'error', 'warn', 'info', 'success'
-	Message   string    `json:"message"`
+	PrinterID *int      `json:"printer_id,omitempty"`   // PrinterID is the optional ID of the printer linked to the event. Nil indicates a system-wide event.
+	Printer   string    `json:"printer_name,omitempty"` // Printer is the name of the printer associated with the event, or 'System' if the event is not printer-specific.
+	EventType string    `json:"event_type"`             // 'error', 'warn', 'info', 'success'
+	Message   string    `json:"message"`                // Message provides a detailed description or content of the event log item.
 }
 
 // LogFilter содержит параметры фильтрации истории событий
@@ -105,10 +107,10 @@ type LogFilter struct {
 	LineID    int       `json:"line_id"`
 	PrinterID int       `json:"printer_id"`
 	EventType string    `json:"event_type"` // 'error', 'warn', 'info', 'success'
-	DateFrom  time.Time `json:"date_from"`
-	DateTo    time.Time `json:"date_to"`
-	Limit     int       `json:"limit"`
-	Offset    int       `json:"offset"`
+	DateFrom  time.Time `json:"date_from"`  // DateFrom specifies the start date and time for filtering event logs.
+	DateTo    time.Time `json:"date_to"`    // DateTo specifies the end date and time for filtering event logs.
+	Limit     int       `json:"limit"`      // Limit specifies the maximum number of event logs to retrieve; defaults to 100 if zero or less.
+	Offset    int       `json:"offset"`     // Offset specifies the number of records to skip for pagination.
 }
 
 // TaskState represents the current state or lifecycle stage of a task.
