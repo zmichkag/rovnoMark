@@ -9,8 +9,16 @@ type PrinterConfig struct {
 	IP         string `json:"ip"`
 	Port       int    `json:"port"`
 	DriverType string `json:"driver_type"`
-	IsActive   bool   `json:"is_active"`
-	IsDeleted  bool   `json:"is_deleted"`
+	BCSDevice  string `json:"bcs_device"`
+	// CaptureWeight включает журналирование пары «марка — вес» для этого принтера.
+	CaptureWeight bool `json:"capture_weight"`
+	RecordGXNET   bool `json:"record_gxnet"`
+	// BizerbaMode и BizerbaConveyor применяются только к драйверу Bizerba.
+	// В базе они хранятся отдельно от общей записи принтера.
+	BizerbaMode     string `json:"bizerba_mode,omitempty"`
+	BizerbaConveyor bool   `json:"bizerba_conveyor,omitempty"`
+	IsActive        bool   `json:"is_active"`
+	IsDeleted       bool   `json:"is_deleted"`
 }
 
 // Конфигурация линии

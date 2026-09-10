@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -320,10 +321,22 @@ func NewPrinterManager() *PrinterManager {
 func (pm *PrinterManager) AddPrinter(config models.PrinterConfig, p Printer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	if previous := pm.printers[config.ID]; previous != nil {
+		if closer, ok := previous.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				slog.Error("Ошибка закрытия прежнего драйвера", "printer_id", config.ID, "err", err)
+			}
+		}
+	}
 
 	pm.configs[config.ID] = config
 	pm.printers[config.ID] = p
 	pm.states[config.ID] = models.PrinterState{Status: "INITIALIZING", Ribbon: "?", Queue: "?"}
+	if config.IsActive {
+		if starter, ok := p.(interface{ Start() }); ok {
+			starter.Start()
+		}
+	}
 
 	pID := config.ID
 	pm.addLogNoLock(nil, &pID, nil, "info", fmt.Sprintf("Принтер %s добавлен (%s)", config.Name, config.IP))
@@ -333,6 +346,27 @@ func (pm *PrinterManager) GetPrinter(id int) Printer {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.printers[id]
+}
+
+// CloseAll releases optional driver resources. For Bizerba this closes
+// channel E before releasing the persistent COM connection.
+func (pm *PrinterManager) CloseAll() error {
+	pm.mu.RLock()
+	printers := make([]Printer, 0, len(pm.printers))
+	for _, printer := range pm.printers {
+		printers = append(printers, printer)
+	}
+	pm.mu.RUnlock()
+
+	var closeErrors []error
+	for _, printer := range printers {
+		if closer, ok := printer.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				closeErrors = append(closeErrors, err)
+			}
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []models.LogEntry) {
@@ -417,7 +451,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 						if errTask == nil && activeTaskID > 0 {
 							lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
 							if errIdx == nil && lastPrintedIdx >= 0 {
-								affected, errMark := store.MarkAsPrinted(activeTaskID, lastPrintedIdx)
+								affected, errMark := store.MarkAsPrinted(activeTaskID, id, lastPrintedIdx)
 								if errMark == nil && affected > 0 {
 									slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
 										"printer", cfg.Name,
@@ -452,7 +486,7 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 			}
 
 			isOfflineNow := err != nil
-			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
+			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН")
 
 			if isOfflineNow && !wasOffline {
 				pm.addLogNoLock(store, &pID, lIDPtr, "error", fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))

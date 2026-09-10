@@ -11,11 +11,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"rovnoMark/internal/core"
 	"rovnoMark/internal/core/marking"
+	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/markem"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"rovnoMark/internal/models"
 	"strconv"
@@ -53,6 +56,33 @@ func sendJSONError(w http.ResponseWriter, code int, msg string) {
 	}
 }
 
+// bizerbaTaskFields дополняет поля Bizerba совместимыми параметрами верхнего уровня.
+// Другие драйверы эту форму запроса не используют.
+func bizerbaTaskFields(staticFields map[string]string, date string, brigade json.RawMessage) map[string]string {
+	fields := make(map[string]string, len(staticFields)+2)
+	for key, value := range staticFields {
+		fields[key] = value
+	}
+	if _, exists := fields["date"]; !exists && strings.TrimSpace(date) != "" {
+		fields["date"] = strings.TrimSpace(date)
+	}
+	if _, exists := fields["brigade"]; !exists {
+		raw := strings.TrimSpace(string(brigade))
+		if raw != "" && raw != "null" {
+			var text string
+			if err := json.Unmarshal(brigade, &text); err == nil {
+				fields["brigade"] = strings.TrimSpace(text)
+			} else {
+				var number json.Number
+				if err := json.Unmarshal(brigade, &number); err == nil {
+					fields["brigade"] = number.String()
+				}
+			}
+		}
+	}
+	return fields
+}
+
 func main() {
 	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
@@ -86,6 +116,18 @@ func main() {
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		} else if cfg.DriverType == "markem" {
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
+		} else if cfg.DriverType == "bizerba" {
+			manager.AddPrinter(cfg, bizerba.NewWithProfile(cfg.IP, cfg.Port, cfg.BCSDevice, bizerba.Profile{
+				Mode: bizerba.MarkingMode(cfg.BizerbaMode), Conveyor: cfg.BizerbaConveyor,
+				CaptureWeight: cfg.CaptureWeight,
+				RecordGXNET:   cfg.RecordGXNET,
+				RecordResponse: func(response bizerba.Response) error {
+					return store.SaveGXNETResponse(cfg.ID, cfg.BCSDevice, response.ReceivedAt, response.Command, response.Parameter, response.Queue, response.Payload, response.Status)
+				},
+				RecordWeight: func(printerIndex int, mark, weight string) error {
+					return store.SaveMarkWeight(cfg.ID, printerIndex, mark, weight)
+				},
+			}))
 		}
 	}
 
@@ -158,6 +200,18 @@ func main() {
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		case "markem":
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
+		case "bizerba":
+			manager.AddPrinter(cfg, bizerba.NewWithProfile(cfg.IP, cfg.Port, cfg.BCSDevice, bizerba.Profile{
+				Mode: bizerba.MarkingMode(cfg.BizerbaMode), Conveyor: cfg.BizerbaConveyor,
+				CaptureWeight: cfg.CaptureWeight,
+				RecordGXNET:   cfg.RecordGXNET,
+				RecordResponse: func(response bizerba.Response) error {
+					return store.SaveGXNETResponse(cfg.ID, cfg.BCSDevice, response.ReceivedAt, response.Command, response.Parameter, response.Queue, response.Payload, response.Status)
+				},
+				RecordWeight: func(printerIndex int, mark, weight string) error {
+					return store.SaveMarkWeight(cfg.ID, printerIndex, mark, weight)
+				},
+			}))
 		default:
 			http.Error(w, "Неизвестный тип драйвера", http.StatusBadRequest)
 			return
@@ -545,6 +599,8 @@ func main() {
 			TemplateName     string            `json:"template_name"`
 			DynamicFieldName string            `json:"dynamic_field_name"`
 			StaticFields     map[string]string `json:"static_fields"`
+			Date             string            `json:"date"`
+			Brigade          json.RawMessage   `json:"brigade"`
 			RndText          string            `json:"rnd_text"`
 		}
 
@@ -614,11 +670,16 @@ func main() {
 				}
 			}
 
+			deviceFields := req.StaticFields
+			if pCfg.DriverType == "bizerba" {
+				deviceFields = bizerbaTaskFields(req.StaticFields, req.Date, req.Brigade)
+			}
+
 			// Конфигурация печати в зависимости от режима (ЧЗ / Статика)
 			if req.DynamicFieldName == "" {
 				// Режим одиночной статической печати
 				p.ClearQueue()
-				if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
+				if err := p.SelectTemplate(req.TemplateName, deviceFields); err != nil {
 					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона на %s: %v", pCfg.Name, err))
 					return
@@ -627,7 +688,7 @@ func main() {
 				// Режим сериализации (Честный ЗНАК)
 				var selectFields map[string]string
 				if pCfg.DriverType != "videojet" {
-					selectFields = req.StaticFields
+					selectFields = deviceFields
 				}
 
 				if err := p.SelectTemplate(req.TemplateName, selectFields); err != nil {
@@ -637,10 +698,10 @@ func main() {
 				}
 
 				// Готовим составную строку полей "dm_data0;date01;date02;text01"
-				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
+				compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, deviceFields, "")
 
 				// Единый вызов инициализации сессии
-				if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
+				if err := p.InitSession(compositeFields, 1000, deviceFields); err != nil {
 					_ = store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 					sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии на %s: %v", pCfg.Name, err))
 					return
@@ -834,7 +895,7 @@ func main() {
 					// Получаем физический индекс и чистим очередь
 					lastIdx, pollErr = p.GetLastPrintedIndex()
 					if pollErr == nil {
-						_ = p.ClearQueue()
+						pollErr = p.ClearQueue()
 					}
 					close(doneChan)
 				}()
@@ -854,7 +915,7 @@ func main() {
 					}
 
 					// Фиксируем подтвержденные данные в БД
-					affected, errMark := store.MarkAsPrinted(taskID, lastIdx)
+					affected, errMark := store.MarkAsPrinted(taskID, cfg.ID, lastIdx)
 					if errMark != nil {
 						slog.Error("[STOP] Ошибка обновления статусов кодов в БД", "task_id", taskID, "printer_id", cfg.ID, "err", errMark)
 					}
@@ -1017,8 +1078,24 @@ func main() {
 	addr := fmt.Sprintf(":%d", *port)
 	slog.Info("HTTP сервер запущен", "address", "http://localhost"+addr)
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server := &http.Server{Addr: addr}
+	shutdownSignal, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	defer func() {
+		if err := manager.CloseAll(); err != nil {
+			slog.Error("Ошибка закрытия драйверов", "err", err)
+		}
+	}()
+	go func() {
+		<-shutdownSignal.Done()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			slog.Error("Ошибка остановки HTTP сервера", "err", err)
+		}
+	}()
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("Критическая ошибка сервера", "err", err)
-		os.Exit(1)
 	}
 }

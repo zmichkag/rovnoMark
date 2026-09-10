@@ -88,7 +88,12 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 
 // GetAllActivePrinters (для инициализации менеджера при запуске)
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	rows, err := s.db.Query("SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0")
+	rows, err := s.db.Query(`
+		SELECT p.id, p.name, p.ip, p.port, p.driver_type, p.bcs_device, p.capture_weight,
+		       COALESCE(bs.mode, 'stream'), COALESCE(bs.conveyor, 0), COALESCE(bs.record_gxnet, 0), p.is_active
+		FROM printers p
+		LEFT JOIN bizerba_settings bs ON bs.printer_id = p.id
+		WHERE p.is_deleted = 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +102,8 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.BCSDevice, &p.CaptureWeight,
+			&p.BizerbaMode, &p.BizerbaConveyor, &p.RecordGXNET, &p.IsActive); err != nil {
 			continue
 		}
 		list = append(list, p)
@@ -329,9 +335,11 @@ func (s *Store) GetTaskStaticFieldsJSON(taskID int) (string, error) {
 // GetPrintersByLine Показывает привязаные  принтеры
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	query := `
-        SELECT p.id, p.name, p.ip, p.port, p.driver_type 
+		SELECT p.id, p.name, p.ip, p.port, p.driver_type, p.bcs_device, p.capture_weight,
+		       COALESCE(bs.mode, 'stream'), COALESCE(bs.conveyor, 0), COALESCE(bs.record_gxnet, 0)
         FROM printers p
         JOIN line_printers lp ON p.id = lp.printer_id
+		LEFT JOIN bizerba_settings bs ON bs.printer_id = p.id
         WHERE lp.line_id = ? AND p.is_active = 1`
 
 	rows, err := s.db.Query(query, lineID)
@@ -343,7 +351,10 @@ func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType)
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.BCSDevice, &p.CaptureWeight,
+			&p.BizerbaMode, &p.BizerbaConveyor, &p.RecordGXNET); err != nil {
+			continue
+		}
 		list = append(list, p)
 	}
 	return list, nil
@@ -606,13 +617,13 @@ func (s *Store) FetchAndAssignCodes(taskID int, printerID int, limit int) ([]mod
 	return list, tx.Commit()
 }
 
-// Синхронизация статуса 'printed' на основе индекса SID от принтера
-func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
+// Синхронизация статуса 'printed' на основе индекса SID конкретного принтера.
+func (s *Store) MarkAsPrinted(taskID, printerID, lastIndex int) (int64, error) {
 	res, err := s.db.Exec(`
 		UPDATE task_codes 
 		SET status = 'printed', printed_at = CURRENT_TIMESTAMP 
-		WHERE task_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
-		taskID, lastIndex)
+		WHERE task_id = ? AND printer_id = ? AND printer_index <= ? AND status = 'in_buffer'`,
+		taskID, printerID, lastIndex)
 	if err != nil {
 		return 0, err
 	}
@@ -620,21 +631,81 @@ func (s *Store) MarkAsPrinted(taskID int, lastIndex int) (int64, error) {
 }
 
 func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
-	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, bcs_device, capture_weight, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	var id interface{} = p.ID
 	if p.ID == 0 {
 		id = nil
 	}
 
-	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive)
+	res, err := tx.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.BCSDevice, p.CaptureWeight, p.IsActive)
 	if err != nil {
 		return 0, err
 	}
 
-	if p.ID == 0 {
-		return res.LastInsertId()
+	printerID := int64(p.ID)
+	if printerID == 0 {
+		printerID, err = res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
 	}
-	return int64(p.ID), nil
+
+	if strings.EqualFold(strings.TrimSpace(p.DriverType), "bizerba") {
+		mode := strings.ToLower(strings.TrimSpace(p.BizerbaMode))
+		if mode == "" {
+			mode = "stream"
+		}
+		if mode != "stream" && mode != "unique" {
+			return 0, fmt.Errorf("неизвестный режим Bizerba %q: ожидается stream или unique", p.BizerbaMode)
+		}
+		_, err = tx.Exec(`
+			INSERT INTO bizerba_settings (printer_id, mode, conveyor, record_gxnet)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(printer_id) DO UPDATE SET mode = excluded.mode, conveyor = excluded.conveyor, record_gxnet = excluded.record_gxnet`,
+			printerID, mode, p.BizerbaConveyor, p.RecordGXNET)
+	} else {
+		_, err = tx.Exec(`DELETE FROM bizerba_settings WHERE printer_id = ?`, printerID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return printerID, nil
+}
+
+// SaveMarkWeight сохраняет фактически напечатанную марку, её задание и полученный вес.
+func (s *Store) SaveMarkWeight(printerID, printerIndex int, mark, weight string) error {
+	mark = strings.TrimSpace(mark)
+	weight = strings.TrimSpace(weight)
+	if mark == "" || weight == "" {
+		return fmt.Errorf("марка и вес не должны быть пустыми")
+	}
+	res, err := s.db.Exec(`
+		INSERT INTO mark_weights (task_id, mark, weight)
+		SELECT task_id, ?, ?
+		FROM task_codes
+		WHERE printer_id = ? AND printer_index = ? AND code = ? AND status = 'in_buffer'
+		ORDER BY id DESC
+		LIMIT 1`, mark, weight, printerID, printerIndex, mark)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("не найдена запись task_codes для принтера %d, индекса %d и марки %q", printerID, printerIndex, mark)
+	}
+	return nil
 }
 
 // Сохранить или обновить линию
@@ -814,9 +885,55 @@ func createTables(db *sql.DB) {
 		ip TEXT NOT NULL,
 		port INTEGER,
 		driver_type TEXT,
+		bcs_device TEXT NOT NULL DEFAULT '',
+		capture_weight BOOLEAN NOT NULL DEFAULT 0,
 		is_active BOOLEAN DEFAULT 1,
 		is_deleted BOOLEAN DEFAULT 0
 	);`)
+	// Migration for databases created before the COM Bizerba driver. GLPMax is
+	// the connection name verified for the existing installation.
+	db.Exec(`ALTER TABLE printers ADD COLUMN bcs_device TEXT NOT NULL DEFAULT ''`)
+	db.Exec(`ALTER TABLE printers ADD COLUMN capture_weight BOOLEAN NOT NULL DEFAULT 0`)
+	db.Exec(`UPDATE printers SET bcs_device = 'GLPMax' WHERE driver_type = 'bizerba' AND bcs_device = ''`)
+
+	// Журнал фактически напечатанных марок и веса, полученного от оборудования.
+	db.Exec(`CREATE TABLE IF NOT EXISTS mark_weights (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		task_id INTEGER NOT NULL,
+		mark TEXT NOT NULL,
+		weight TEXT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(task_id) REFERENCES tasks(id)
+	);`)
+	db.Exec(`ALTER TABLE mark_weights ADD COLUMN task_id INTEGER`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mark_weights_created_at ON mark_weights(created_at)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_mark_weights_task_id ON mark_weights(task_id)`)
+
+	// Настройки, которые имеют смысл только для оборудования Bizerba.
+	db.Exec(`CREATE TABLE IF NOT EXISTS bizerba_settings (
+		printer_id INTEGER PRIMARY KEY,
+		mode TEXT NOT NULL DEFAULT 'stream' CHECK(mode IN ('stream', 'unique')),
+		conveyor BOOLEAN NOT NULL DEFAULT 0,
+		FOREIGN KEY(printer_id) REFERENCES printers(id) ON DELETE CASCADE
+	);`)
+	db.Exec(`
+		INSERT OR IGNORE INTO bizerba_settings (printer_id, mode, conveyor)
+		SELECT id, 'stream', 0 FROM printers WHERE driver_type = 'bizerba'`)
+
+	// GXNET capture is opt-in for existing and new devices.
+	db.Exec(`ALTER TABLE bizerba_settings ADD COLUMN record_gxnet BOOLEAN NOT NULL DEFAULT 0`)
+	db.Exec(`CREATE TABLE IF NOT EXISTS bizerba_responses (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		printer_id INTEGER NOT NULL,
+		device TEXT NOT NULL,
+		received_at TEXT NOT NULL,
+		command TEXT NOT NULL,
+		parameter TEXT NOT NULL,
+		queue TEXT NOT NULL,
+		payload TEXT NOT NULL,
+		status INTEGER NOT NULL
+	)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bizerba_responses_printer_time ON bizerba_responses(printer_id, received_at)`)
 
 	// Матрица связей
 	db.Exec(`CREATE TABLE IF NOT EXISTS line_printers (

@@ -146,6 +146,16 @@
             <div class="field"><label>Имя:</label><input type="text" id="p_name"></div>
             <div class="field"><label>IP:</label><input type="text" id="p_ip"></div>
             <div class="field"><label>Порт:</label><input type="number" id="p_port" value="9100"></div>
+            <div class="field"><label>BCS device (Bizerba):</label><input type="text" id="p_bcs_device" placeholder="GLPMax"></div>
+            <div class="field">
+                <label>Режим марок Bizerba:</label>
+                <select id="p_bizerba_mode">
+                    <option value="stream">Поток GT03/GT04</option>
+                    <option value="unique">Unique (заглушка, пока не активна)</option>
+                </select>
+            </div>
+            <div class="field"><label><input type="checkbox" id="p_bizerba_conveyor" style="width:auto;"> Управляемый конвейер Bizerba (заглушка)</label></div>
+            <div class="field"><label><input type="checkbox" id="p_record_gxnet" style="width:auto;"> Записывать сообщения Bizerba во время задания</label></div><div class="field"><label><input type="checkbox" id="p_capture_weight" style="width:auto;"> Фиксация веса напечатанных марок</label></div>
             <div class="field">
                 <label>Драйвер:</label>
                 <select id="p_driver">
@@ -153,6 +163,7 @@
                     <option value="videojet">Videojet</option>
                     <option value="markem">Markem-Imaje (DCP)</option>
                     <option value="valentine_nice">Carl Valentin (NiceLabel)</option>
+                    <option value="bizerba">Bizerba (Brain2 ConnectService)</option>
                     <option value="carlvalentine">Carl Valentin (CVPL Native)</option>
                     <option value="tsc">TSC (TSPL)</option>
                 </select>
@@ -186,7 +197,7 @@
     <h4>Линии</h4>
     <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th><th>Действие</th></tr></thead><tbody id="lines-list-table"></tbody></table>
     <h4>Принтеры</h4>
-    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Фиксация веса</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
 </div>
 
 <div id="templatesTab" class="tab-content">
@@ -812,7 +823,7 @@
             printers.forEach(p => window.printersMap[p.id] = p);
 
             document.getElementById('assign_printer').innerHTML = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-            document.getElementById('printers-list-table').innerHTML = printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td></tr>`).join('');
+            document.getElementById('printers-list-table').innerHTML = printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td>${p.capture_weight ? 'Да' : 'Нет'}</td><td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td></tr>`).join('');
 
             const aRes = await fetch('/api/assignments');
             if (!aRes.ok) throw new Error(`Сбой на бэкенде (/api/assignments), код ${aRes.status}:\n${await aRes.text()}`);
@@ -838,6 +849,11 @@
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value),
+            bcs_device: document.getElementById('p_bcs_device').value,
+            bizerba_mode: document.getElementById('p_bizerba_mode').value,
+            bizerba_conveyor: document.getElementById('p_bizerba_conveyor').checked,
+            record_gxnet: document.getElementById('p_record_gxnet').checked,
+            capture_weight: document.getElementById('p_capture_weight').checked,
             driver_type: document.getElementById('p_driver').value,
             is_active: document.getElementById('p_active').checked
         };
@@ -868,6 +884,11 @@
         document.getElementById('p_name').value = p.name;
         document.getElementById('p_ip').value = p.ip;
         document.getElementById('p_port').value = p.port;
+        document.getElementById('p_bcs_device').value = p.bcs_device || '';
+        document.getElementById('p_bizerba_mode').value = p.bizerba_mode || 'stream';
+        document.getElementById('p_bizerba_conveyor').checked = !!p.bizerba_conveyor;
+        document.getElementById('p_capture_weight').checked = !!p.capture_weight;
+        document.getElementById('p_record_gxnet').checked = !!p.record_gxnet;
         document.getElementById('p_driver').value = p.driver_type;
         document.getElementById('p_active').checked = p.is_active;
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -878,6 +899,11 @@
         document.getElementById('p_name').value = '';
         document.getElementById('p_ip').value = '';
         document.getElementById('p_port').value = '9100';
+        document.getElementById('p_bcs_device').value = '';
+        document.getElementById('p_bizerba_mode').value = 'stream';
+        document.getElementById('p_bizerba_conveyor').checked = false;
+        document.getElementById('p_capture_weight').checked = false;
+        document.getElementById('p_record_gxnet').checked = false;
     }
 
     function editLine(id) {

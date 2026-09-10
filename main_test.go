@@ -117,3 +117,15 @@ func TestAppendApi_ValidationAndStop(t *testing.T) {
 		_ = taskID
 	})
 }
+
+func TestBizerbaTaskFieldsAcceptsTopLevelDateAndNumericBrigade(t *testing.T) {
+	fields := bizerbaTaskFields(nil, "15.05.2026", json.RawMessage(`1`))
+	if fields["date"] != "15.05.2026" || fields["brigade"] != "1" {
+		t.Fatalf("bizerbaTaskFields() = %#v", fields)
+	}
+
+	fields = bizerbaTaskFields(map[string]string{"date": "20.08.2026", "brigade": "TST"}, "15.05.2026", json.RawMessage(`2`))
+	if fields["date"] != "20.08.2026" || fields["brigade"] != "TST" {
+		t.Fatalf("static_fields must take precedence: %#v", fields)
+	}
+}
