@@ -31,7 +31,7 @@ type ReconcileResult struct {
 }
 
 const (
-	TargetMasterSchemaVersion = 1
+	TargetMasterSchemaVersion = 2
 	TargetCodesSchemaVersion  = 1
 )
 
@@ -203,6 +203,11 @@ func MigrateMaster(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_telemetry_time ON printer_telemetry(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_event_log_composite ON event_log(line_id, event_type, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer ON task_printer_counters(task_id, printer_id);
+		`,
+
+		2: `
+		ALTER TABLE printers ADD COLUMN buffer_limit INTEGER DEFAULT 30;
+		ALTER TABLE printers ADD COLUMN lead_loop INTEGER DEFAULT 5;
 		`,
 	}
 
