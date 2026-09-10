@@ -233,6 +233,7 @@ func MigrateMaster(db *sql.DB) error {
 			return fmt.Errorf("отсутствует DDL для Master версии %d", v)
 		}
 
+		// 1. Открываем транзакцию чисто под DDL (создание/изменение таблиц)
 		tx, err := db.Begin()
 		if err != nil {
 			return fmt.Errorf("ошибка открытия транзакции миграции Master v%d: %w", v, err)
@@ -243,14 +244,16 @@ func MigrateMaster(db *sql.DB) error {
 			return fmt.Errorf("сбой применения миграции Master v%d: %w", v, err)
 		}
 
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d;", v)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("сбой фиксации Master user_version=%d: %w", v, err)
-		}
-
+		// 2. Коммитим изменения схемы
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("ошибка коммита миграции Master v%d: %w", v, err)
 		}
+
+		// 3. Фиксируем новую версию PRAGMA вне транзакции, напрямую через db
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d;", v)); err != nil {
+			return fmt.Errorf("сбой фиксации Master user_version=%d: %w", v, err)
+		}
+
 		slog.Info("Успешно применена миграция Master БД", "version", v)
 	}
 
