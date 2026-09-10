@@ -158,6 +158,14 @@
                 </select>
             </div>
             <div class="field"><label><input type="checkbox" id="p_active" checked style="width:auto;"> Активен</label></div>
+            <div class="field">
+                <label>Емкость буфера (Buffer Limit, шт):</label>
+                <input type="number" id="p_buffer_limit" value="30" min="1" max="500">
+            </div>
+            <div class="field">
+                <label>Стартовая петля (Lead Loop, шт):</label>
+                <input type="number" id="p_lead_loop" value="5" min="0" max="50">
+            </div>
             <button class="btn" style="background: var(--success); width: 100%;" onclick="addPrinter()">СОХРАНИТЬ</button>
             <button class="btn" style="width: 100%; margin-top: 5px;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
         </div>
@@ -839,6 +847,8 @@
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value),
             driver_type: document.getElementById('p_driver').value,
+            buffer_limit: parseInt(document.getElementById('p_buffer_limit').value) || 30,
+            lead_loop: parseInt(document.getElementById('p_lead_loop').value) || 5,
             is_active: document.getElementById('p_active').checked
         };
 
@@ -870,6 +880,8 @@
         document.getElementById('p_port').value = p.port;
         document.getElementById('p_driver').value = p.driver_type;
         document.getElementById('p_active').checked = p.is_active;
+        document.getElementById('p_buffer_limit').value = p.buffer_limit || 30;
+        document.getElementById('p_lead_loop').value = p.lead_loop !== undefined ? p.lead_loop : 5;
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
@@ -878,6 +890,8 @@
         document.getElementById('p_name').value = '';
         document.getElementById('p_ip').value = '';
         document.getElementById('p_port').value = '9100';
+        document.getElementById('p_buffer_limit').value = '30';
+        document.getElementById('p_lead_loop').value = '5';
     }
 
     function editLine(id) {
