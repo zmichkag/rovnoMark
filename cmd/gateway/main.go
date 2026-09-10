@@ -128,7 +128,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	// Монтирование UI
 	contentUI, _ := fs.Sub(ui.FS, ".")
 	contentUI2, _ := fs.Sub(ui2.FS, ".")
-	contentOKK, _ := fs.Sub(okk.FS, ".")
+	contentOKK, _ := fs.Sub(ui_okk.FS, ".")
 
 	apiServer := api.NewServer(store, manager, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
 	router := apiServer.InitRoutes()
