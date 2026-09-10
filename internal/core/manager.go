@@ -36,21 +36,38 @@ type Printer interface {
 	SelectTemplate(template string, fields map[string]string) error
 }
 
-type ScanResult struct {
-	Code      string // Считанный DataMatrix / Barcode
-	RawData   []byte // Сырые байты (важно для криптохвостов и FNC1)
-	Quality   string // Оценка грейда ISO/IEC (A, B, C, D, F) если умеет камера
-	IsNoRead  bool   // Флаг ошибки чтения (No-Read)
-	TriggerID string // Привязка к оптическому датчику / такту
-	Timestamp time.Time
+// ScanEvent — нормализованное событие сканирования
+type ScanEvent struct {
+	ScannerID string    // ID сканера в системе
+	Code      string    // Очищенный код маркировки (с валидированным GS1/DataMatrix)
+	RawData   []byte    // Исходный байтовый поток (критично для проверки спецсимволов FNC1)
+	Quality   string    // Грейд качества ISO/IEC (A, B, C, D, F) — если поддерживается камерой
+	IsNoRead  bool      // Флаг нечитаемости (камера сработала по датчику, но код не распознан)
+	Timestamp time.Time // Точное время фиксации сканирования
 }
 
+// ScannerStatus — телеметрия для Background Poller и UI
+type ScannerStatus struct {
+	Online        bool      `json:"online"`
+	TotalScans    uint64    `json:"total_scans"`
+	GoodScans     uint64    `json:"good_scans"`
+	NoReads       uint64    `json:"no_reads"`
+	LastError     string    `json:"last_error,omitempty"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+}
+
+// Scanner — универсальный контракт для любого типа сканеров
 type Scanner interface {
-	GetStatus(ctx context.Context) (DeviceStatus, error)
-	// Subscribe возвращает канал, в который драйвер пушит события чтения
-	Subscribe(ctx context.Context) (<-chan ScanResult, error)
-	// SoftwareTrigger вызывает программный спуск затвора (если нет фотодатчика)
+	// GetStatus возвращает состояние для веб-интерфейса и поллера
+	GetStatus(ctx context.Context) (ScannerStatus, error)
+
+	// Events возвращает однонаправленный канал потока считанных кодов
+	Events() <-chan ScanEvent
+
+	// SoftwareTrigger программный спуск затвора (если сканер в режиме триггера от шлюза)
 	SoftwareTrigger(ctx context.Context) error
+
+	// Close освобождает сокет или COM-порт
 	Close() error
 }
 
