@@ -719,7 +719,6 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 }
 
 func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
-	// Задаем значения по умолчанию
 	if p.BufferLimit <= 0 {
 		p.BufferLimit = 30
 	}
@@ -727,37 +726,39 @@ func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
 		p.LeadLoop = 5
 	}
 
-	// Если ID равен 0, передаем nil, чтобы SQLite сам выдал новый номер
-	var idVal any = p.ID
+	// 1. Создание нового принтера (ID == 0) через NamedExec
 	if p.ID == 0 {
-		idVal = nil
-	}
+		query := `
+			INSERT INTO printers (
+				name, ip, port, driver_type, is_active, is_deleted, buffer_limit, lead_loop
+			) VALUES (
+				:name, :ip, :port, :driver_type, :is_active, 0, :buffer_limit, :lead_loop
+			)`
 
-	// Собираем данные в карту
-	params := map[string]any{
-		"id":           idVal,
-		"name":         p.Name,
-		"ip":           p.IP,
-		"port":         p.Port,
-		"driver_type":  p.DriverType,
-		"is_active":    p.IsActive,
-		"buffer_limit": p.BufferLimit,
-		"lead_loop":    p.LeadLoop,
-	}
-
-	// Запрос с именованными параметрами
-	query := `INSERT OR REPLACE INTO printers 
-		(id, name, ip, port, driver_type, is_active, buffer_limit, lead_loop) 
-		VALUES (:id, :name, :ip, :port, :driver_type, :is_active, :buffer_limit, :lead_loop)`
-	res, err := s.db.NamedExec(query, params)
-	if err != nil {
-		return 0, err
-	}
-
-	//  Возвращаем ID
-	if p.ID == 0 {
+		res, err := s.db.NamedExec(query, p)
+		if err != nil {
+			return 0, fmt.Errorf("ошибка вставки принтера: %w", err)
+		}
 		return res.LastInsertId()
 	}
+
+	// 2. Обновление существующей записи (ID > 0)
+	query := `
+		UPDATE printers 
+		SET name = :name,
+		    ip = :ip,
+		    port = :port,
+		    driver_type = :driver_type,
+		    is_active = :is_active,
+		    buffer_limit = :buffer_limit,
+		    lead_loop = :lead_loop,
+		    is_deleted = :is_deleted
+		WHERE id = :id`
+
+	if _, err := s.db.NamedExec(query, p); err != nil {
+		return 0, fmt.Errorf("ошибка обновления принтера ID=%d: %w", p.ID, err)
+	}
+
 	return int64(p.ID), nil
 }
 
