@@ -24,7 +24,6 @@
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* ИСПРАВЛЕНИЕ: Многорядная сетка вместо горизонтального скролла */
         .columns-wrapper {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -59,7 +58,6 @@
             border-color: rgba(255, 193, 7, 0.2);
         }
 
-        /* Карточка принтера внутри колонки */
         .card { background: var(--surface); border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border-left: 5px solid var(--warning); display: flex; flex-direction: column; gap: 12px; }
         .card.online { border-left-color: var(--success); }
         .card.offline { border-left-color: var(--danger); }
@@ -80,6 +78,13 @@
         table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.9rem; margin-bottom: 30px; }
         th { text-align: left; border-bottom: 1px solid #444; padding: 10px; }
         td { padding: 10px; border-bottom: 1px solid #333; }
+        .bizerba-panel {
+            background: #181818;
+            border: 1px dashed #3a3a3a;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
     </style>
 </head>
 <body>
@@ -140,7 +145,7 @@
 
 <div id="settings" class="tab-content">
     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-        <div style="flex: 1; min-width: 300px; background: var(--surface); padding: 20px; border-radius: 8px;">
+        <div style="flex: 1; min-width: 320px; background: var(--surface); padding: 20px; border-radius: 8px;">
             <h3>Принтер</h3>
             <input type="number" id="p_id" readonly placeholder="ID (Авто)" style="background: #333; margin-bottom: 10px;">
             <div class="field"><label>Имя:</label><input type="text" id="p_name"></div>
@@ -148,15 +153,34 @@
             <div class="field"><label>Порт:</label><input type="number" id="p_port" value="9100"></div>
             <div class="field">
                 <label>Драйвер:</label>
-                <select id="p_driver">
+                <select id="p_driver" onchange="toggleDriverExtraFields()">
                     <option value="savema">Savema</option>
                     <option value="videojet">Videojet</option>
                     <option value="markem">Markem-Imaje (DCP)</option>
                     <option value="valentine_nice">Carl Valentin (NiceLabel)</option>
+                    <option value="bizerba">Bizerba (Brain2 ConnectService)</option>
                     <option value="carlvalentine">Carl Valentin (CVPL Native)</option>
                     <option value="tsc">TSC (TSPL)</option>
+                    <option value="ext_server">Внешний Print Engine (XML/HTTP)</option>
                 </select>
             </div>
+
+            <!-- Блок настроек Bizerba (отображается при выборе драйвера) -->
+            <div id="bizerba_extra_settings" class="bizerba-panel" style="display: none;">
+                <h4 style="margin: 0 0 10px 0; font-size: 0.9rem; color: var(--warning);">Параметры весового комплекса</h4>
+                <div class="field"><label>BCS Device ID:</label><input type="text" id="p_bcs_device" placeholder="GLPMax"></div>
+                <div class="field">
+                    <label>Режим марок:</label>
+                    <select id="p_bizerba_mode">
+                        <option value="stream">Поток GT03/GT04</option>
+                        <option value="unique">Unique (файловая выгрузка)</option>
+                    </select>
+                </div>
+                <div class="field"><label><input type="checkbox" id="p_capture_weight" style="width:auto;"> Фиксация фактического веса</label></div>
+                <div class="field"><label><input type="checkbox" id="p_bizerba_conveyor" style="width:auto;"> Управляемый конвейер</label></div>
+                <div class="field"><label><input type="checkbox" id="p_record_gxnet" style="width:auto;"> Запись сетевых дампов GXNET</label></div>
+            </div>
+
             <div class="field"><label><input type="checkbox" id="p_active" checked style="width:auto;"> Активен</label></div>
             <button class="btn" style="background: var(--success); width: 100%;" onclick="addPrinter()">СОХРАНИТЬ</button>
             <button class="btn" style="width: 100%; margin-top: 5px;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
@@ -186,7 +210,7 @@
     <h4>Линии</h4>
     <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th><th>Действие</th></tr></thead><tbody id="lines-list-table"></tbody></table>
     <h4>Принтеры</h4>
-    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Вес</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
 </div>
 
 <div id="templatesTab" class="tab-content">
@@ -241,14 +265,22 @@
         if (tabId === 'templatesTab') updateTemplateTargets();
     }
 
-    // Состояние активного редактируемого макета
+    function toggleDriverExtraFields() {
+        const driver = document.getElementById('p_driver').value;
+        const bizerbaBlock = document.getElementById('bizerba_extra_settings');
+        if (driver === 'bizerba') {
+            bizerbaBlock.style.display = 'block';
+        } else {
+            bizerbaBlock.style.display = 'none';
+        }
+    }
+
     window.editorElements = [];
     window.selectedElementIndex = null;
     window.isDragging = false;
     window.dragOffsetX = 0;
     window.dragOffsetY = 0;
 
-    // Инициализация интерактивных событий мыши для Canvas при загрузке страницы
     document.addEventListener("DOMContentLoaded", () => {
         const canvas = document.getElementById('labelCanvas');
         if (!canvas) return;
@@ -261,18 +293,13 @@
             window.selectedElementIndex = null;
             window.isDragging = false;
 
-            // Бежим с конца массива, чтобы выбирать элементы, которые лежат выше (Z-Index)
             for (let i = window.editorElements.length - 1; i >= 0; i--) {
                 const el = window.editorElements[i];
-
-                // Проверка попадания в габариты элемента
                 if (mouseX >= el.x && mouseX <= el.x + el.w && mouseY >= el.y && mouseY <= el.y + el.h) {
                     window.selectedElementIndex = i;
                     window.isDragging = true;
                     window.dragOffsetX = mouseX - el.x;
                     window.dragOffsetY = mouseY - el.y;
-
-                    // Заполняем поле редактора текущим текстом
                     document.getElementById('editor_item_text').value = el.text;
                     break;
                 }
@@ -287,7 +314,6 @@
 
         canvas.addEventListener('mousemove', (e) => {
             if (!window.isDragging || window.selectedElementIndex === null) return;
-
             const rect = canvas.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
             const mouseY = e.clientY - rect.top;
@@ -296,7 +322,6 @@
             el.x = Math.round(mouseX - window.dragOffsetX);
             el.y = Math.round(mouseY - window.dragOffsetY);
 
-            // Защита от вылета за границы этикетки
             if (el.x < 0) el.x = 0;
             if (el.y < 0) el.y = 0;
 
@@ -306,11 +331,9 @@
         canvas.addEventListener('mouseup', () => { window.isDragging = false; });
         canvas.addEventListener('mouseleave', () => { window.isDragging = false; });
 
-        // Создаем пустой дефолтный шаблон при первом входе
         resizeEditorLabel();
     });
 
-    // Добавление нового элемента на холст
     function addNewElement(type) {
         const el = {
             type: type,
@@ -326,7 +349,6 @@
         drawEditorWorkspace();
     }
 
-    // Удаление выбранного элемента
     function deleteSelectedElement() {
         if (window.selectedElementIndex === null) return;
         window.editorElements.splice(window.selectedElementIndex, 1);
@@ -335,7 +357,6 @@
         drawEditorWorkspace();
     }
 
-    // Обновление параметров элемента при редактировании текста в инпуте
     function updateSelectedElement() {
         if (window.selectedElementIndex === null) return;
         const el = window.editorElements[window.selectedElementIndex];
@@ -343,19 +364,15 @@
         drawEditorWorkspace();
     }
 
-    // Изменение физических габаритов этикетки
     function resizeEditorLabel() {
         const mmW = parseFloat(document.getElementById('label_mm_w').value) || 50;
         const mmH = parseFloat(document.getElementById('label_mm_h').value) || 40;
-
         const canvas = document.getElementById('labelCanvas');
-        canvas.width = mmW * 7; // Коэффициент масштабирования для экрана
+        canvas.width = mmW * 7;
         canvas.height = mmH * 7;
-
         drawEditorWorkspace();
     }
 
-    // Отрисовка рабочей области конструктора
     function drawEditorWorkspace() {
         const canvas = document.getElementById('labelCanvas');
         const ctx = canvas.getContext('2d');
@@ -372,13 +389,11 @@
                 const metrics = ctx.measureText(el.text);
                 el.w = metrics.width;
                 el.h = 16;
-
                 ctx.fillText(el.text, el.x, el.y + 14);
             }
             else if (el.type === 'DMATRIX') {
                 ctx.fillRect(el.x, el.y, el.w, el.h);
                 ctx.fillStyle = '#FFFFFF';
-                // Отрисовка внутренней псевдосетки для имитации маркировки ЧЗ
                 for (let i = 4; i < el.w; i += 10) {
                     for (let j = 4; j < el.h; j += 10) {
                         if ((i+j) % 3 === 0) ctx.fillRect(el.x + i, el.y + j, 5, 5);
@@ -389,7 +404,6 @@
                 ctx.fillText("DataMatrix", el.x, el.y - 4);
             }
 
-            // Отрисовка рамки выделения вокруг активного элемента
             if (idx === window.selectedElementIndex) {
                 ctx.strokeStyle = '#007bff';
                 ctx.lineWidth = 2;
@@ -398,15 +412,13 @@
         });
     }
 
-    // Генератор кода TSPL на основе элементов конструктора и отправка в API РовноМарк
     async function saveTemplateFromEditor() {
         const name = document.getElementById('new_template_name').value.trim();
-        if (!name) return alert('Укажите имя файла шаблона! (например, asahi_label.tspl)');
+        if (!name) return alert('Укажите имя файла шаблона!');
 
         const mmW = document.getElementById('label_mm_w').value;
         const mmH = document.getElementById('label_mm_h').value;
 
-        // Начинаем сборку сырого кода для промышленного контроллера TSC
         let tspl = [];
         tspl.push(`SIZE ${mmW} mm, ${mmH} mm`);
         tspl.push(`GAP 3 mm, 0 mm`);
@@ -415,10 +427,8 @@
 
         window.editorElements.forEach(el => {
             if (el.type === 'TEXT') {
-                // Синтаксис TSPL: TEXT x,y,"font",rotation,x-multi,y-multi,"content"
                 tspl.push(`TEXT ${el.x},${el.y},"3",0,1,1,"${el.text}"`);
             } else if (el.type === 'DMATRIX') {
-                // Синтаксис TSPL: DMATRIX x,y,width,height,"content"
                 tspl.push(`DMATRIX ${el.x},${el.y},${el.w},${el.h},"${el.text}"`);
             }
         });
@@ -434,55 +444,14 @@
             });
 
             if (res.ok) {
-                alert(`Шаблон "${name}" успешно скомпилирован в TSPL и сохранен в БД!`);
+                alert(`Шаблон "${name}" успешно сохранен в БД!`);
                 if(typeof fetchPrinterTemplates === 'function') fetchPrinterTemplates();
             } else {
                 alert('Ошибка сохранения:\n' + await res.text());
             }
         } catch(e) {
-            alert('Сбой связи с сервером: ' + e.message);
+            alert('Сбой связи: ' + e.message);
         }
-    }
-
-    // Модифицируем старый метод выбора шаблона для интеграции обратной загрузки в конструктор
-    async function selectAndPreviewTemplate(templateName) {
-        document.getElementById('new_template_name').value = templateName;
-
-        try {
-            const resRaw = await fetch(`/api/template/raw?template=${encodeURIComponent(templateName)}`);
-            if (resRaw.ok) {
-                const data = await resRaw.json();
-
-                // Обратный парсинг TSPL-кода из БД в массив элементов конструктора window.editorElements
-                window.editorElements = [];
-                const lines = data.body.split('\n');
-
-                lines.forEach(line => {
-                    const clean = line.trim();
-                    const upper = clean.toUpperCase();
-
-                    if (upper.startsWith('SIZE')) {
-                        const m = clean.match(/SIZE\s+(\d+)\s*mm\s*,\s*(\d+)/i);
-                        if(m) {
-                            document.getElementById('label_mm_w').value = m[1];
-                            document.getElementById('label_mm_h').value = m[2];
-                        }
-                    }
-                    if (upper.startsWith('TEXT')) {
-                        const m = clean.match(/TEXT\s+(\d+)\s*,\s*(\d+)\s*,\s*"[^"]+"\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*"([^"]+)"/i);
-                        if(m) window.editorElements.push({type:'TEXT', x:parseInt(m[1]), y:parseInt(m[2]), w:50, h:16, text:m[3]});
-                    }
-                    if (upper.startsWith('DMATRIX')) {
-                        const m = clean.match(/DMATRIX\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]+)"/i);
-                        if(m) window.editorElements.push({type:'DMATRIX', x:parseInt(m[1]), y:parseInt(m[2]), w:parseInt(m[3]), h:parseInt(m[4]), text:m[5]});
-                    }
-                });
-
-                resizeEditorLabel();
-            }
-        } catch(e) { console.error(e); }
-
-        loadTemplateFields(templateName);
     }
 
     async function fetchPrintersStatus() {
@@ -504,7 +473,6 @@
             const res = await fetch('/api/task/active');
             if (!res.ok) throw new Error(`Ошибка сервера: ${res.status}`);
             let responseData = await res.json();
-            // Если пришел объект со свойством tasks, берем его, иначе проверяем, массив ли это, иначе делаем пустой массив
             let tasks = [];
             if (responseData && responseData.tasks) {
                 tasks = responseData.tasks;
@@ -568,8 +536,6 @@
     function createPrinterCard(p) {
         const status = p.status || 'НЕИЗВЕСТНО';
         const cls = status.includes('ОФФЛАЙН') ? 'offline' : 'online';
-
-        // Добавляем проверку IP для формирования ссылки
         const webLink = p.ip ? `http://${p.ip}` : '#';
 
         return `
@@ -788,7 +754,7 @@
     async function loadSettingsData() {
         try {
             const lRes = await fetch('/api/lines');
-            if (!lRes.ok) throw new Error(`Сбой на бэкенде (/api/lines), код ${lRes.status}:\n${await lRes.text()}`);
+            if (!lRes.ok) throw new Error(`Сбой на бэкенде (/api/lines), код ${lRes.status}`);
             const lines = await lRes.json() || [];
 
             window.linesMap = {};
@@ -804,7 +770,7 @@
                 </tr>`).join('');
 
             const pRes = await fetch('/api/printers');
-            if (!pRes.ok) throw new Error(`Сбой на бэкенде (/api/printers), код ${pRes.status}:\n${await pRes.text()}`);
+            if (!pRes.ok) throw new Error(`Сбой на бэкенде (/api/printers), код ${pRes.status}`);
             const pData = await pRes.json() || {};
             const printers = pData.all_printers || [];
 
@@ -812,10 +778,24 @@
             printers.forEach(p => window.printersMap[p.id] = p);
 
             document.getElementById('assign_printer').innerHTML = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-            document.getElementById('printers-list-table').innerHTML = printers.map(p => `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.ip}:${p.port}</td><td>${p.driver_type}</td><td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td></tr>`).join('');
+            document.getElementById('printers-list-table').innerHTML = printers.map(p => {
+                // Поддержка как старого поля capture_weight, так и нового settings.capture_weight
+                let hasWeight = "Нет";
+                if (p.capture_weight) hasWeight = "Да";
+                else if (p.settings && p.settings.capture_weight) hasWeight = "Да";
+
+                return `<tr>
+                    <td>${p.id}</td>
+                    <td>${p.name}</td>
+                    <td>${p.ip}:${p.port}</td>
+                    <td>${p.driver_type}</td>
+                    <td>${hasWeight}</td>
+                    <td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td>
+                </tr>`;
+            }).join('');
 
             const aRes = await fetch('/api/assignments');
-            if (!aRes.ok) throw new Error(`Сбой на бэкенде (/api/assignments), код ${aRes.status}:\n${await aRes.text()}`);
+            if (!aRes.ok) throw new Error(`Сбой на бэкенде (/api/assignments), код ${aRes.status}`);
             const as = await aRes.json() || [];
             window.assignmentsList = as;
 
@@ -828,19 +808,31 @@
                 </tr>`).join('');
         } catch (e) {
             console.error("Критический сбой:", e);
-            alert("⚠️ ИНТЕРФЕЙС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ СЕРВЕРА ⚠️\n\n" + e.message);
+            alert("⚠️ ОШИБКА СЕРВЕРА ⚠️\n\n" + e.message);
         }
     }
 
     async function addPrinter() {
+        const driverType = document.getElementById('p_driver').value;
         const body = {
             id: parseInt(document.getElementById('p_id').value) || 0,
             name: document.getElementById('p_name').value,
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value),
-            driver_type: document.getElementById('p_driver').value,
+            driver_type: driverType,
             is_active: document.getElementById('p_active').checked
         };
+
+        // Если выбрана Bizerba, упаковываем специфичные свойства в settings
+        if (driverType === 'bizerba') {
+            body.settings = {
+                bcs_device: document.getElementById('p_bcs_device').value || 'GLPMax',
+                mode: document.getElementById('p_bizerba_mode').value || 'stream',
+                capture_weight: document.getElementById('p_capture_weight').checked,
+                conveyor: document.getElementById('p_bizerba_conveyor').checked,
+                record_gxnet: document.getElementById('p_record_gxnet').checked
+            };
+        }
 
         try {
             const res = await fetch('/api/printers/add', {
@@ -870,6 +862,17 @@
         document.getElementById('p_port').value = p.port;
         document.getElementById('p_driver').value = p.driver_type;
         document.getElementById('p_active').checked = p.is_active;
+
+        toggleDriverExtraFields();
+
+        // Заполняем настройки Bizerba, если они есть
+        const s = p.settings || {};
+        document.getElementById('p_bcs_device').value = s.bcs_device || p.bcs_device || '';
+        document.getElementById('p_bizerba_mode').value = s.mode || p.bizerba_mode || 'stream';
+        document.getElementById('p_capture_weight').checked = !!(s.capture_weight || p.capture_weight);
+        document.getElementById('p_bizerba_conveyor').checked = !!(s.conveyor || p.bizerba_conveyor);
+        document.getElementById('p_record_gxnet').checked = !!(s.record_gxnet || p.record_gxnet);
+
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
@@ -878,6 +881,12 @@
         document.getElementById('p_name').value = '';
         document.getElementById('p_ip').value = '';
         document.getElementById('p_port').value = '9100';
+        document.getElementById('p_bcs_device').value = '';
+        document.getElementById('p_bizerba_mode').value = 'stream';
+        document.getElementById('p_bizerba_conveyor').checked = false;
+        document.getElementById('p_capture_weight').checked = false;
+        document.getElementById('p_record_gxnet').checked = false;
+        toggleDriverExtraFields();
     }
 
     function editLine(id) {
@@ -921,8 +930,6 @@
         }
 
         try {
-            // Если бэкенд использует POST /api/lines и для создания, и для обновления (определяя по ID), логика верна.
-            // Если для редактирования нужен PUT, измените метод на: isEdit ? 'PUT' : 'POST'
             const res = await fetch('/api/lines', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -940,12 +947,10 @@
         }
     }
 
-    /* НОВЫЙ ФУНКЦИОНАЛ: Управление формой привязок */
     function editAssignment(index) {
         const a = window.assignmentsList[index];
         if (!a) return;
 
-        // Поиск ID по именам в кэшированных данных интерфейса
         let lineId = '';
         for (let id in window.linesMap) {
             if (window.linesMap[id].name === a.line_name) { lineId = id; break; }
@@ -968,146 +973,6 @@
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
-    // Функция парсинга и рендеринга шаблона на Canvas
-    function renderTemplateToCanvas(rawBody) {
-        const canvas = document.getElementById('labelCanvas');
-        const ctx = canvas.getContext('2d');
-
-        // Очищаем холст перед новой отрисовкой (белый фон этикетки)
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Дефолтные настройки пера для симуляции термопечати (черно-белая)
-        ctx.fillStyle = '#000000';
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 2;
-
-        // Разбиваем шаблон на строки
-        const lines = rawBody.split('\n');
-
-        lines.forEach(line => {
-            // Очищаем пробелы и приводим к верхнему регистру для парсинга команд
-            const cleanLine = line.trim();
-            const upperLine = cleanLine.toUpperCase();
-
-            // 1. Парсинг размеров этикетки (SIZE 50 mm, 40 mm или SIZE 400, 300)
-            if (upperLine.startsWith('SIZE')) {
-                const matches = cleanLine.match(/SIZE\s+([\d.]+)\s*(mm)?\s*,\s*([\d.]+)/i);
-                if (matches) {
-                    let w = parseFloat(matches[1]);
-                    let h = parseFloat(matches[3]);
-                    // Если указано в мм, условно переводим в пиксели для масштаба (1мм ~ 6px для наглядности)
-                    if (matches[2] && matches[2].toLowerCase() === 'mm') {
-                        canvas.width = w * 7;
-                        canvas.height = h * 7;
-                    } else {
-                        canvas.width = w;
-                        canvas.height = h;
-                    }
-                    // Перерисовываем фон после изменения размеров холста
-                    ctx.fillStyle = '#FFFFFF';
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    ctx.fillStyle = '#000000';
-                }
-            }
-
-            // 2. Парсинг текстовых полей (TEXT x,y,"font",rotation,x-multi,y-multi,"content")
-            if (upperLine.startsWith('TEXT')) {
-                // Регулярка извлекает: x, y, шрифт, а также контент в кавычках в самом конце
-                const textMatch = cleanLine.match(/TEXT\s+(\d+)\s*,\s*(\d+)\s*,\s*"([^"]+)"\s*,\s*\d+\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*"([^"]+)"/i);
-                if (textMatch) {
-                    const x = parseInt(textMatch[1]);
-                    const y = parseInt(textMatch[2]);
-                    const sizeMultiplier = parseFloat(textMatch[5]) * 14; // Масштабирование шрифта
-                    const content = textMatch[6];
-
-                    ctx.font = `bold ${sizeMultiplier}px monospace`;
-                    ctx.fillText(content, x, y + sizeMultiplier); // Смещение по Y, так как в Canvas отсчет от базовой линии
-                }
-            }
-
-            // 3. Парсинг 2D датаматриксов маркировки (DMATRIX x,y,width,height,"content")
-            if (upperLine.startsWith('DMATRIX')) {
-                const dmMatch = cleanLine.match(/DMATRIX\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]+)"/i);
-                if (dmMatch) {
-                    const x = parseInt(dmMatch[1]);
-                    const y = parseInt(dmMatch[2]);
-                    const w = parseInt(dmMatch[3]);
-                    const h = parseInt(dmMatch[4]);
-                    const content = dmMatch[5];
-
-                    // Рисуем рамку и внутреннюю сетку-заполнитель, имитируя DataMatrix
-                    ctx.fillStyle = '#000000';
-                    ctx.fillRect(x, y, w, h);
-
-                    // "Вырезаем" белые пиксели для симуляции паттерна QR/DataMatrix
-                    ctx.fillStyle = '#FFFFFF';
-                    for (let i = 2; i < w; i += 8) {
-                        for (let j = 2; j < h; j += 8) {
-                            if ((i+j) % 3 === 0) {
-                                ctx.fillRect(x + i, y + j, 4, 4);
-                            }
-                        }
-                    }
-
-                    // Метка поверх, чтобы инженер понимал, какое поле сюда подставится
-                    ctx.fillStyle = '#000000';
-                    ctx.font = '10px sans-serif';
-                    ctx.fillText("[DataMatrix: " + (content.length > 10 ? content.substring(0,10)+"..." : content) + "]", x, y - 4);
-                }
-            }
-
-            // 4. Парсинг классических штрихкодов (BARCODE x,y,"type",height,human-readable,rotation,narrow,wide,"content")
-            if (upperLine.startsWith('BARCODE')) {
-                const bcMatch = cleanLine.match(/BARCODE\s+(\d+)\s*,\s*(\d+)\s*,\s*"[^"]+"\s*,\s*(\d+)\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*"([^"]+)"/i);
-                if (bcMatch) {
-                    const x = parseInt(bcMatch[1]);
-                    const y = parseInt(bcMatch[2]);
-                    const h = parseInt(bcMatch[3]);
-                    const content = bcMatch[4];
-
-                    // Рисуем "зебру" штрихкода
-                    ctx.fillStyle = '#000000';
-                    let currentX = x;
-                    for (let b = 0; b < 15; b++) {
-                        ctx.fillRect(currentX, y, 3, h);
-                        currentX += 6;
-                    }
-                    ctx.font = '12px monospace';
-                    ctx.fillText(content, x, y + h + 14);
-                }
-            }
-        });
-    }
-
-    // Модифицированная функция выбора шаблона из списка
-    async function selectAndPreviewTemplate(templateName) {
-        document.getElementById('visualizer_title').innerText = templateName;
-
-        try {
-            // 1. Сначала запрашиваем сырой текст для визуализатора
-            const resRaw = await fetch(`/api/template/raw?template=${encodeURIComponent(templateName)}`);
-            if (resRaw.ok) {
-                const data = await resRaw.json();
-                renderTemplateToCanvas(data.body || "");
-            } else {
-                // Если шаблона нет в локальной БД (например, это Videojet) — очищаем канвас и пишем текст
-                const canvas = document.getElementById('labelCanvas');
-                const ctx = canvas.getContext('2d');
-                ctx.fillStyle = '#FFFFFF';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                ctx.fillStyle = '#888888';
-                ctx.font = '14px sans-serif';
-                ctx.fillText("Превью недоступно для сетевых макетов", 20, 50);
-            }
-        } catch (e) {
-            console.error("Visualizer error:", e);
-        }
-
-        // 2. Вызываем оригинальный метод загрузки полей, чтобы не ломать логику привязки
-        loadTemplateFields(templateName);
-    }
-
     function clearAssignForm() {
         document.getElementById('assign_is_edit').value = "0";
         document.getElementById('assign_form_title').innerText = 'Привязать к линии';
@@ -1121,7 +986,7 @@
         const isEdit = document.getElementById('assign_is_edit').value === "1";
         try {
             const res = await fetch('/api/assignments', {
-                method: 'POST', // Стандартный метод привязки в RovnoMark перетирает или обновляет связи в SQLite
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     line_id: parseInt(document.getElementById('assign_line').value),
