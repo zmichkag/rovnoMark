@@ -2,19 +2,18 @@ package bizerba
 
 import (
 	"encoding/json"
+	"fmt"
 	"rovnoMark/internal/models"
 	"time"
 )
 
-// WeightStore описывает методы сохранения отвесов и аудита
 type WeightStore interface {
-	SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight string) error
+	SaveWeightAndMarkPrinted(taskID, printerID, printerIndex int, weight string) error
 	SaveGXNETResponse(printerID int, device, receivedAt, cmd, param, queue, payload string, status int) error
 	GetActiveTaskByLine(lineID int) (int, error)
 	GetPrinterLineMap() (map[int]int, error)
 }
 
-// CreateDriver строит экземпляр драйвера Bizerba из models.PrinterConfig
 func CreateDriver(cfg models.PrinterConfig, store WeightStore) *Driver {
 	var bSettings Config
 
@@ -53,7 +52,11 @@ func CreateDriver(cfg models.PrinterConfig, store WeightStore) *Driver {
 			lineMap, _ := store.GetPrinterLineMap()
 			lineID := lineMap[cfg.ID]
 			activeTaskID, _ := store.GetActiveTaskByLine(lineID)
-			return store.SaveMarkWeight(activeTaskID, cfg.ID, printerIndex, mark, weight)
+			if activeTaskID == 0 {
+				return fmt.Errorf("нет активной задачи для линии принтера %d", cfg.ID)
+			}
+			// Атомарно пишем вес и ставим статус printed
+			return store.SaveWeightAndMarkPrinted(activeTaskID, cfg.ID, printerIndex, weight)
 		},
 	}
 
