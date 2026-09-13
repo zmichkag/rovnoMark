@@ -17,12 +17,21 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type weightEvent struct {
+	taskID       int
+	printerID    int
+	printerIndex int
+	mark         string
+	weight       string
+}
+
 type Store struct {
-	db       *sql.DB
-	codesMu  sync.RWMutex
-	codesDB  *sql.DB
-	curMonth string
-	dataDir  string
+	db          *sql.DB
+	codesMu     sync.RWMutex
+	codesDB     *sql.DB
+	curMonth    string
+	dataDir     string
+	weightQueue chan weightEvent // Буфер отвесов
 }
 
 type ReconcileResult struct {
@@ -59,12 +68,75 @@ func New(baseDir string) *Store {
 	}
 
 	store := &Store{
-		db:      db,
-		dataDir: baseDir,
+		db:          db,
+		dataDir:     baseDir,
+		weightQueue: make(chan weightEvent, 2000), // Буфер на 2000 событий
 	}
 
 	store.rotateCodesDBIfNeeded()
+
+	// Запускаем пакетный накопитель отвесов
+	go store.runWeightBatchWriter()
+
 	return store
+}
+
+func (s *Store) runWeightBatchWriter() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	batch := make([]weightEvent, 0, 50)
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		s.flushWeightsToDB(batch)
+		batch = batch[:0] // Очищаем слайс с сохранением капасити
+	}
+
+	for {
+		select {
+		case ev := <-s.weightQueue:
+			batch = append(batch, ev)
+			if len(batch) >= 50 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+func (s *Store) flushWeightsToDB(events []weightEvent) {
+	db := s.getCodesDB()
+	tx, err := db.Begin()
+	if err != nil {
+		slog.Error("WEIGHT-FLUSH: Ошибка открытия транзакции", "err", err)
+		return
+	}
+	defer tx.Rollback()
+
+	// Готовим стейтмент один раз на всю пачку
+	stmt, err := tx.Prepare(`
+		UPDATE task_codes 
+		SET weight = ? 
+		WHERE task_id = ? 
+		  AND (printer_index = ? OR code = ? OR code LIKE ?)`)
+	if err != nil {
+		slog.Error("WEIGHT-FLUSH: Ошибка Prepare", "err", err)
+		return
+	}
+	defer stmt.Close()
+
+	for _, ev := range events {
+		cleanMark := strings.ReplaceAll(ev.mark, "\x1d", "<GS>")
+		_, _ = stmt.Exec(ev.weight, ev.taskID, ev.printerIndex, cleanMark, "%"+cleanMark+"%")
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("WEIGHT-FLUSH: Ошибка фиксации транзакции отвесов", "err", err)
+	}
 }
 
 func (s *Store) getCodesDB() *sql.DB {
@@ -1158,7 +1230,28 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 	}, nil
 }
 
-// SaveMarkWeight фиксирует вес непосредственно в строке кода в активном шарде месяца
+// SaveWeightAndMarkPrinted атомарно фиксирует вес и переводит код в статус 'printed'
+func (s *Store) SaveWeightAndMarkPrinted(taskID, printerID, printerIndex int, weight string) error {
+	weight = strings.TrimSpace(weight)
+	if weight == "" {
+		weight = "0"
+	}
+
+	// Отправляем в очередь батчинга, но уже с гарантией смены статуса
+	db := s.getCodesDB()
+	query := `
+		UPDATE task_codes 
+		SET weight = ?, status = 'printed', printed_at = CURRENT_TIMESTAMP 
+		WHERE task_id = ? AND printer_id = ? AND printer_index = ?`
+
+	_, err := db.Exec(query, weight, taskID, printerID, printerIndex)
+	if err != nil {
+		return fmt.Errorf("ошибка атомарной фиксации веса и статуса: %w", err)
+	}
+	return nil
+}
+
+// SaveMarkWeight быстро помещает событие в ОЗУ-очередь, исключая блокировки базы
 func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight string) error {
 	mark = strings.TrimSpace(mark)
 	weight = strings.TrimSpace(weight)
@@ -1166,6 +1259,25 @@ func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight
 		return fmt.Errorf("марка и вес не должны быть пустыми")
 	}
 
+	select {
+	case s.weightQueue <- weightEvent{
+		taskID:       taskID,
+		printerID:    printerID,
+		printerIndex: printerIndex,
+		mark:         mark,
+		weight:       weight,
+	}:
+		return nil
+	default:
+		slog.Warn("WEIGHT-QUEUE: Переполнение буфера отвесов! Синхронный сброс...")
+		// Фоллбэк: если очередь переполнена (2000 записей), пишем напрямую
+		return s.saveMarkWeightDirect(taskID, printerID, printerIndex, mark, weight)
+	}
+}
+
+// saveMarkWeightDirect выполняет синхронную запись отвеса напрямую в SQLite шард.
+// Используется как резервный канал при переполнении буфера в ОЗУ.
+func (s *Store) saveMarkWeightDirect(taskID, printerID, printerIndex int, mark, weight string) error {
 	db := s.getCodesDB()
 	query := `
 		UPDATE task_codes 
@@ -1176,7 +1288,7 @@ func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight
 	cleanMark := strings.ReplaceAll(mark, "\x1d", "<GS>")
 	_, err := db.Exec(query, weight, taskID, printerIndex, cleanMark, "%"+cleanMark+"%")
 	if err != nil {
-		return fmt.Errorf("ошибка фиксации веса в шарде кодов: %w", err)
+		return fmt.Errorf("ошибка прямой фиксации веса в шарде: %w", err)
 	}
 	return nil
 }
