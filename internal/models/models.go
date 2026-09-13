@@ -1,29 +1,22 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
 
 // Физическое устройство
 type PrinterConfig struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	IP         string `json:"ip"`
-	Port       int    `json:"port"`
-	DriverType string `json:"driver_type"`
-	Role       string `json:"role"`
-	IsActive   bool   `json:"is_active"`
-	IsDeleted  bool   `json:"is_deleted"`
-	//------
-	BCSDevice  string `json:"bcs_device"`
-	// CaptureWeight включает журналирование пары «марка — вес» для этого принтера.
-	CaptureWeight bool `json:"capture_weight"`
-	RecordGXNET   bool `json:"record_gxnet"`
-	// BizerbaMode и BizerbaConveyor применяются только к драйверу Bizerba.
-	// В базе они хранятся отдельно от общей записи принтера.
-	BizerbaMode     string `json:"bizerba_mode,omitempty"`
-	BizerbaConveyor bool   `json:"bizerba_conveyor,omitempty"`
-	//---вынести в расширение!
-	IsActive        bool   `json:"is_active"`
-	IsDeleted       bool   `json:"is_deleted"`
+	ID         int             `json:"id"`
+	Name       string          `json:"name"`
+	IP         string          `json:"ip"`
+	Port       int             `json:"port"`
+	DriverType string          `json:"driver_type"`
+	Role       string          `json:"role"`
+	IsActive   bool            `json:"is_active"`
+	IsDeleted  bool            `json:"is_deleted"`
+	Settings   json.RawMessage `json:"settings,omitempty"` // Специфика драйвера
 }
 
 // LineConfig описывает производственную линию
@@ -45,6 +38,7 @@ type PrinterState struct {
 	Speed          string `json:"speed"`
 	CurCount       string `json:"cur_count"`
 	CurTemplate    string `json:"cur_template"`
+	LastWeight     string `json:"last_weight,omitempty"` // Последний отвес для UI
 }
 
 // LogEntry представляет строковый лог для веб-интерфейса и дашборда
@@ -90,6 +84,8 @@ type TaskCode struct {
 	TaskID       int       `json:"task_id"`
 	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
+	Weight       string    `json:"weight,omitempty"` // Фактический вес упаковки (Catchweight)
+	ExternalID   string    `json:"ext_id"`
 	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'
 	PrinterIndex int       `json:"printer_index"` // Индекс SID от принтера
 	PrintedAt    time.Time `json:"printed_at"`
