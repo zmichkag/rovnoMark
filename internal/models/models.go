@@ -1,12 +1,8 @@
 package models
 
-import (
-	"encoding/json"
-	"strings"
-	"time"
-)
+import "time"
 
-// PrinterConfig описывает конфигурацию физического печатающего устройства
+// Физическое устройство
 type PrinterConfig struct {
 	ID         int    `json:"id"`
 	Name       string `json:"name"`
@@ -16,6 +12,18 @@ type PrinterConfig struct {
 	Role       string `json:"role"`
 	IsActive   bool   `json:"is_active"`
 	IsDeleted  bool   `json:"is_deleted"`
+	//------
+	BCSDevice  string `json:"bcs_device"`
+	// CaptureWeight включает журналирование пары «марка — вес» для этого принтера.
+	CaptureWeight bool `json:"capture_weight"`
+	RecordGXNET   bool `json:"record_gxnet"`
+	// BizerbaMode и BizerbaConveyor применяются только к драйверу Bizerba.
+	// В базе они хранятся отдельно от общей записи принтера.
+	BizerbaMode     string `json:"bizerba_mode,omitempty"`
+	BizerbaConveyor bool   `json:"bizerba_conveyor,omitempty"`
+	//---вынести в расширение!
+	IsActive        bool   `json:"is_active"`
+	IsDeleted       bool   `json:"is_deleted"`
 }
 
 // LineConfig описывает производственную линию
@@ -82,9 +90,8 @@ type TaskCode struct {
 	TaskID       int       `json:"task_id"`
 	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
-	ExternalID   string    `json:"ext_id"`        // Идентификатор/порядковый номер из 1C (может быть пустым)
-	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'[cite: 1, 2, 3]
-	PrinterIndex int       `json:"printer_index"` // Индекс партии/пакета для принтера
+	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'
+	PrinterIndex int       `json:"printer_index"` // Индекс SID от принтера
 	PrintedAt    time.Time `json:"printed_at"`
 }
 

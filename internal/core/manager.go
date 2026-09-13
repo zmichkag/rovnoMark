@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"rovnoMark/internal/drivers/valentine"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-// Printer - расширенный контракт для промышленного оборудования
+// Printer - расширенный контракт для железа
 type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
@@ -29,18 +30,19 @@ type Printer interface {
 	GetPrintSpeed() (string, error)
 	GetCurrentPrintCount() (string, error)
 	GetCurrentTemplate() (string, error)
-	ClearQueue() error
-	GetBufferFreeSpace() (int, error)
+	ClearQueue() error                // Очистка очереди (команда CQI)
+	GetBufferFreeSpace() (int, error) // Сколько кодов еще можно дослать
 	UpdateStaticFields(fields map[string]string) error
 	InitSession(fieldName string, maxQueue int, staticFields map[string]string) error
 	SelectTemplate(template string, fields map[string]string) error
 }
 
+// TaskProcessor Добавляем возможность управления задачами
 type TaskProcessor struct {
 	Store       *storage.Store
 	Manager     *PrinterManager
 	activeMu    sync.Mutex
-	activeTasks map[int]bool
+	activeTasks map[int]bool // Тут храним ID задач, у которых насос УЖЕ крутится
 }
 
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
@@ -48,13 +50,13 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	if tp.activeTasks == nil {
 		tp.activeTasks = make(map[int]bool)
 	}
-
+	// Если насос для этой задачи уже запущен — тихо выходим, не плодим горутины!
 	if tp.activeTasks[taskID] {
 		tp.activeMu.Unlock()
-		slog.Debug("Pumper: Насос для этой задачи уже работает", "task_id", taskID)
+		slog.Debug("Pumper: Насос для этой задачи уже работает, дублирование проигнорировано", "task_id", taskID)
 		return
 	}
-
+	// Регистрируем запуск
 	tp.activeTasks[taskID] = true
 	tp.activeMu.Unlock()
 
@@ -280,10 +282,22 @@ func NewPrinterManager() *PrinterManager {
 func (pm *PrinterManager) AddPrinter(config models.PrinterConfig, p Printer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	if previous := pm.printers[config.ID]; previous != nil {
+		if closer, ok := previous.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				slog.Error("Ошибка закрытия прежнего драйвера", "printer_id", config.ID, "err", err)
+			}
+		}
+	}
 
 	pm.configs[config.ID] = config
 	pm.printers[config.ID] = p
 	pm.states[config.ID] = models.PrinterState{Status: "INITIALIZING", Ribbon: "?", Queue: "?"}
+	if config.IsActive {
+		if starter, ok := p.(interface{ Start() }); ok {
+			starter.Start()
+		}
+	}
 
 	pID := config.ID
 	pm.addLogNoLock(nil, &pID, nil, "info", fmt.Sprintf("Принтер %s добавлен (%s)", config.Name, config.IP))
@@ -293,6 +307,27 @@ func (pm *PrinterManager) GetPrinter(id int) Printer {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.printers[id]
+}
+
+// CloseAll releases optional driver resources. For Bizerba this closes
+// channel E before releasing the persistent COM connection.
+func (pm *PrinterManager) CloseAll() error {
+	pm.mu.RLock()
+	printers := make([]Printer, 0, len(pm.printers))
+	for _, printer := range pm.printers {
+		printers = append(printers, printer)
+	}
+	pm.mu.RUnlock()
+
+	var closeErrors []error
+	for _, printer := range printers {
+		if closer, ok := printer.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				closeErrors = append(closeErrors, err)
+			}
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []models.LogEntry) {
@@ -309,6 +344,7 @@ func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []mod
 	return statesCopy, logsCopy
 }
 
+// StartTelemetryCollector запускает фоновый процесс сбора статистики
 func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -321,12 +357,16 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 			pm.mu.RUnlock()
 
 			for id, state := range snapshot {
-				_ = store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status, state.CurTemplate)
+				err := store.SaveTelemetry(id, state.CurCount, state.Ribbon, state.Status, state.CurTemplate)
+				if err != nil {
+					log.Printf("[STATS] Ошибка записи для принтера %d: %v", id, err)
+				}
 			}
 		}
 	}()
 }
 
+// BackgroundPoller опрашивает железки и сохраняет логи как в RAM, так и в БД
 func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
 	for {
@@ -440,10 +480,21 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 			pm.states[id] = newState
 			pm.mu.Unlock()
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 }
 
+func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lineID *int, eventType string, event string) {
+	printerName := "Система"
+	if printerID != nil {
+		if cfg, ok := pm.configs[*printerID]; ok {
+			printerName = cfg.Name
+		} else {
+			printerName = fmt.Sprintf("Принтер #%d", *printerID)
+		}
+	}
+
+// addLogNoLock универсальный метод для записи логов в RAM и в БД SQLite
 func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lineID *int, eventType string, event string) {
 	printerName := "Система"
 	if printerID != nil {
@@ -463,7 +514,14 @@ func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lin
 	if len(pm.logs) > 50 {
 		pm.logs = pm.logs[:50]
 	}
+}
 
+	if store != nil {
+		go func() {
+			_ = store.SaveEventLog(lineID, printerID, eventType, event)
+		}()
+	}
+	// Если передан Store, пишем также в базу данных SQLite
 	if store != nil {
 		go func() {
 			_ = store.SaveEventLog(lineID, printerID, eventType, event)
@@ -471,12 +529,15 @@ func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lin
 	}
 }
 
+// GetPrinterState возвращает копию текущего состояния принтера
 func (pm *PrinterManager) GetPrinterState(id int) models.PrinterState {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.states[id]
 }
 
+// UpdatePrinterDeltaState сохраняет последние успешно отправленные параметры
+// Это нужно, чтобы алгоритм Delta понимал, что данные в принтере уже обновлены
 func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -488,21 +549,24 @@ func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash s
 }
 
 func PrepareDynamicPipeline(dynamicFieldName string, staticFields map[string]string, czCode string) (string, string) {
+	// 1. Сортируем ключи статики по алфавиту для 100% стабильного порядка полей
 	var keys []string
 	for k := range staticFields {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
+	// 2. Собираем строку имен полей для InitSession (SHO) -> "dm_data0;date01;date02;text01"
 	fieldNames := []string{dynamicFieldName}
 	for _, k := range keys {
 		fieldNames = append(fieldNames, k)
 	}
 	compositeFields := strings.Join(fieldNames, ";")
 
+	// 3. Собираем строку значений для конкретной записи (SID) -> "01046...|20.10.2026|20.10.3026"
 	values := []string{czCode}
 	for _, k := range keys {
-		cleanVal := strings.ReplaceAll(staticFields[k], "|", "")
+		cleanVal := strings.ReplaceAll(staticFields[k], "|", "") // Экранируем разделитель протокола
 		values = append(values, cleanVal)
 	}
 	compositePayload := strings.Join(values, "|")
