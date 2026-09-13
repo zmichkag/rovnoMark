@@ -31,7 +31,7 @@ type ReconcileResult struct {
 }
 
 const (
-	TargetMasterSchemaVersion = 1
+	TargetMasterSchemaVersion = 2 // v2: поддержка динамического веса Catchweight и настроек драйверов
 	TargetCodesSchemaVersion  = 1
 )
 
@@ -203,6 +203,38 @@ func MigrateMaster(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_telemetry_time ON printer_telemetry(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_event_log_composite ON event_log(line_id, event_type, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer ON task_printer_counters(task_id, printer_id);
+		`,
+		2: `
+		-- Добавляем универсальный JSON-конфиг для вендорских драйверов
+		ALTER TABLE printers ADD COLUMN settings_json TEXT DEFAULT '{}';
+
+		-- Журнал отвесов Catchweight (динамический вес под каждую упаковку)
+		CREATE TABLE IF NOT EXISTS mark_weights (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL,
+			printer_id INTEGER NOT NULL,
+			printer_index INTEGER,
+			mark TEXT NOT NULL,
+			weight TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_mark_weights_task ON mark_weights(task_id);
+		CREATE INDEX IF NOT EXISTS idx_mark_weights_created ON mark_weights(created_at);
+
+		-- Дампы протокола GXNET (для включенного расширенного аудита)
+		CREATE TABLE IF NOT EXISTS bizerba_responses (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			printer_id INTEGER NOT NULL,
+			device TEXT NOT NULL,
+			received_at TEXT NOT NULL,
+			command TEXT NOT NULL,
+			parameter TEXT NOT NULL,
+			queue TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			status INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_bizerba_responses_printer ON bizerba_responses(printer_id, received_at);
 		`,
 	}
 
@@ -495,7 +527,6 @@ func (s *Store) GetPendingCodes(taskID int, limit int) ([]models.TaskCode, error
 	return codes, nil
 }
 
-// ReconcileAndFinalizeTaskCodes атомарно фиксирует напечатанное и возвращает остатки буфера в очередь
 func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastIndex int) (*ReconcileResult, error) {
 	db := s.getCodesDB()
 	tx, err := db.Begin()
@@ -504,7 +535,6 @@ func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastInd
 	}
 	defer tx.Rollback()
 
-	// 1. Фиксируем как напечатанные те коды, индекс которых подтвержден одометром железки
 	if lastIndex > 0 {
 		_, err = tx.Exec(`
 			UPDATE task_codes 
@@ -520,8 +550,6 @@ func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastInd
 		}
 	}
 
-	// 2. Все коды, которые принтер захватил в буфер, но НЕ успел напечатать,
-	// возвращаем обратно в статус 'pending' и снимаем привязку к принтеру!
 	resReverted, err := tx.Exec(`
 		UPDATE task_codes 
 		SET status = 'pending', 
@@ -541,7 +569,6 @@ func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastInd
 		return nil, fmt.Errorf("ошибка фиксации транзакции сверки: %w", err)
 	}
 
-	// 3. Получаем честное итоговое количество фактически напечатанных кодов по задаче из БД
 	var totalPrinted int
 	err = db.QueryRow(`
 		SELECT COUNT(id) 
@@ -634,14 +661,23 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 		isValid = true
 	}
 
-	return map[string]interface{}{
+	passport := map[string]interface{}{
 		"batch":     fmt.Sprintf("%d", taskID),
 		"product":   templateName,
 		"line":      lineName,
 		"printTime": printedAt,
 		"status":    statusRu,
 		"valid":     isValid,
-	}, nil
+	}
+
+	// Если есть зафиксированный вес Catchweight, добавляем его в паспорт
+	var weightVal string
+	errWeight := s.db.QueryRow(`SELECT weight FROM mark_weights WHERE task_id = ? AND mark = ? ORDER BY id DESC LIMIT 1`, taskID, cleanCode).Scan(&weightVal)
+	if errWeight == nil && weightVal != "" {
+		passport["weight"] = weightVal
+	}
+
+	return passport, nil
 }
 
 func (s *Store) CreateTask(lineID int, template, dynamicField, staticJSON string, rndText string) (int64, error) {
@@ -684,7 +720,7 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 }
 
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	query := `SELECT id, name, ip, port, driver_type, is_active FROM printers WHERE is_deleted = 0`
+	query := `SELECT id, name, ip, port, driver_type, is_active, COALESCE(settings_json, '{}') FROM printers WHERE is_deleted = 0`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -694,7 +730,9 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive); err == nil {
+		var settingsRaw string
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive, &settingsRaw); err == nil {
+			p.Settings = []byte(settingsRaw)
 			list = append(list, p)
 		}
 	}
@@ -702,12 +740,17 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 }
 
 func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
-	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active) VALUES (?, ?, ?, ?, ?, ?)`
+	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active, settings_json) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	var id interface{} = p.ID
 	if p.ID == 0 {
 		id = nil
 	}
-	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive)
+	settingsStr := string(p.Settings)
+	if strings.TrimSpace(settingsStr) == "" {
+		settingsStr = "{}"
+	}
+
+	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive, settingsStr)
 	if err != nil {
 		return 0, err
 	}
@@ -733,7 +776,7 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 }
 
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
-	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, COALESCE(lp.role, 'PRIMARY') 
+	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, COALESCE(lp.role, 'PRIMARY'), COALESCE(p.settings_json, '{}')
 		FROM printers p
 		JOIN line_printers lp ON p.id = lp.printer_id
 		WHERE lp.line_id = ? AND p.is_active = 1`
@@ -746,10 +789,12 @@ func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	var list []models.PrinterConfig
 	for rows.Next() {
 		var p models.PrinterConfig
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.Role); err != nil {
+		var settingsRaw string
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.Role, &settingsRaw); err != nil {
 			slog.Error("GetPrintersByLine scan error", "err", err)
 			continue
 		}
+		p.Settings = []byte(settingsRaw)
 		list = append(list, p)
 	}
 	return list, nil
@@ -1113,4 +1158,25 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 		"in_buffer_count":      inBufferCount,
 		"pending_count":        pendingCount,
 	}, nil
+}
+
+// SaveMarkWeight сохраняет нанесенную марку с её фактическим весом нетто в Master DB
+func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight string) error {
+	mark = strings.TrimSpace(mark)
+	weight = strings.TrimSpace(weight)
+	if mark == "" || weight == "" {
+		return fmt.Errorf("марка и вес не должны быть пустыми")
+	}
+
+	query := `INSERT INTO mark_weights (task_id, printer_id, printer_index, mark, weight) VALUES (?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, taskID, printerID, printerIndex, mark, weight)
+	return err
+}
+
+// SaveGXNETResponse сохраняет сырой ответ очереди DUSTBIN при включенном аудите
+func (s *Store) SaveGXNETResponse(printerID int, device, receivedAt, cmd, param, queue, payload string, status int) error {
+	query := `INSERT INTO bizerba_responses (printer_id, device, received_at, command, parameter, queue, payload, status) 
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.Exec(query, printerID, device, receivedAt, cmd, param, queue, payload, status)
+	return err
 }
