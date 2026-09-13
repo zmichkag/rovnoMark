@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,8 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/windows/svc/eventlog"
-
 	"rovnoMark/internal/api"
 	"rovnoMark/internal/brand"
 	"rovnoMark/internal/core"
@@ -26,13 +23,12 @@ import (
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/drivers/videojet"
-	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
 	"rovnoMark/internal/version"
 
 	"rovnoMark/ui"
 	"rovnoMark/ui2"
-	"rovnoMark/ui_okk"
+	ui_okk "rovnoMark/ui_okk"
 )
 
 const serviceName = "RovnoMarkGateway"
@@ -51,8 +47,8 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
-	runner := func(ctx context.Context, elog *eventlog.Log) error {
-		return runApp(ctx, *port, *dataDir, *validateGS1, *debugMode, elog)
+	runner := func(ctx context.Context) error {
+		return runApp(ctx, *port, *dataDir, *validateGS1, *debugMode)
 	}
 
 	// 1. Проверка среды выполнения: запуск под управлением Windows SCM
@@ -68,13 +64,13 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := runner(ctx, nil); err != nil {
+	if err := runner(ctx); err != nil {
 		slog.Error("Остановка шлюза с ошибкой", "err", err)
 		os.Exit(1)
 	}
 }
 
-func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, debugMode bool, elog *eventlog.Log) error {
+func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, debugMode bool) error {
 	slog.Info(fmt.Sprintf("Запуск шлюза маркировки [%s]", brand.GetName()),
 		"version", version.Version,
 		"commit", version.GitCommit,
@@ -121,8 +117,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		case "ext_server", "nicelabel_http":
 			manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
 		case "bizerba":
-			bizerbaDriver := createBizerbaDriver(cfg, store)
-			manager.AddPrinter(cfg, bizerbaDriver)
+			manager.AddPrinter(cfg, bizerba.CreateDriver(cfg, store))
 		default:
 			slog.Warn("Неизвестный тип драйвера при инициализации", "driver_type", cfg.DriverType, "printer_id", cfg.ID)
 		}
@@ -149,7 +144,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	// 5. Монтирование Embedded UI файлов
 	contentUI, _ := fs.Sub(ui.FS, ".")
 	contentUI2, _ := fs.Sub(ui2.FS, ".")
-	contentOKK, _ := fs.Sub(okk.FS, ".")
+	contentOKK, _ := fs.Sub(ui_okk.FS, ".")
 
 	apiServer := api.NewServer(store, manager, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
 	router := apiServer.InitRoutes()
@@ -182,52 +177,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		return nil
 
 	case err := <-serverErrors:
-		if elog != nil {
-			_ = elog.Error(102, fmt.Sprintf("Критическая ошибка HTTP сервера: %v", err))
-		}
+		slog.Error("Критическая ошибка HTTP сервера", "err", err)
 		return fmt.Errorf("сбой HTTP сервера: %w", err)
 	}
-}
-
-// createBizerbaDriver изолированно парсит JSON-конфигурацию и строит драйвер Bizerba с коллбэками в шарды
-func createBizerbaDriver(cfg models.PrinterConfig, store *storage.Store) core.Printer {
-	var bSettings struct {
-		BCSDevice     string `json:"bcs_device"`
-		Mode          string `json:"mode"`
-		CaptureWeight bool   `json:"capture_weight"`
-		Conveyor      bool   `json:"conveyor"`
-		RecordGXNET   bool   `json:"record_gxnet"`
-	}
-
-	if len(cfg.Settings) > 0 {
-		_ = json.Unmarshal(cfg.Settings, &bSettings)
-	}
-
-	if bSettings.BCSDevice == "" {
-		bSettings.BCSDevice = "GLPMax"
-	}
-
-	return bizerba.NewWithProfile(cfg.IP, cfg.Port, bSettings.BCSDevice, bizerba.Profile{
-		Mode:          bizerba.MarkingMode(bSettings.Mode),
-		Conveyor:      bSettings.Conveyor,
-		CaptureWeight: bSettings.CaptureWeight,
-		RecordGXNET:   bSettings.RecordGXNET,
-		RecordResponse: func(resp bizerba.Response) error {
-			return store.SaveGXNETResponse(
-				cfg.ID,
-				bSettings.BCSDevice,
-				resp.ReceivedAt.Format(time.RFC3339),
-				resp.Command,
-				resp.Parameter,
-				resp.Queue,
-				resp.Payload,
-				resp.Status,
-			)
-		},
-		RecordWeight: func(printerIndex int, mark, weight string) error {
-			// В шард активного месяца пишется связка кода и фактического веса
-			activeTaskID, _ := store.GetActiveTaskByLine(0)
-			return store.SaveMarkWeight(activeTaskID, cfg.ID, printerIndex, mark, weight)
-		},
-	})
 }

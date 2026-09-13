@@ -872,3 +872,14 @@ func cloneFields(fields map[string]string) map[string]string {
 	}
 	return result
 }
+
+// GetTotalPrints удовлетворяет контракту core.Printer для снятия показаний одометра.
+// Для Bizerba возвращает индекс последней подтверждённой марки либо 0.
+func (d *Driver) GetTotalPrints() (int64, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.lastPrinted < 0 {
+		return 0, nil
+	}
+	return int64(d.lastPrinted), nil
+}

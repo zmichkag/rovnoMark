@@ -31,8 +31,10 @@ type ReconcileResult struct {
 }
 
 const (
-	TargetMasterSchemaVersion = 2 // v2: поддержка динамического веса Catchweight и настроек драйверов
-	TargetCodesSchemaVersion  = 1
+	// v2: поддержка динамического веса Catchweight и настроек драйверов
+	TargetMasterSchemaVersion = 2
+	// v2: добавляем колонку weight в codes_YYYY_MM.db
+	TargetCodesSchemaVersion = 2
 )
 
 func New(baseDir string) *Store {
@@ -304,6 +306,9 @@ func MigrateCodesShard(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_task_codes_status 
 			ON task_codes(task_id, status);
+		`,
+		2: `
+		ALTER TABLE task_codes ADD COLUMN weight TEXT DEFAULT '';
 		`,
 	}
 
@@ -613,12 +618,12 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 
 	activeDB := s.getCodesDB()
 	var taskID int
-	var status, printedAt string
+	var status, printedAt, weight string
 
-	query := `SELECT task_id, status, COALESCE(printed_at, 'Не отпечатан') 
+	query := `SELECT task_id, status, COALESCE(printed_at, 'Не отпечатан'), COALESCE(weight, '') 
 	          FROM task_codes WHERE code = ? OR code LIKE ? ORDER BY id DESC LIMIT 1`
 
-	err := activeDB.QueryRow(query, cleanCode, "%"+cleanCode+"%").Scan(&taskID, &status, &printedAt)
+	err := activeDB.QueryRow(query, cleanCode, "%"+cleanCode+"%").Scan(&taskID, &status, &printedAt, &weight)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		files, _ := filepath.Glob(filepath.Join(s.dataDir, "codes_*.db"))
@@ -668,15 +673,8 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 		"printTime": printedAt,
 		"status":    statusRu,
 		"valid":     isValid,
+		"weight":    weight,
 	}
-
-	// Если есть зафиксированный вес Catchweight, добавляем его в паспорт
-	var weightVal string
-	errWeight := s.db.QueryRow(`SELECT weight FROM mark_weights WHERE task_id = ? AND mark = ? ORDER BY id DESC LIMIT 1`, taskID, cleanCode).Scan(&weightVal)
-	if errWeight == nil && weightVal != "" {
-		passport["weight"] = weightVal
-	}
-
 	return passport, nil
 }
 
@@ -1160,7 +1158,7 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 	}, nil
 }
 
-// SaveMarkWeight сохраняет нанесенную марку с её фактическим весом нетто в Master DB
+// SaveMarkWeight фиксирует вес непосредственно в строке кода в активном шарде месяца
 func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight string) error {
 	mark = strings.TrimSpace(mark)
 	weight = strings.TrimSpace(weight)
@@ -1168,9 +1166,19 @@ func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight
 		return fmt.Errorf("марка и вес не должны быть пустыми")
 	}
 
-	query := `INSERT INTO mark_weights (task_id, printer_id, printer_index, mark, weight) VALUES (?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, taskID, printerID, printerIndex, mark, weight)
-	return err
+	db := s.getCodesDB()
+	query := `
+		UPDATE task_codes 
+		SET weight = ? 
+		WHERE task_id = ? 
+		  AND (printer_index = ? OR code = ? OR code LIKE ?)`
+
+	cleanMark := strings.ReplaceAll(mark, "\x1d", "<GS>")
+	_, err := db.Exec(query, weight, taskID, printerIndex, cleanMark, "%"+cleanMark+"%")
+	if err != nil {
+		return fmt.Errorf("ошибка фиксации веса в шарде кодов: %w", err)
+	}
+	return nil
 }
 
 // SaveGXNETResponse сохраняет сырой ответ очереди DUSTBIN при включенном аудите

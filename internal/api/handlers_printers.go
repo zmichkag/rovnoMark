@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
 	"rovnoMark/internal/drivers/savema"
@@ -79,6 +80,8 @@ func (s *Server) handlePrintersAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.ID = int(newID)
 
+	// internal/api/handlers_printers.go в методе handlePrintersAdd:
+
 	switch cfg.DriverType {
 	case "savema":
 		s.manager.AddPrinter(cfg, savema.New(cfg.IP, cfg.Port))
@@ -90,6 +93,8 @@ func (s *Server) handlePrintersAdd(w http.ResponseWriter, r *http.Request) {
 		s.manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 	case "ext_server", "nicelabel_http":
 		s.manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
+	case "bizerba":
+		s.manager.AddPrinter(cfg, bizerba.CreateDriver(cfg, s.store))
 	default:
 		sendJSONError(w, http.StatusBadRequest, "Неизвестный тип драйвера: "+cfg.DriverType)
 		return
