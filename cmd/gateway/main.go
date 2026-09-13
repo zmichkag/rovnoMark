@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,11 +20,13 @@ import (
 	"rovnoMark/internal/api"
 	"rovnoMark/internal/brand"
 	"rovnoMark/internal/core"
+	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/drivers/videojet"
+	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
 	"rovnoMark/internal/version"
 
@@ -90,10 +93,21 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	}()
 
 	manager := core.NewPrinterManager()
+	defer func() {
+		slog.Info("Освобождение ресурсов и сессий драйверов оборудования...")
+		if err := manager.CloseAll(); err != nil {
+			slog.Error("Ошибка закрытия драйверов", "err", err)
+		}
+	}()
+
 	taskProcessor := &core.TaskProcessor{Store: store, Manager: manager}
 
-	// Инициализация оборудования
-	savedPrinters, _ := store.GetAllPrinters()
+	// 3. Инициализация и регистрация оборудования в менеджере
+	savedPrinters, errPrinters := store.GetAllPrinters()
+	if errPrinters != nil {
+		slog.Error("Ошибка вычитки парка принтеров из базы", "err", errPrinters)
+	}
+
 	for _, cfg := range savedPrinters {
 		switch cfg.DriverType {
 		case "savema":
@@ -106,26 +120,33 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 		case "ext_server", "nicelabel_http":
 			manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
+		case "bizerba":
+			bizerbaDriver := createBizerbaDriver(cfg, store)
+			manager.AddPrinter(cfg, bizerbaDriver)
+		default:
+			slog.Warn("Неизвестный тип драйвера при инициализации", "driver_type", cfg.DriverType, "printer_id", cfg.ID)
 		}
 	}
 
+	// Запуск фонового поллера оборудования (интервал 2 сек) и сборщика телеметрии
 	go manager.BackgroundPoller(store)
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
-	// Восстановление активных задач
+	// 4. Восстановление активных задач после рестарта службы (Pumper Recovery)
 	activeTasks, err := store.GetActiveTasks(0, 0)
 	if err == nil && len(activeTasks) > 0 {
-		slog.Info("Обнаружены active задачи в БД. Восстанавливаем фоновые насосы...", "count", len(activeTasks))
+		slog.Info("Обнаружены незавершенные задачи в БД. Восстанавливаем фоновые насосы...", "count", len(activeTasks))
 		for _, taskMap := range activeTasks {
 			taskID, _ := strconv.Atoi(fmt.Sprintf("%v", taskMap["task_id"]))
 			lineID, _ := strconv.Atoi(fmt.Sprintf("%v", taskMap["line_id"]))
 			if taskID > 0 && lineID > 0 {
 				taskProcessor.StartPumping(lineID, taskID)
+				slog.Info("Фоновый насос успешно перезапущен", "task_id", taskID, "line_id", lineID)
 			}
 		}
 	}
 
-	// Монтирование UI
+	// 5. Монтирование Embedded UI файлов
 	contentUI, _ := fs.Sub(ui.FS, ".")
 	contentUI2, _ := fs.Sub(ui2.FS, ".")
 	contentOKK, _ := fs.Sub(okk.FS, ".")
@@ -146,9 +167,10 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		}
 	}()
 
+	// 6. Graceful Shutdown
 	select {
 	case <-ctx.Done():
-		slog.Info("Сигнал остановки получен. Завершение HTTP сервера...")
+		slog.Info("Сигнал остановки получен. Завершение работы HTTP сервера...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 
@@ -165,4 +187,47 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		}
 		return fmt.Errorf("сбой HTTP сервера: %w", err)
 	}
+}
+
+// createBizerbaDriver изолированно парсит JSON-конфигурацию и строит драйвер Bizerba с коллбэками в шарды
+func createBizerbaDriver(cfg models.PrinterConfig, store *storage.Store) core.Printer {
+	var bSettings struct {
+		BCSDevice     string `json:"bcs_device"`
+		Mode          string `json:"mode"`
+		CaptureWeight bool   `json:"capture_weight"`
+		Conveyor      bool   `json:"conveyor"`
+		RecordGXNET   bool   `json:"record_gxnet"`
+	}
+
+	if len(cfg.Settings) > 0 {
+		_ = json.Unmarshal(cfg.Settings, &bSettings)
+	}
+
+	if bSettings.BCSDevice == "" {
+		bSettings.BCSDevice = "GLPMax"
+	}
+
+	return bizerba.NewWithProfile(cfg.IP, cfg.Port, bSettings.BCSDevice, bizerba.Profile{
+		Mode:          bizerba.MarkingMode(bSettings.Mode),
+		Conveyor:      bSettings.Conveyor,
+		CaptureWeight: bSettings.CaptureWeight,
+		RecordGXNET:   bSettings.RecordGXNET,
+		RecordResponse: func(resp bizerba.Response) error {
+			return store.SaveGXNETResponse(
+				cfg.ID,
+				bSettings.BCSDevice,
+				resp.ReceivedAt.Format(time.RFC3339),
+				resp.Command,
+				resp.Parameter,
+				resp.Queue,
+				resp.Payload,
+				resp.Status,
+			)
+		},
+		RecordWeight: func(printerIndex int, mark, weight string) error {
+			// В шард активного месяца пишется связка кода и фактического веса
+			activeTaskID, _ := store.GetActiveTaskByLine(0)
+			return store.SaveMarkWeight(activeTaskID, cfg.ID, printerIndex, mark, weight)
+		},
+	})
 }
