@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
@@ -51,6 +52,7 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		tp.activeTasks = make(map[int]bool)
 	}
 
+	// Защита от дублирования фоновых горутин для одной и той же задачи
 	if tp.activeTasks[taskID] {
 		tp.activeMu.Unlock()
 		slog.Debug("Pumper: Насос для этой задачи уже работает, дублирование проигнорировано", "task_id", taskID)
@@ -69,24 +71,56 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 	ctx := context.Background()
 
-	// Если на линии Valentin — запускаем Fast Loop на каждый принтер с учетом роли
-	hasValentin := false
+	// -------------------------------------------------------------------------
+	// 1. Проверка на специализированные реактивные приводы (Bizerba и Valentin)
+	// -------------------------------------------------------------------------
+	hasSpecializedDriver := false
+
 	for _, pCfg := range printers {
-		if pCfg.DriverType == "valentine_nice" {
-			hasValentin = true
+		switch pCfg.DriverType {
+
+		// Bizerba: весовой комплекс с динамическим взвешиванием (Catchweight)
+		// Требует строго поштучной подачи (one-code-one-weight) под физический триггер
+		case "bizerba":
+			hasSpecializedDriver = true
+			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
+			if bDriver, ok := pPrinter.(*bizerba.Driver); ok {
+				slog.Info("Pumper: Запуск реактивного Bizerba Fast Loop (Catchweight)",
+					"line_id", lineID,
+					"printer", pCfg.Name,
+					"printer_id", pCfg.ID,
+				)
+				go tp.RunBizerbaFastPumper(ctx, lineID, taskID, pCfg.ID, bDriver)
+			} else {
+				slog.Error("Pumper: Ошибка приведения типа к *bizerba.Driver", "printer_id", pCfg.ID)
+			}
+
+		// Carl Valentin: поштучный тактовый цикл взвода на фотодатчик
+		case "valentine_nice":
+			hasSpecializedDriver = true
 			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 			if vDriver, ok := pPrinter.(*valentine.NiceLabelDriver); ok {
-				slog.Info("Pumper: Запуск реактивного Valentin Fast Loop", "line_id", lineID, "printer", pCfg.Name, "role", pCfg.Role)
+				slog.Info("Pumper: Запуск реактивного Valentin Fast Loop",
+					"line_id", lineID,
+					"printer", pCfg.Name,
+					"role", pCfg.Role,
+				)
 				go tp.RunValentinFastPumper(ctx, lineID, taskID, pCfg.ID, pCfg.Role, vDriver)
+			} else {
+				slog.Error("Pumper: Ошибка приведения типа к *valentine.NiceLabelDriver", "printer_id", pCfg.ID)
 			}
 		}
 	}
 
-	if hasValentin {
+	// Если на линии запущен хотя бы один реактивный поштучный насос — выходим
+	if hasSpecializedDriver {
 		return
 	}
 
-	// Для всех остальных типов (Videojet, Savema, TSC, Markem, Bizerba)
+	// -------------------------------------------------------------------------
+	// 2. Стандартный пачечный насос для классических маркираторов
+	// (Videojet, Savema, Markem-Imaje, TSC)
+	// -------------------------------------------------------------------------
 	slog.Info("Pumper: Запуск штатного пачечного насоса", "line_id", lineID, "task_id", taskID)
 	go tp.RunDefaultPumper(ctx, lineID, taskID)
 }
@@ -260,6 +294,80 @@ func (tp *TaskProcessor) stopTaskTracking(taskID int) {
 	tp.activeMu.Lock()
 	delete(tp.activeTasks, taskID)
 	tp.activeMu.Unlock()
+}
+
+func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskID, printerID int, bDriver *bizerba.Driver) {
+	defer tp.stopTaskTracking(taskID)
+	slog.Info("BIZERBA-PUMPER: Запущен реактивный буферный насос", "line_id", lineID, "printer_id", printerID)
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			status, err := tp.Store.GetTaskStatus(taskID)
+			if err != nil || status == "stopped" || status == "completed" {
+				return
+			}
+
+			// 1. Узнаем у драйвера Bizerba, сколько свободных слотов в его очереди марок
+			freeSpace, err := bDriver.GetBufferFreeSpace()
+			if err != nil || freeSpace <= 0 {
+				continue
+			}
+
+			// 2. Берем из базы ровно столько кодов, сколько готово принять железо (но не более 5 за раз)
+			targetLoad := freeSpace
+			if targetLoad > 5 {
+				targetLoad = 5
+			}
+
+			pending, err := tp.Store.FetchAndAssignCodes(taskID, printerID, targetLoad)
+			if err != nil || len(pending) == 0 {
+				continue
+			}
+
+			// 3. Формируем пачку для отправки
+			var codes []string
+			startIndex := pending[0].PrinterIndex
+			for _, item := range pending {
+				cleanCode := strings.TrimSpace(item.Code)
+				if idx := strings.Index(cleanCode, "|"); idx != -1 {
+					cleanCode = cleanCode[:idx]
+				}
+				codes = append(codes, cleanCode)
+			}
+
+			// 4. Загружаем в COM-драйвер Bizerba
+			_, err = bDriver.PrintBatchIndexed("DATAMATRIX", startIndex, codes)
+			if err != nil {
+				slog.Error("BIZERBA-PUMPER: Ошибка отправки пакета в драйвер", "err", err)
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+	}
+}
+
+func (tp *TaskProcessor) pushSingleBizerbaCode(taskID, printerID int, bDriver *bizerba.Driver) error {
+	// Выбираем ровно один свободный код из шарда месяца
+	codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 1)
+	if err != nil || len(codes) == 0 {
+		return nil
+	}
+
+	codeObj := codes[0]
+	cleanCode := strings.TrimSpace(codeObj.Code)
+
+	// Передаем единичный код с его сквозным индексом
+	_, err = bDriver.PrintBatchIndexed("DATAMATRIX", codeObj.PrinterIndex, []string{cleanCode})
+	if err != nil {
+		return fmt.Errorf("сбой передачи кода в Bizerba: %w", err)
+	}
+
+	return nil
 }
 
 type PrinterManager struct {
