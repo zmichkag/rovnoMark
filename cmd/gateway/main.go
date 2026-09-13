@@ -20,6 +20,7 @@ import (
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
 	"rovnoMark/internal/drivers/savema"
+	scannerdrivers "rovnoMark/internal/drivers/scanners"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
@@ -89,6 +90,12 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	}()
 
 	manager := core.NewPrinterManager()
+	scannerManager := core.NewScannerManager(store)
+	defer func() {
+		if err := scannerManager.Close(); err != nil {
+			slog.Error("Ошибка остановки менеджера сканеров", "err", err)
+		}
+	}()
 	taskProcessor := &core.TaskProcessor{Store: store, Manager: manager}
 
 	// Инициализация оборудования
@@ -105,6 +112,21 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 		case "ext_server", "nicelabel_http":
 			manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
+		}
+	}
+
+	savedScanners, _ := store.GetAllScanners()
+	for _, cfg := range savedScanners {
+		if !cfg.IsActive {
+			continue
+		}
+		switch cfg.DriverType {
+		case "tcp_camera":
+			scannerManager.AddScanner(cfg, scannerdrivers.NewTCPCamera(cfg))
+		case "serial":
+			slog.Warn("Драйвер последовательного сканера ещё не реализован", "scanner", cfg.Name)
+		default:
+			slog.Warn("Неизвестный тип драйвера сканера", "scanner", cfg.Name, "driver_type", cfg.DriverType)
 		}
 	}
 
@@ -129,7 +151,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	contentUI2, _ := fs.Sub(ui2.FS, ".")
 	contentOKK, _ := fs.Sub(okk.FS, ".")
 
-	apiServer := api.NewServer(store, manager, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
+	apiServer := api.NewServer(store, manager, scannerManager, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
 	router := apiServer.InitRoutes()
 
 	httpServer := &http.Server{

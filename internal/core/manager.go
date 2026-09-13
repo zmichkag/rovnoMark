@@ -52,6 +52,8 @@ type ScannerStatus struct {
 	TotalScans    uint64    `json:"total_scans"`
 	GoodScans     uint64    `json:"good_scans"`
 	NoReads       uint64    `json:"no_reads"`
+	LastCode      string    `json:"last_code,omitempty"`
+	LastReadAt    time.Time `json:"last_read_at,omitempty"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastHeartbeat time.Time `json:"last_heartbeat"`
 }

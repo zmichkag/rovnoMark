@@ -27,6 +27,42 @@ type LineConfig struct {
 	IsDeleted   bool   `json:"is_deleted"`
 }
 
+type ScannerRole string
+
+const (
+	ScannerRoleInlineVerifier ScannerRole = "INLINE_VERIFIER"
+	ScannerRoleAuditCheck     ScannerRole = "AUDIT_CHECK"
+	ScannerRoleAggregator     ScannerRole = "AGGREGATOR"
+)
+
+// ScannerConfig описывает подключение сканера и его место в топологии линии.
+type ScannerConfig struct {
+	ID             int         `json:"id"`
+	LineID         int         `json:"line_id"`
+	Name           string      `json:"name"`
+	DriverType     string      `json:"driver_type"`
+	Address        string      `json:"address"`
+	Port           int         `json:"port"`
+	Role           ScannerRole `json:"role"`
+	TargetDeviceID *int        `json:"target_device_id,omitempty"`
+	SettingsJSON   string      `json:"settings_json"`
+	IsActive       bool        `json:"is_active"`
+	CreatedAt      time.Time   `json:"created_at"`
+	UpdatedAt      time.Time   `json:"updated_at"`
+}
+
+// ScannerRead хранит успешное чтение, полученное от сканера.
+type ScannerRead struct {
+	ID          int       `json:"id"`
+	ScannerID   int       `json:"scanner_id"`
+	LineID      int       `json:"line_id"`
+	TaskID      *int      `json:"task_id,omitempty"`
+	TaskCodeID  *int      `json:"task_code_id,omitempty"`
+	Code        string    `json:"code"`
+	MatchStatus string    `json:"match_status"`
+	ReadAt      time.Time `json:"read_at"`
+}
+
 // PrinterState хранит оперативное состояние и телеметрию принтера в ОЗУ
 type PrinterState struct {
 	LastTemplate   string
@@ -83,7 +119,7 @@ type TaskCode struct {
 	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
 	ExternalID   string    `json:"ext_id"`        // Идентификатор/порядковый номер из 1C (может быть пустым)
-	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'[cite: 1, 2, 3]
+	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed', 'verified'
 	PrinterIndex int       `json:"printer_index"` // Индекс партии/пакета для принтера
 	PrintedAt    time.Time `json:"printed_at"`
 }

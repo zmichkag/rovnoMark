@@ -9,10 +9,11 @@ import (
 )
 
 type Server struct {
-	store         *storage.Store
-	manager       *core.PrinterManager
-	taskProcessor *core.TaskProcessor
-	validateGS1   bool
+	store          *storage.Store
+	manager        *core.PrinterManager
+	scannerManager *core.ScannerManager
+	taskProcessor  *core.TaskProcessor
+	validateGS1    bool
 
 	uiFS    fs.FS
 	ui2FS   fs.FS
@@ -22,18 +23,20 @@ type Server struct {
 func NewServer(
 	store *storage.Store,
 	manager *core.PrinterManager,
+	scannerManager *core.ScannerManager,
 	taskProcessor *core.TaskProcessor,
 	validateGS1 bool,
 	uiFS, ui2FS, uiOkkFS fs.FS,
 ) *Server {
 	return &Server{
-		store:         store,
-		manager:       manager,
-		taskProcessor: taskProcessor,
-		validateGS1:   validateGS1,
-		uiFS:          uiFS,
-		ui2FS:         ui2FS,
-		uiOkkFS:       uiOkkFS,
+		store:          store,
+		manager:        manager,
+		scannerManager: scannerManager,
+		taskProcessor:  taskProcessor,
+		validateGS1:    validateGS1,
+		uiFS:           uiFS,
+		ui2FS:          ui2FS,
+		uiOkkFS:        uiOkkFS,
 	}
 }
 

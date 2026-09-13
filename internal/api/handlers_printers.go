@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"rovnoMark/internal/core"
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
 	"rovnoMark/internal/drivers/savema"
@@ -22,7 +23,12 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	states, logs := s.manager.GetDashboardData()
+	scannerStates := make(map[int]core.ScannerStatus)
+	if s.scannerManager != nil {
+		scannerStates = s.scannerManager.GetDashboardData()
+	}
 	configs, _ := s.store.GetAllPrinters()
+	scanners, _ := s.store.GetAllScanners()
 	lines, _ := s.store.GetAllLines()
 	lineMap, _ := s.store.GetPrinterLineMap()
 
@@ -30,12 +36,18 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 		models.PrinterConfig
 		models.PrinterState
 	}
+	type ScannerInfo struct {
+		models.ScannerConfig
+		core.ScannerStatus
+	}
 	type LineGroup struct {
 		models.LineConfig
 		Printers []PrinterInfo `json:"printers"`
+		Scanners []ScannerInfo `json:"scanners"`
 	}
 
 	grouped := make(map[int][]PrinterInfo)
+	groupedScanners := make(map[int][]ScannerInfo)
 	var allForUI []PrinterInfo
 	for _, cfg := range configs {
 		info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
@@ -44,12 +56,21 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 			grouped[lineID] = append(grouped[lineID], info)
 		}
 	}
+	for _, scanner := range scanners {
+		if scanner.IsActive {
+			groupedScanners[scanner.LineID] = append(groupedScanners[scanner.LineID], ScannerInfo{
+				ScannerConfig: scanner,
+				ScannerStatus: scannerStates[scanner.ID],
+			})
+		}
+	}
 
 	var responseLines []LineGroup
 	for _, l := range lines {
 		responseLines = append(responseLines, LineGroup{
 			LineConfig: l,
 			Printers:   grouped[l.ID],
+			Scanners:   groupedScanners[l.ID],
 		})
 	}
 

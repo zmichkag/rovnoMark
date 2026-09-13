@@ -31,8 +31,8 @@ type ReconcileResult struct {
 }
 
 const (
-	TargetMasterSchemaVersion = 1
-	TargetCodesSchemaVersion  = 1
+	TargetMasterSchemaVersion = 4
+	TargetCodesSchemaVersion  = 2
 )
 
 func New(baseDir string) *Store {
@@ -204,6 +204,67 @@ func MigrateMaster(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_event_log_composite ON event_log(line_id, event_type, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer ON task_printer_counters(task_id, printer_id);
 		`,
+		2: `
+		CREATE TABLE IF NOT EXISTS line_scanners (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			line_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			driver_type TEXT NOT NULL,
+			address TEXT NOT NULL,
+			port INTEGER,
+			role TEXT NOT NULL CHECK (role IN ('INLINE_VERIFIER', 'AUDIT_CHECK', 'AGGREGATOR')),
+			target_device_id INTEGER,
+			settings_json TEXT NOT NULL DEFAULT '{}',
+			is_active BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			CONSTRAINT unq_line_scanner_name UNIQUE (line_id, name),
+			CONSTRAINT chk_inline_scanner_target CHECK (
+				role != 'INLINE_VERIFIER' OR target_device_id IS NOT NULL
+			),
+			FOREIGN KEY (line_id) REFERENCES lines(id),
+			FOREIGN KEY (target_device_id) REFERENCES printers(id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_line_scanners_line_active
+			ON line_scanners(line_id, is_active);
+		CREATE INDEX IF NOT EXISTS idx_line_scanners_target_device
+			ON line_scanners(target_device_id)
+			WHERE target_device_id IS NOT NULL;
+		`,
+		3: `
+		CREATE TABLE IF NOT EXISTS scanner_reads (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scanner_id INTEGER NOT NULL,
+			line_id INTEGER NOT NULL,
+			task_id INTEGER,
+			task_code_id INTEGER,
+			code TEXT NOT NULL,
+			raw_data BLOB NOT NULL,
+			match_status TEXT NOT NULL DEFAULT 'unmatched',
+			read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (scanner_id) REFERENCES line_scanners(id),
+			FOREIGN KEY (line_id) REFERENCES lines(id),
+			FOREIGN KEY (task_id) REFERENCES tasks(id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_scanner_time
+			ON scanner_reads(scanner_id, read_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_task_code
+			ON scanner_reads(task_id, code);
+		`,
+		4: `
+		UPDATE scanner_reads
+		SET code = TRIM(SUBSTR(code, INSTR(code, ',') + 1)),
+			raw_data = CAST(TRIM(
+				SUBSTR(CAST(raw_data AS TEXT), INSTR(CAST(raw_data AS TEXT), ',') + 1),
+				CHAR(13) || CHAR(10) || ' '
+			) AS BLOB)
+		WHERE LOWER(code) LIKE 'region%,%'
+			AND INSTR(code, ',') > 7
+			AND LENGTH(SUBSTR(code, 7, INSTR(code, ',') - 7)) > 0
+			AND SUBSTR(code, 7, INSTR(code, ',') - 7) NOT GLOB '*[^0-9]*';
+		`,
 	}
 
 	for v := currentVersion + 1; v <= TargetMasterSchemaVersion; v++ {
@@ -272,6 +333,14 @@ func MigrateCodesShard(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_task_codes_status 
 			ON task_codes(task_id, status);
+		`,
+		2: `
+		ALTER TABLE task_codes ADD COLUMN verified_at DATETIME;
+		ALTER TABLE task_codes ADD COLUMN verified_by_scanner_id INTEGER;
+
+		CREATE INDEX IF NOT EXISTS idx_task_codes_verified
+			ON task_codes(task_id, verified_by_scanner_id, verified_at)
+			WHERE status = 'verified';
 		`,
 	}
 
@@ -546,7 +615,7 @@ func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastInd
 	err = db.QueryRow(`
 		SELECT COUNT(id) 
 		FROM task_codes 
-		WHERE task_id = ? AND status = 'printed'`,
+		WHERE task_id = ? AND status IN ('printed', 'verified')`,
 		taskID).Scan(&totalPrinted)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка подсчета итоговых printed: %w", err)
@@ -628,6 +697,9 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 	isValid := false
 	if status == "printed" {
 		statusRu = "Нанесен на упаковку"
+		isValid = true
+	} else if status == "verified" {
+		statusRu = "Проверен сканером"
 		isValid = true
 	} else if status == "in_buffer" {
 		statusRu = "В буфере печати"
@@ -984,12 +1056,13 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 		var id, lID int
 		var lName, template, dynamic, status, created, rndText string
 		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText); err == nil {
-			var total, printed, buffered int
+			var total, printed, verified, buffered int
 			codesDB.QueryRow(`
 				SELECT COUNT(*), 
-				       COUNT(CASE WHEN status = 'printed' THEN 1 END), 
+				       COUNT(CASE WHEN status IN ('printed', 'verified') THEN 1 END),
+				       COUNT(CASE WHEN status = 'verified' THEN 1 END),
 				       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
-				FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
+				FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &verified, &buffered)
 
 			result = append(result, map[string]interface{}{
 				"task_id":            id,
@@ -1003,6 +1076,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 				"stats": map[string]int{
 					"total":    total,
 					"printed":  printed,
+					"verified": verified,
 					"buffered": buffered,
 				},
 			})
@@ -1089,15 +1163,16 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 
 	codesDB := s.getCodesDB()
 	var lastPrintedAt sql.NullString
-	var totalCodes, printedCount, inBufferCount, pendingCount int
+	var totalCodes, printedCount, verifiedCount, inBufferCount, pendingCount int
 
 	_ = codesDB.QueryRowContext(ctx, `
 		SELECT MAX(printed_at),
 		       COUNT(id),
-		       COUNT(CASE WHEN status = 'printed' THEN 1 END),
+		       COUNT(CASE WHEN status IN ('printed', 'verified') THEN 1 END),
+		       COUNT(CASE WHEN status = 'verified' THEN 1 END),
 		       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END),
 		       COUNT(CASE WHEN status = 'pending' THEN 1 END)
-		FROM task_codes WHERE task_id = ?`, taskID).Scan(&lastPrintedAt, &totalCodes, &printedCount, &inBufferCount, &pendingCount)
+		FROM task_codes WHERE task_id = ?`, taskID).Scan(&lastPrintedAt, &totalCodes, &printedCount, &verifiedCount, &inBufferCount, &pendingCount)
 
 	return map[string]interface{}{
 		"task_id":              tID,
@@ -1110,6 +1185,7 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 		"stop_event_at":        stopEventAt.String,
 		"total_codes":          totalCodes,
 		"printed_count":        printedCount,
+		"verified_count":       verifiedCount,
 		"in_buffer_count":      inBufferCount,
 		"pending_count":        pendingCount,
 	}, nil

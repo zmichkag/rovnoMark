@@ -63,6 +63,11 @@
         .card { background: var(--surface); border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); border-left: 5px solid var(--warning); display: flex; flex-direction: column; gap: 12px; }
         .card.online { border-left-color: var(--success); }
         .card.offline { border-left-color: var(--danger); }
+        .card.scanner { border-left-color: #9b6cff; background: linear-gradient(135deg, var(--surface), #241d33); }
+        .card.scanner .status-badge { color: #bd9cff; background: rgba(155, 108, 255, 0.14); }
+        .equipment-kind { color: var(--text-muted); font-size: 0.72rem; font-weight: bold; letter-spacing: 0.08em; text-transform: uppercase; }
+        dialog { width: min(900px, calc(100vw - 40px)); max-height: 80vh; color: var(--text); background: var(--surface); border: 1px solid #6245a0; border-radius: 8px; padding: 20px; }
+        dialog::backdrop { background: rgba(0, 0, 0, 0.72); }
         .card-header { display: flex; justify-content: space-between; align-items: center; }
         .card-title { margin: 0; font-size: 1.1rem; }
         .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; background: #333; color: var(--warning); }
@@ -181,6 +186,49 @@
             </div>
         </div>
     </div>
+    <div id="scanner-form" style="background: var(--surface); padding: 20px; border-radius: 8px; margin-top: 20px;">
+        <h3 id="scanner_form_title">Сканер</h3>
+        <input type="hidden" id="scanner_id" value="">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 15px;">
+            <div class="field"><label>Линия:</label><select id="scanner_line" onchange="updateScannerTargetOptions()"></select></div>
+            <div class="field"><label>Название:</label><input type="text" id="scanner_name" placeholder="Камера после принтера"></div>
+            <div class="field">
+                <label>Драйвер:</label>
+                <select id="scanner_driver">
+                    <option value="tcp_camera">TCP-камера</option>
+                    <option value="serial">RS-232 / Virtual COM</option>
+                </select>
+            </div>
+            <div class="field"><label>Адрес:</label><input type="text" id="scanner_address" placeholder="192.168.1.45 или COM3"></div>
+            <div class="field"><label>Порт:</label><input type="number" id="scanner_port" min="0" max="65535" value="23"></div>
+            <div class="field">
+                <label>Роль:</label>
+                <select id="scanner_role" onchange="updateScannerRoleFields()">
+                    <option value="INLINE_VERIFIER">Проверка печати</option>
+                    <option value="AUDIT_CHECK">Выборочный контроль ОТК</option>
+                    <option value="AGGREGATOR">Агрегация коробов</option>
+                </select>
+            </div>
+            <div class="field" id="scanner_target_field"><label>Целевой принтер:</label><select id="scanner_target"></select></div>
+            <div class="field"><label><input type="checkbox" id="scanner_active" checked style="width:auto;"> Активен</label></div>
+        </div>
+        <details style="margin-bottom: 15px;">
+            <summary style="cursor: pointer; color: var(--text-muted);">Дополнительные настройки</summary>
+            <div class="field" style="margin-top: 10px;">
+                <label>Настройки драйвера (JSON):</label>
+                <textarea id="scanner_settings" rows="3">{}</textarea>
+            </div>
+        </details>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn" id="scanner_submit_btn" style="background: var(--success); flex: 1;" onclick="saveScanner()">СОХРАНИТЬ</button>
+            <button class="btn" style="flex: 1;" onclick="clearScannerForm()">ОЧИСТИТЬ</button>
+        </div>
+    </div>
+    <h4 style="margin-top:30px;">Сканеры</h4>
+    <table>
+        <thead><tr><th>ID</th><th>Название</th><th>Линия</th><th>Подключение</th><th>Роль</th><th>Целевой принтер</th><th>Состояние</th><th>Действие</th></tr></thead>
+        <tbody id="scanners-list-table"></tbody>
+    </table>
     <h4 style="margin-top:30px;">Привязки</h4>
     <table><thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th><th>Действие</th></tr></thead><tbody id="assignments-table"></tbody></table>
     <h4>Линии</h4>
@@ -227,10 +275,24 @@
     </div>
 </div>
 
+<dialog id="scanner_reads_dialog">
+    <div class="card-header">
+        <h3 id="scanner_reads_title" style="margin:0;">Чтения сканера</h3>
+        <button class="btn" onclick="document.getElementById('scanner_reads_dialog').close()">ЗАКРЫТЬ</button>
+    </div>
+    <div style="overflow:auto; margin-top:15px;">
+        <table>
+            <thead><tr><th>Время</th><th>Код</th><th>Результат</th><th>Задание</th></tr></thead>
+            <tbody id="scanner_reads_table"></tbody>
+        </table>
+    </div>
+</dialog>
+
 <script>
     window.printersMap = {};
     window.linesMap = {};
     window.assignmentsList = [];
+    window.scannersMap = {};
 
     function switchTab(tabId) {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -592,26 +654,96 @@
         </div>`;
     }
 
+    function createScannerCard(scanner, printerByID) {
+        const roleLabels = {
+            INLINE_VERIFIER: 'Проверка печати',
+            AUDIT_CHECK: 'Контроль ОТК',
+            AGGREGATOR: 'Агрегация коробов'
+        };
+        const target = scanner.target_device_id ? printerByID[scanner.target_device_id] : null;
+        const connection = scanner.port ? `${scanner.address}:${scanner.port}` : scanner.address;
+        const status = scanner.online ? 'ONLINE' : 'OFFLINE';
+        const lastRead = scanner.good_scans > 0 && scanner.last_read_at
+            ? new Date(scanner.last_read_at).toLocaleTimeString()
+            : '—';
+        const lastCode = scanner.last_code || '—';
+
+        return `
+        <div class="card scanner">
+            <div class="card-header">
+                <h3 class="card-title">${escapeHTML(scanner.name)}</h3>
+                <span class="status-badge">${status}</span>
+            </div>
+            <div style="font-size: 0.85rem;">
+                <div>Подключение: <b>${escapeHTML(connection)}</b></div>
+                <div>Драйвер: <b>${escapeHTML(scanner.driver_type)}</b></div>
+                <div>Роль: <b>${roleLabels[scanner.role] || escapeHTML(scanner.role)}</b></div>
+                <div>Цель: <b>${escapeHTML(target ? target.name : '—')}</b></div>
+                <div>Прочитано: <b>${scanner.good_scans || 0}</b></div>
+                <div>Последнее чтение: <b>${escapeHTML(lastRead)}</b></div>
+                <div title="${escapeHTML(lastCode)}">Последний код: <b>${escapeHTML(lastCode.length > 42 ? lastCode.slice(0, 42) + '…' : lastCode)}</b></div>
+            </div>
+            <button class="btn" onclick="showScannerReads(${scanner.id})">ИСТОРИЯ ЧТЕНИЙ</button>
+        </div>`;
+    }
+
+    async function showScannerReads(scannerID) {
+        const dialog = document.getElementById('scanner_reads_dialog');
+        const table = document.getElementById('scanner_reads_table');
+        const scanner = window.scannersMap[scannerID];
+        document.getElementById('scanner_reads_title').textContent = scanner
+            ? `Чтения: ${scanner.name}`
+            : `Чтения сканера #${scannerID}`;
+        table.innerHTML = '<tr><td colspan="4" style="color:var(--text-muted)">Загрузка…</td></tr>';
+        dialog.showModal();
+
+        const labels = {
+            verified: 'Проверен',
+            duplicate: 'Повторное чтение',
+            unknown_code: 'Код не найден',
+            no_active_task: 'Нет активного задания',
+            not_printed: 'Код ещё не передан в печать',
+            match_error: 'Ошибка сопоставления'
+        };
+        try {
+            const response = await fetch(`/api/scanner/reads?scanner_id=${scannerID}&limit=100`);
+            if (!response.ok) throw new Error(await response.text());
+            const reads = await response.json() || [];
+            table.innerHTML = reads.length ? reads.map(read => `<tr>
+                <td>${escapeHTML(new Date(read.read_at).toLocaleString())}</td>
+                <td title="${escapeHTML(read.code)}"><code>${escapeHTML(read.code)}</code></td>
+                <td>${escapeHTML(labels[read.match_status] || read.match_status)}</td>
+                <td>${read.task_id || '—'}</td>
+            </tr>`).join('') : '<tr><td colspan="4" style="color:var(--text-muted)">Успешных чтений пока нет</td></tr>';
+        } catch (error) {
+            table.innerHTML = `<tr><td colspan="4" style="color:var(--danger)">${escapeHTML(error.message)}</td></tr>`;
+        }
+    }
+
     function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
         const assignedIds = new Set();
+        const printerByID = {};
+        (data.all_printers || []).forEach(printer => printerByID[printer.id] = printer);
 
         (data.lines || []).forEach(l => {
-            if (!l.printers || l.printers.length === 0) return;
+            const printers = l.printers || [];
+            const scanners = l.scanners || [];
+            if (printers.length === 0 && scanners.length === 0) return;
 
             let printersHtml = '';
-            l.printers.forEach(p => {
+            printers.forEach(p => {
                 assignedIds.add(p.id);
                 printersHtml += createPrinterCard(p);
             });
+            const scannersHtml = scanners.map(scanner => createScannerCard(scanner, printerByID)).join('');
 
             grid.innerHTML += `
                 <div class="line-column">
-                    <h2 class="line-column-title">Линия: ${l.name}</h2>
-                    <div class="line-printers-list">
-                        ${printersHtml}
-                    </div>
+                    <h2 class="line-column-title">Линия: ${escapeHTML(l.name)}</h2>
+                    ${printersHtml ? `<div class="equipment-kind">Принтеры</div><div class="line-printers-list">${printersHtml}</div>` : ''}
+                    ${scannersHtml ? `<div class="equipment-kind">Сканеры и камеры</div><div class="line-printers-list">${scannersHtml}</div>` : ''}
                 </div>`;
         });
 
@@ -795,6 +927,7 @@
             lines.forEach(l => window.linesMap[l.id] = l);
 
             document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+            document.getElementById('scanner_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
             document.getElementById('lines-list-table').innerHTML = lines.map(l => `
                 <tr>
                     <td>${l.id}</td>
@@ -826,10 +959,151 @@
                     <td>${a.role}</td>
                     <td><button class="btn" onclick="editAssignment(${idx})">Редактировать</button></td>
                 </tr>`).join('');
+
+            const sRes = await fetch('/api/scanners');
+            if (!sRes.ok) throw new Error(`Сбой на бэкенде (/api/scanners), код ${sRes.status}:\n${await sRes.text()}`);
+            const scanners = await sRes.json() || [];
+            window.scannersMap = {};
+            scanners.forEach(scanner => window.scannersMap[scanner.id] = scanner);
+
+            const scannerRoleLabels = {
+                INLINE_VERIFIER: 'Проверка печати',
+                AUDIT_CHECK: 'Контроль ОТК',
+                AGGREGATOR: 'Агрегация коробов'
+            };
+            document.getElementById('scanners-list-table').innerHTML = scanners.length
+                ? scanners.map(scanner => {
+                    const line = window.linesMap[scanner.line_id];
+                    const target = scanner.target_device_id ? window.printersMap[scanner.target_device_id] : null;
+                    const connection = scanner.port ? `${scanner.address}:${scanner.port}` : scanner.address;
+                    return `<tr>
+                        <td>${scanner.id}</td>
+                        <td>${escapeHTML(scanner.name)}</td>
+                        <td>${escapeHTML(line ? line.name : `ID ${scanner.line_id}`)}</td>
+                        <td>${escapeHTML(connection)}</td>
+                        <td>${scannerRoleLabels[scanner.role] || escapeHTML(scanner.role)}</td>
+                        <td>${escapeHTML(target ? target.name : '—')}</td>
+                        <td style="color: ${scanner.is_active ? 'var(--success)' : 'var(--text-muted)'}">${scanner.is_active ? 'Активен' : 'Выключен'}</td>
+                        <td><button class="btn" onclick="editScanner(${scanner.id})">Редактировать</button></td>
+                    </tr>`;
+                }).join('')
+                : '<tr><td colspan="8" style="color: var(--text-muted);">Сканеры ещё не настроены</td></tr>';
+
+            updateScannerTargetOptions();
+            updateScannerRoleFields();
         } catch (e) {
             console.error("Критический сбой:", e);
             alert("⚠️ ИНТЕРФЕЙС ОСТАНОВЛЕН ИЗ-ЗА ОШИБКИ СЕРВЕРА ⚠️\n\n" + e.message);
         }
+    }
+
+    function escapeHTML(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+        })[char]);
+    }
+
+    function updateScannerTargetOptions(selectedID) {
+        const lineID = parseInt(document.getElementById('scanner_line').value);
+        const assignedPrinterIDs = new Set(
+            window.assignmentsList
+                .filter(assignment => assignment.line_id === lineID)
+                .map(assignment => assignment.printer_id)
+        );
+        const printers = Object.values(window.printersMap)
+            .filter(printer => assignedPrinterIDs.has(printer.id));
+        const target = document.getElementById('scanner_target');
+        target.innerHTML = printers.length
+            ? printers.map(printer => `<option value="${printer.id}">${escapeHTML(printer.name)}</option>`).join('')
+            : '<option value="">Нет привязанных принтеров</option>';
+        if (selectedID && printers.some(printer => printer.id === Number(selectedID))) {
+            target.value = String(selectedID);
+        }
+    }
+
+    function updateScannerRoleFields() {
+        const inlineVerifier = document.getElementById('scanner_role').value === 'INLINE_VERIFIER';
+        document.getElementById('scanner_target_field').style.display = inlineVerifier ? 'block' : 'none';
+        document.getElementById('scanner_target').disabled = !inlineVerifier;
+    }
+
+    async function saveScanner() {
+        const scannerID = parseInt(document.getElementById('scanner_id').value) || 0;
+        const role = document.getElementById('scanner_role').value;
+        const targetValue = document.getElementById('scanner_target').value;
+        const settingsJSON = document.getElementById('scanner_settings').value.trim() || '{}';
+        try {
+            JSON.parse(settingsJSON);
+        } catch (_) {
+            alert('Дополнительные настройки должны содержать корректный JSON.');
+            return;
+        }
+        if (role === 'INLINE_VERIFIER' && !targetValue) {
+            alert('Для проверки печати выберите целевой принтер.');
+            return;
+        }
+
+        const body = {
+            id: scannerID,
+            line_id: parseInt(document.getElementById('scanner_line').value),
+            name: document.getElementById('scanner_name').value.trim(),
+            driver_type: document.getElementById('scanner_driver').value,
+            address: document.getElementById('scanner_address').value.trim(),
+            port: parseInt(document.getElementById('scanner_port').value) || 0,
+            role: role,
+            target_device_id: role === 'INLINE_VERIFIER' ? parseInt(targetValue) : null,
+            settings_json: settingsJSON,
+            is_active: document.getElementById('scanner_active').checked
+        };
+
+        try {
+            const response = await fetch('/api/scanners', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+            alert(scannerID ? 'Сканер обновлён.' : 'Сканер добавлен.');
+            clearScannerForm();
+            loadSettingsData();
+        } catch (error) {
+            alert('Ошибка сохранения сканера:\n' + error.message);
+        }
+    }
+
+    function editScanner(id) {
+        const scanner = window.scannersMap[id];
+        if (!scanner) return;
+
+        document.getElementById('scanner_id').value = scanner.id;
+        document.getElementById('scanner_line').value = scanner.line_id;
+        document.getElementById('scanner_name').value = scanner.name;
+        document.getElementById('scanner_driver').value = scanner.driver_type;
+        document.getElementById('scanner_address').value = scanner.address;
+        document.getElementById('scanner_port').value = scanner.port || 0;
+        document.getElementById('scanner_role').value = scanner.role;
+        document.getElementById('scanner_settings').value = scanner.settings_json || '{}';
+        document.getElementById('scanner_active').checked = scanner.is_active;
+        updateScannerTargetOptions(scanner.target_device_id);
+        updateScannerRoleFields();
+        document.getElementById('scanner_form_title').innerText = 'Редактировать сканер';
+        document.getElementById('scanner-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function clearScannerForm() {
+        document.getElementById('scanner_id').value = '';
+        document.getElementById('scanner_name').value = '';
+        document.getElementById('scanner_driver').value = 'tcp_camera';
+        document.getElementById('scanner_address').value = '';
+        document.getElementById('scanner_port').value = '23';
+        document.getElementById('scanner_role').value = 'INLINE_VERIFIER';
+        document.getElementById('scanner_settings').value = '{}';
+        document.getElementById('scanner_active').checked = true;
+        document.getElementById('scanner_form_title').innerText = 'Сканер';
+        updateScannerTargetOptions();
+        updateScannerRoleFields();
     }
 
     async function addPrinter() {

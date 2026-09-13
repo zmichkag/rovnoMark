@@ -18,6 +18,8 @@ func (s *Server) InitRoutes() http.Handler {
 	// 3. Управление парком принтеров
 	mux.HandleFunc("/api/printers", s.handlePrinters)
 	mux.HandleFunc("/api/printers/add", s.handlePrintersAdd)
+	mux.HandleFunc("/api/scanners", s.handleScanners)
+	mux.HandleFunc("/api/scanner/reads", s.handleScannerReads)
 	mux.HandleFunc("/api/templates", s.handleTemplates)
 	mux.HandleFunc("/api/template/fields", s.handleTemplateFields)
 	mux.HandleFunc("/api/stats", s.handleStats)
