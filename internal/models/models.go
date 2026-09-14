@@ -19,6 +19,17 @@ type PrinterConfig struct {
 	Settings   json.RawMessage `json:"settings,omitempty"` // Специфика драйвера
 }
 
+type ScannerConfig struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	IP        string `json:"ip"`
+	Port      int    `json:"port"`
+	Type      string `json:"type"` // tcp_camera
+	LineID    int    `json:"line_id"`
+	IsActive  bool   `json:"is_active"`
+	IsDeleted bool   `json:"is_deleted"`
+}
+
 // LineConfig описывает производственную линию
 type LineConfig struct {
 	ID          int    `json:"id"`

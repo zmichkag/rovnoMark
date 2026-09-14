@@ -11,6 +11,7 @@ import (
 type Server struct {
 	store         *storage.Store
 	manager       *core.PrinterManager
+	scannerMgr    *core.ScannerManager // Добавлено поле
 	taskProcessor *core.TaskProcessor
 	validateGS1   bool
 
@@ -22,6 +23,7 @@ type Server struct {
 func NewServer(
 	store *storage.Store,
 	manager *core.PrinterManager,
+	scannerMgr *core.ScannerManager, // Принимаем сканеры
 	taskProcessor *core.TaskProcessor,
 	validateGS1 bool,
 	uiFS, ui2FS, uiOkkFS fs.FS,
@@ -29,6 +31,7 @@ func NewServer(
 	return &Server{
 		store:         store,
 		manager:       manager,
+		scannerMgr:    scannerMgr,
 		taskProcessor: taskProcessor,
 		validateGS1:   validateGS1,
 		uiFS:          uiFS,

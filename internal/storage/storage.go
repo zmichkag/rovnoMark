@@ -1292,11 +1292,3 @@ func (s *Store) saveMarkWeightDirect(taskID, printerID, printerIndex int, mark, 
 	}
 	return nil
 }
-
-// SaveGXNETResponse сохраняет сырой ответ очереди DUSTBIN при включенном аудите
-func (s *Store) SaveGXNETResponse(printerID int, device, receivedAt, cmd, param, queue, payload string, status int) error {
-	query := `INSERT INTO bizerba_responses (printer_id, device, received_at, command, parameter, queue, payload, status) 
-	          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.Exec(query, printerID, device, receivedAt, cmd, param, queue, payload, status)
-	return err
-}

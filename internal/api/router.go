@@ -32,6 +32,10 @@ func (s *Server) InitRoutes() http.Handler {
 	mux.HandleFunc("/api/code/info", s.handleCodeInfo)
 	mux.HandleFunc("/api/dashboard/live", s.handleDashboardLive)
 
+	// 5. Сканеры
+	mux.HandleFunc("/api/scanners", s.handleScanners)
+	mux.HandleFunc("/api/scanners/reads", s.handleScannerReads)
+
 	// 5. Встраиваемый Frontend
 	if s.uiFS != nil {
 		mux.Handle("/", http.FileServer(http.FS(s.uiFS)))

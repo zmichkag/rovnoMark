@@ -52,7 +52,6 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		tp.activeTasks = make(map[int]bool)
 	}
 
-	// Защита от дублирования фоновых горутин для одной и той же задачи
 	if tp.activeTasks[taskID] {
 		tp.activeMu.Unlock()
 		slog.Debug("Pumper: Насос для этой задачи уже работает, дублирование проигнорировано", "task_id", taskID)
@@ -70,17 +69,10 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 	}
 
 	ctx := context.Background()
-
-	// -------------------------------------------------------------------------
-	// 1. Проверка на специализированные реактивные приводы (Bizerba и Valentin)
-	// -------------------------------------------------------------------------
 	hasSpecializedDriver := false
 
 	for _, pCfg := range printers {
 		switch pCfg.DriverType {
-
-		// Bizerba: весовой комплекс с динамическим взвешиванием (Catchweight)
-		// Требует строго поштучной подачи (one-code-one-weight) под физический триггер
 		case "bizerba":
 			hasSpecializedDriver = true
 			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
@@ -95,7 +87,6 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 				slog.Error("Pumper: Ошибка приведения типа к *bizerba.Driver", "printer_id", pCfg.ID)
 			}
 
-		// Carl Valentin: поштучный тактовый цикл взвода на фотодатчик
 		case "valentine_nice":
 			hasSpecializedDriver = true
 			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
@@ -112,15 +103,10 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		}
 	}
 
-	// Если на линии запущен хотя бы один реактивный поштучный насос — выходим
 	if hasSpecializedDriver {
 		return
 	}
 
-	// -------------------------------------------------------------------------
-	// 2. Стандартный пачечный насос для классических маркираторов
-	// (Videojet, Savema, Markem-Imaje, TSC)
-	// -------------------------------------------------------------------------
 	slog.Info("Pumper: Запуск штатного пачечного насоса", "line_id", lineID, "task_id", taskID)
 	go tp.RunDefaultPumper(ctx, lineID, taskID)
 }
@@ -132,9 +118,7 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Первичная заправка одного кода
 	_ = tp.pushSingleValentinCode(taskID, printerID, role, vDriver)
-
 	lastPrintedCount := -1
 
 	for {
@@ -240,7 +224,6 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				var pending []models.TaskCode
 				var assignErr error
 
-				// Выборка с учетом четности роли конкретного принтера
 				if len(printers) == 1 {
 					pending, assignErr = tp.Store.FetchAndAssignCodes(taskID, pCfg.ID, targetLoad)
 				} else {
@@ -313,13 +296,11 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 				return
 			}
 
-			// 1. Узнаем у драйвера Bizerba, сколько свободных слотов в его очереди марок
 			freeSpace, err := bDriver.GetBufferFreeSpace()
 			if err != nil || freeSpace <= 0 {
 				continue
 			}
 
-			// 2. Берем из базы ровно столько кодов, сколько готово принять железо (но не более 5 за раз)
 			targetLoad := freeSpace
 			if targetLoad > 5 {
 				targetLoad = 5
@@ -330,7 +311,6 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 				continue
 			}
 
-			// 3. Формируем пачку для отправки
 			var codes []string
 			startIndex := pending[0].PrinterIndex
 			for _, item := range pending {
@@ -341,7 +321,6 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 				codes = append(codes, cleanCode)
 			}
 
-			// 4. Загружаем в COM-драйвер Bizerba
 			_, err = bDriver.PrintBatchIndexed("DATAMATRIX", startIndex, codes)
 			if err != nil {
 				slog.Error("BIZERBA-PUMPER: Ошибка отправки пакета в драйвер", "err", err)
@@ -349,25 +328,6 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 			}
 		}
 	}
-}
-
-func (tp *TaskProcessor) pushSingleBizerbaCode(taskID, printerID int, bDriver *bizerba.Driver) error {
-	// Выбираем ровно один свободный код из шарда месяца
-	codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 1)
-	if err != nil || len(codes) == 0 {
-		return nil
-	}
-
-	codeObj := codes[0]
-	cleanCode := strings.TrimSpace(codeObj.Code)
-
-	// Передаем единичный код с его сквозным индексом
-	_, err = bDriver.PrintBatchIndexed("DATAMATRIX", codeObj.PrinterIndex, []string{cleanCode})
-	if err != nil {
-		return fmt.Errorf("сбой передачи кода в Bizerba: %w", err)
-	}
-
-	return nil
 }
 
 type PrinterManager struct {
@@ -391,7 +351,6 @@ func (pm *PrinterManager) AddPrinter(config models.PrinterConfig, p Printer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Корректно освобождаем ресурсы старого драйвера при перерегистрации
 	if previous := pm.printers[config.ID]; previous != nil {
 		if closer, ok := previous.(interface{ Close() error }); ok {
 			if err := closer.Close(); err != nil {
@@ -404,7 +363,6 @@ func (pm *PrinterManager) AddPrinter(config models.PrinterConfig, p Printer) {
 	pm.printers[config.ID] = p
 	pm.states[config.ID] = models.PrinterState{Status: "INITIALIZING", Ribbon: "?", Queue: "?"}
 
-	// Инициализируем фоновые процессы драйвера (для Bizerba - подписка на канал E)
 	if config.IsActive {
 		if starter, ok := p.(interface{ Start() }); ok {
 			starter.Start()
@@ -421,7 +379,6 @@ func (pm *PrinterManager) GetPrinter(id int) Printer {
 	return pm.printers[id]
 }
 
-// CloseAll освобождает ресурсы всех активных драйверов (COM-сессии Bizerba, TCP-сокеты)
 func (pm *PrinterManager) CloseAll() error {
 	pm.mu.RLock()
 	printers := make([]Printer, 0, len(pm.printers))
@@ -455,7 +412,6 @@ func (pm *PrinterManager) GetDashboardData() (map[int]models.PrinterState, []mod
 	return statesCopy, logsCopy
 }
 
-// StartTelemetryCollector запускает фоновый процесс сбора статистики
 func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -474,7 +430,6 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 	}()
 }
 
-// BackgroundPoller опрашивает железки и сохраняет логи как в RAM, так и в БД
 func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
 	for {
@@ -514,7 +469,6 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 				curCount, _ = p.GetCurrentPrintCount()
 				curTemplate, _ = p.GetCurrentTemplate()
 
-				// Синхронизация печати для стандартных маркираторов
 				if cfg.DriverType != "valentine_nice" && lineMap != nil {
 					if lineID, ok := lineMap[id]; ok {
 						activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
@@ -593,7 +547,6 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	}
 }
 
-// addLogNoLock универсальный метод для записи логов в RAM и в БД SQLite
 func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lineID *int, eventType string, event string) {
 	printerName := "Система"
 	if printerID != nil {
@@ -621,14 +574,12 @@ func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lin
 	}
 }
 
-// GetPrinterState возвращает копию текущего состояния принтера
 func (pm *PrinterManager) GetPrinterState(id int) models.PrinterState {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.states[id]
 }
 
-// UpdatePrinterDeltaState сохраняет последние успешно отправленные параметры
 func (pm *PrinterManager) UpdatePrinterDeltaState(id int, template, staticHash string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()

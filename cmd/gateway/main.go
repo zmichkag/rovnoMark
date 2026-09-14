@@ -60,7 +60,7 @@ func main() {
 		return
 	}
 
-	// 2. Обычный консольный интерактивный запуск (Linux / Windows CLI)
+	// 2. Консольный запуск (Linux / Docker / Windows CLI)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -90,18 +90,18 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 
 	manager := core.NewPrinterManager()
 	defer func() {
-		slog.Info("Освобождение ресурсов и сессий драйверов оборудования...")
+		slog.Info("Освобождение сетевых ресурсов и COM-портов оборудования...")
 		if err := manager.CloseAll(); err != nil {
-			slog.Error("Ошибка закрытия драйверов", "err", err)
+			slog.Error("Ошибка закрытия драйверов оборудования", "err", err)
 		}
 	}()
 
 	taskProcessor := &core.TaskProcessor{Store: store, Manager: manager}
 
-	// 3. Инициализация и регистрация оборудования в менеджере
+	// 1. Инициализация принтеров и весов
 	savedPrinters, errPrinters := store.GetAllPrinters()
 	if errPrinters != nil {
-		slog.Error("Ошибка вычитки парка принтеров из базы", "err", errPrinters)
+		slog.Error("Ошибка вычитки оборудования из БД", "err", errPrinters)
 	}
 
 	for _, cfg := range savedPrinters {
@@ -119,34 +119,38 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		case "bizerba":
 			manager.AddPrinter(cfg, bizerba.CreateDriver(cfg, store))
 		default:
-			slog.Warn("Неизвестный тип драйвера при инициализации", "driver_type", cfg.DriverType, "printer_id", cfg.ID)
+			slog.Warn("Неизвестный тип драйвера оборудования", "type", cfg.DriverType, "id", cfg.ID)
 		}
 	}
 
-	// Запуск фонового поллера оборудования (интервал 2 сек) и сборщика телеметрии
+	// 2. Инициализация подсистемы технического зрения (сканеров)
+	scannerMgr := core.NewScannerManager(store)
+	go scannerMgr.StartPoller(ctx)
+
+	// 3. Запуск фоновых процессов опроса и сбора телеметрии
 	go manager.BackgroundPoller(store)
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
-	// 4. Восстановление активных задач после рестарта службы (Pumper Recovery)
+	// 4. Восстановление активных заданий конвейера (Pumper Recovery)
 	activeTasks, err := store.GetActiveTasks(0, 0)
 	if err == nil && len(activeTasks) > 0 {
-		slog.Info("Обнаружены незавершенные задачи в БД. Восстанавливаем фоновые насосы...", "count", len(activeTasks))
+		slog.Info("Обнаружены активные задачи в БД. Восстановление фоновых насосов...", "count", len(activeTasks))
 		for _, taskMap := range activeTasks {
 			taskID, _ := strconv.Atoi(fmt.Sprintf("%v", taskMap["task_id"]))
 			lineID, _ := strconv.Atoi(fmt.Sprintf("%v", taskMap["line_id"]))
 			if taskID > 0 && lineID > 0 {
 				taskProcessor.StartPumping(lineID, taskID)
-				slog.Info("Фоновый насос успешно перезапущен", "task_id", taskID, "line_id", lineID)
 			}
 		}
 	}
 
-	// 5. Монтирование Embedded UI файлов
+	// 5. Подготовка встроенных веб-интерфейсов
 	contentUI, _ := fs.Sub(ui.FS, ".")
 	contentUI2, _ := fs.Sub(ui2.FS, ".")
 	contentOKK, _ := fs.Sub(ui_okk.FS, ".")
 
-	apiServer := api.NewServer(store, manager, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
+	// 6. Инициализация HTTP API (передаем и принтеры, и сканеры)
+	apiServer := api.NewServer(store, manager, scannerMgr, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
 	router := apiServer.InitRoutes()
 
 	httpServer := &http.Server{
@@ -162,7 +166,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		}
 	}()
 
-	// 6. Graceful Shutdown
+	// 7. Корректная остановка (Graceful Shutdown)
 	select {
 	case <-ctx.Done():
 		slog.Info("Сигнал остановки получен. Завершение работы HTTP сервера...")
@@ -173,7 +177,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 			slog.Error("Принудительная остановка HTTP сервера", "err", err)
 			return err
 		}
-		slog.Info("HTTP сервер успешно остановлен")
+		slog.Info("HTTP сервер штатно остановлен")
 		return nil
 
 	case err := <-serverErrors:
