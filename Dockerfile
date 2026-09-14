@@ -37,8 +37,8 @@ COPY --from=builder /bin/marking-service /bin/marking-service
 # Создаем папку под базы данных внутри /app
 RUN mkdir -p /app/data
 
-EXPOSE 8080
+EXPOSE 8001
 VOLUME ["/app/data"]
 
 # Запуск с явным указанием каталога баз через флаг
-CMD ["/bin/marking-service", "--port", "8080", "--data-dir", "/app/data"]
+CMD ["-data-dir", "/app/data", "-port", "8001", "--debug", "true"]
