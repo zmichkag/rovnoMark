@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"rovnoMark/internal/core"
 	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
@@ -23,20 +24,47 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	states, logs := s.manager.GetDashboardData()
-	configs, _ := s.store.GetAllPrinters()
-	lines, _ := s.store.GetAllLines()
-	lineMap, _ := s.store.GetPrinterLineMap()
+	configs, err := s.store.GetAllPrinters()
+	if err != nil {
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка получения принтеров: "+err.Error())
+		return
+	}
+	lines, err := s.store.GetAllLines()
+	if err != nil {
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка получения линий: "+err.Error())
+		return
+	}
+	lineMap, err := s.store.GetPrinterLineMap()
+	if err != nil {
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка получения привязок: "+err.Error())
+		return
+	}
+	scanners, err := s.store.GetAllScanners()
+	if err != nil {
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка получения сканеров: "+err.Error())
+		return
+	}
 
 	type PrinterInfo struct {
 		models.PrinterConfig
 		models.PrinterState
 	}
+	type ScannerInfo struct {
+		models.ScannerConfig
+		core.ScannerStatus
+	}
 	type LineGroup struct {
 		models.LineConfig
 		Printers []PrinterInfo `json:"printers"`
+		Scanners []ScannerInfo `json:"scanners"`
 	}
 
 	grouped := make(map[int][]PrinterInfo)
+	scannersByLine := make(map[int][]ScannerInfo)
+	scannerStates := make(map[int]core.ScannerStatus)
+	if s.scannerMgr != nil {
+		scannerStates = s.scannerMgr.GetDashboardData()
+	}
 	var allForUI []PrinterInfo
 	for _, cfg := range configs {
 		info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
@@ -45,12 +73,19 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 			grouped[lineID] = append(grouped[lineID], info)
 		}
 	}
+	for _, scanner := range scanners {
+		scannersByLine[scanner.LineID] = append(scannersByLine[scanner.LineID], ScannerInfo{
+			ScannerConfig: scanner,
+			ScannerStatus: scannerStates[scanner.ID],
+		})
+	}
 
 	var responseLines []LineGroup
 	for _, l := range lines {
 		responseLines = append(responseLines, LineGroup{
 			LineConfig: l,
 			Printers:   grouped[l.ID],
+			Scanners:   scannersByLine[l.ID],
 		})
 	}
 

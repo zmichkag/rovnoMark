@@ -7,19 +7,24 @@ import (
 	"time"
 )
 
-func TestHandleFrameIgnoresNoReadAndEmitsSuccessfulRead(t *testing.T) {
+func TestHandleFrameEmitsNoreadAndSuccessfulRead(t *testing.T) {
 	driver := &TCPDriver{
-		events: make(chan core.ScanEvent, 2),
+		events: make(chan core.ScanEvent, 5),
 		ctx:    context.Background(),
 	}
 
-	driver.handleFrame([]byte("NoRead\r\n"))
-	driver.handleFrame([]byte("Region1,NoRead\r\n"))
-	driver.handleFrame([]byte("Region247,noread\r\n"))
-	select {
-	case event := <-driver.events:
-		t.Fatalf("NoRead frame emitted event: %#v", event)
-	default:
+	driver.handleFrame([]byte("Noread\r\n"))
+	driver.handleFrame([]byte("Region1,Noread\r\n"))
+	driver.handleFrame([]byte("Region247,Noread\r\n"))
+	for i := 0; i < 3; i++ {
+		select {
+		case event := <-driver.events:
+			if !event.IsNoRead || event.Code != "Noread" {
+				t.Fatalf("Noread event = %#v", event)
+			}
+		default:
+			t.Fatalf("Noread frame %d did not emit event", i+1)
+		}
 	}
 
 	driver.handleFrame([]byte("010460123456789021ABC\r\n"))
@@ -54,10 +59,10 @@ func TestRegionTextWithoutNumericIDIsNotDiscarded(t *testing.T) {
 		ctx:    context.Background(),
 	}
 
-	driver.handleFrame([]byte("RegionX,NoRead\r\n"))
+	driver.handleFrame([]byte("RegionX,Noread\r\n"))
 	select {
 	case event := <-driver.events:
-		if event.Code != "RegionX,NoRead" {
+		if event.Code != "RegionX,Noread" {
 			t.Fatalf("event code = %q", event.Code)
 		}
 	default:

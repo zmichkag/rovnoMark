@@ -21,6 +21,7 @@ import (
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
 	"rovnoMark/internal/drivers/savema"
+	scannerdrivers "rovnoMark/internal/drivers/scanners"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/drivers/videojet"
 	"rovnoMark/internal/storage"
@@ -125,6 +126,27 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 
 	// 2. Инициализация подсистемы технического зрения (сканеров)
 	scannerMgr := core.NewScannerManager(store)
+	defer func() {
+		if err := scannerMgr.Close(); err != nil {
+			slog.Error("Ошибка закрытия драйверов сканеров", "err", err)
+		}
+	}()
+	savedScanners, err := store.GetAllScanners()
+	if err != nil {
+		slog.Error("Не удалось загрузить конфигурации сканеров", "err", err)
+	} else {
+		for _, cfg := range savedScanners {
+			if !cfg.IsActive {
+				continue
+			}
+			switch cfg.DriverType {
+			case "tcp_camera":
+				scannerMgr.AddScanner(cfg, scannerdrivers.NewTCPCamera(cfg))
+			default:
+				slog.Warn("Неизвестный тип драйвера сканера", "type", cfg.DriverType, "id", cfg.ID)
+			}
+		}
+	}
 	go scannerMgr.StartPoller(ctx)
 
 	// 3. Запуск фоновых процессов опроса и сбора телеметрии

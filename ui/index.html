@@ -66,6 +66,22 @@
         .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; background: #333; color: var(--warning); }
         .card.online .status-badge { color: var(--success); }
         .card.offline .status-badge { color: var(--danger); }
+        .equipment-label { margin: 0 0 10px; color: var(--text-muted); font-size: 0.72rem; font-weight: bold; letter-spacing: 0.08em; text-transform: uppercase; }
+        .scanner-card { background: #251f35; border-left-color: #8b5cf6; }
+        .scanner-card.online { border-left-color: #8b5cf6; }
+        .scanner-card.offline { border-left-color: #6d4bb5; opacity: 0.88; }
+        .scanner-card .status-badge { background: rgba(139, 92, 246, 0.16); color: #a78bfa; }
+        .scanner-card.online .status-badge { color: #a78bfa; }
+        .scanner-card.offline .status-badge { color: #a78bfa; }
+        .scanner-code { overflow-wrap: anywhere; color: #fff; font-weight: bold; }
+        .scanner-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+        .scanner-stat { background: rgba(0, 0, 0, 0.22); border: 1px solid #403752; border-radius: 5px; padding: 8px; text-align: center; }
+        .scanner-stat-value { display: block; font-size: 1.15rem; font-weight: bold; }
+        .scanner-stat-label { display: block; margin-top: 2px; color: var(--text-muted); font-size: 0.68rem; font-weight: bold; letter-spacing: 0.05em; }
+        .scanner-stat.good .scanner-stat-value { color: var(--success); }
+        .scanner-stat.bad .scanner-stat-value { color: var(--danger); }
+        dialog { background: #181818; color: var(--text); border: 1px solid #444; border-radius: 8px; padding: 20px; width: min(760px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; }
+        dialog::backdrop { background: rgba(0, 0, 0, 0.75); }
 
         .btn { background: #333; color: white; border: 1px solid #444; padding: 8px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         .btn:hover { background: #444; }
@@ -204,6 +220,28 @@
                 <button class="btn" id="assign_clear_btn" style="width: 100%; margin-top: 5px; display: none;" onclick="clearAssignForm()">ОТМЕНИТЬ РЕДАКТИРОВАНИЕ</button>
             </div>
         </div>
+        <div style="flex: 1; min-width: 320px; background: var(--surface); padding: 20px; border-radius: 8px;">
+            <h3 id="scanner_form_title">Добавить сканер</h3>
+            <input type="hidden" id="s_id" value="">
+            <div class="field"><label>Линия:</label><select id="s_line"></select></div>
+            <div class="field"><label>Имя:</label><input type="text" id="s_name" placeholder="Камера контроля"></div>
+            <div class="field"><label>Адрес:</label><input type="text" id="s_address" placeholder="192.168.1.20"></div>
+            <div class="field"><label>Порт:</label><input type="number" id="s_port" value="23" min="1" max="65535"></div>
+            <div class="field"><label>Драйвер:</label><select id="s_driver"><option value="tcp_camera">TCP-камера</option></select></div>
+            <div class="field">
+                <label>Роль:</label>
+                <select id="s_role" onchange="toggleScannerTarget()">
+                    <option value="INLINE_VERIFIER">Проверка после печати</option>
+                    <option value="AUDIT_CHECK">Контрольная проверка</option>
+                    <option value="AGGREGATOR">Агрегация</option>
+                </select>
+            </div>
+            <div class="field" id="s_target_field"><label>Целевой принтер:</label><select id="s_target_device"></select></div>
+            <div class="field"><label>Настройки JSON:</label><textarea id="s_settings" rows="3">{}</textarea></div>
+            <div class="field"><label><input type="checkbox" id="s_active" checked style="width:auto;"> Активен</label></div>
+            <button class="btn" id="s_submit_btn" style="background: var(--success); width: 100%;" onclick="saveScanner()">СОХРАНИТЬ</button>
+            <button class="btn" id="s_clear_btn" style="width: 100%; margin-top: 5px;" onclick="clearScannerForm()">ОЧИСТИТЬ</button>
+        </div>
     </div>
     <h4 style="margin-top:30px;">Привязки</h4>
     <table><thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th><th>Действие</th></tr></thead><tbody id="assignments-table"></tbody></table>
@@ -211,6 +249,8 @@
     <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th><th>Действие</th></tr></thead><tbody id="lines-list-table"></tbody></table>
     <h4>Принтеры</h4>
     <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Вес</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
+    <h4>Сканеры</h4>
+    <table><thead><tr><th>ID</th><th>Линия</th><th>Имя</th><th>Адрес</th><th>Роль</th><th>Состояние</th><th>Действие</th></tr></thead><tbody id="scanners-list-table"></tbody></table>
 </div>
 
 <div id="templatesTab" class="tab-content">
@@ -251,9 +291,18 @@
     </div>
 </div>
 
+<dialog id="scanner_history_dialog">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:15px;">
+        <h3 id="scanner_history_title" style="margin:0;">История чтений</h3>
+        <button class="btn" onclick="closeScannerHistory()">ЗАКРЫТЬ</button>
+    </div>
+    <div id="scanner_history_content" style="margin-top:15px;"></div>
+</dialog>
+
 <script>
     window.printersMap = {};
     window.linesMap = {};
+    window.scannersMap = {};
     window.assignmentsList = [];
 
     function switchTab(tabId) {
@@ -558,26 +607,132 @@
         </div>`;
     }
 
+    function formatScannerTime(value) {
+        if (!value || value.startsWith('0001-')) return '-';
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('ru-RU');
+    }
+
+    function scannerRoleLabel(role) {
+        return {
+            INLINE_VERIFIER: 'Проверка печати',
+            AUDIT_CHECK: 'Контрольная проверка',
+            AGGREGATOR: 'Агрегация'
+        }[role] || role || '-';
+    }
+
+    function createScannerCard(scanner, printersById) {
+        const online = !!scanner.online;
+        const target = scanner.target_device_id ? printersById[scanner.target_device_id] : null;
+        const targetName = target ? target.name : (scanner.target_device_id || '-');
+        return `
+        <div class="card scanner-card ${online ? 'online' : 'offline'}">
+            <div class="card-header">
+                <h3 class="card-title">${scanner.name}</h3>
+                <span class="status-badge">${online ? 'ONLINE' : 'OFFLINE'}</span>
+            </div>
+            <div style="font-size: 0.85rem;">
+                <div>Подключение: <b>${scanner.address}:${scanner.port || '-'}</b></div>
+                <div>Драйвер: <b>${scanner.driver_type || '-'}</b></div>
+                <div>Роль: <b>${scannerRoleLabel(scanner.role)}</b></div>
+                <div>Цель: <b>${targetName}</b></div>
+                <div>Всего попыток: <b>${scanner.total_scans || 0}</b></div>
+                <div class="scanner-stats">
+                    <div class="scanner-stat good">
+                        <span class="scanner-stat-value">${scanner.good_scans || 0}</span>
+                        <span class="scanner-stat-label">УСПЕШНО</span>
+                    </div>
+                    <div class="scanner-stat bad">
+                        <span class="scanner-stat-value">${scanner.no_reads || 0}</span>
+                        <span class="scanner-stat-label">NOREAD</span>
+                    </div>
+                </div>
+                <div>Последнее чтение: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
+                <div>Последний код:</div>
+                <div class="scanner-code">${scanner.last_code || '-'}</div>
+            </div>
+            <button class="btn" style="margin-top: 5px; background: #333; border-color: #555;" onclick="showScannerReads(${scanner.id}, '${String(scanner.name).replace(/'/g, "\\'")}')">
+                ИСТОРИЯ ЧТЕНИЙ
+            </button>
+        </div>`;
+    }
+
+    let scannerHistoryTimer = null;
+
+    function showScannerReads(scannerId, scannerName) {
+        const dialog = document.getElementById('scanner_history_dialog');
+        const content = document.getElementById('scanner_history_content');
+        document.getElementById('scanner_history_title').innerText = `История чтений: ${scannerName}`;
+        content.innerHTML = '<div style="color:var(--text-muted);">Загрузка...</div>';
+        if (!dialog.open) dialog.showModal();
+        clearInterval(scannerHistoryTimer);
+        loadScannerReads(scannerId);
+        scannerHistoryTimer = setInterval(() => {
+            if (!dialog.open) {
+                clearInterval(scannerHistoryTimer);
+                scannerHistoryTimer = null;
+                return;
+            }
+            loadScannerReads(scannerId);
+        }, 2000);
+    }
+
+    function closeScannerHistory() {
+        clearInterval(scannerHistoryTimer);
+        scannerHistoryTimer = null;
+        document.getElementById('scanner_history_dialog').close();
+    }
+
+    async function loadScannerReads(scannerId) {
+        const content = document.getElementById('scanner_history_content');
+        try {
+            const res = await fetch(`/api/scanners/reads?scanner_id=${scannerId}&limit=100`);
+            if (!res.ok) throw new Error(await res.text());
+            const reads = await res.json() || [];
+            if (!reads.length) {
+                content.innerHTML = '<div style="color:var(--text-muted);">Чтений пока нет</div>';
+                return;
+            }
+            content.innerHTML = `<table style="margin-bottom:0;">
+                <thead><tr><th>Время</th><th>Код</th><th>Результат</th></tr></thead>
+                <tbody>${reads.map(read => `<tr>
+                    <td>${formatScannerTime(read.read_at)}</td>
+                    <td class="scanner-code">${read.code || '-'}</td>
+                    <td>${read.match_status || '-'}</td>
+                </tr>`).join('')}</tbody>
+            </table>`;
+        } catch (e) {
+            content.innerHTML = `<div style="color:var(--danger);">Ошибка загрузки: ${e.message}</div>`;
+        }
+    }
+
     function renderPrintersGrid(data) {
         const grid = document.getElementById('printers-grid');
         grid.innerHTML = '';
         const assignedIds = new Set();
+        const printersById = {};
+        (data.all_printers || []).forEach(p => printersById[p.id] = p);
 
         (data.lines || []).forEach(l => {
-            if (!l.printers || l.printers.length === 0) return;
+            const linePrinters = l.printers || [];
+            const lineScanners = l.scanners || [];
+            if (linePrinters.length === 0 && lineScanners.length === 0) return;
 
             let printersHtml = '';
-            l.printers.forEach(p => {
+            linePrinters.forEach(p => {
                 assignedIds.add(p.id);
                 printersHtml += createPrinterCard(p);
+            });
+            let scannersHtml = '';
+            lineScanners.forEach(scanner => {
+                scannersHtml += createScannerCard(scanner, printersById);
             });
 
             grid.innerHTML += `
                 <div class="line-column">
                     <h2 class="line-column-title">Линия: ${l.name}</h2>
-                    <div class="line-printers-list">
-                        ${printersHtml}
-                    </div>
+                    ${linePrinters.length ? `<div><div class="equipment-label">Принтеры</div><div class="line-printers-list">${printersHtml}</div></div>` : ''}
+                    ${lineScanners.length ? `<div><div class="equipment-label">Сканеры и камеры</div><div class="line-printers-list">${scannersHtml}</div></div>` : ''}
                 </div>`;
         });
 
@@ -761,6 +916,7 @@
             lines.forEach(l => window.linesMap[l.id] = l);
 
             document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+            document.getElementById('s_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
             document.getElementById('lines-list-table').innerHTML = lines.map(l => `
                 <tr>
                     <td>${l.id}</td>
@@ -778,6 +934,7 @@
             printers.forEach(p => window.printersMap[p.id] = p);
 
             document.getElementById('assign_printer').innerHTML = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+            document.getElementById('s_target_device').innerHTML = '<option value="">Не выбран</option>' + printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
             document.getElementById('printers-list-table').innerHTML = printers.map(p => {
                 // Поддержка как старого поля capture_weight, так и нового settings.capture_weight
                 let hasWeight = "Нет";
@@ -791,6 +948,24 @@
                     <td>${p.driver_type}</td>
                     <td>${hasWeight}</td>
                     <td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td>
+                </tr>`;
+            }).join('');
+
+            const sRes = await fetch('/api/scanners');
+            if (!sRes.ok) throw new Error(`Сбой на бэкенде (/api/scanners), код ${sRes.status}`);
+            const scanners = await sRes.json() || [];
+            window.scannersMap = {};
+            scanners.forEach(s => window.scannersMap[s.id] = s);
+            document.getElementById('scanners-list-table').innerHTML = scanners.map(s => {
+                const line = window.linesMap[s.line_id];
+                return `<tr>
+                    <td>${s.id}</td>
+                    <td>${line ? line.name : s.line_id}</td>
+                    <td>${s.name}</td>
+                    <td>${s.address}:${s.port || '-'}</td>
+                    <td>${s.role}</td>
+                    <td>${s.is_active ? 'Активен' : 'Выключен'}</td>
+                    <td><button class="btn" onclick="editScanner(${s.id})">Редактировать</button></td>
                 </tr>`;
             }).join('');
 
@@ -810,6 +985,89 @@
             console.error("Критический сбой:", e);
             alert("⚠️ ОШИБКА СЕРВЕРА ⚠️\n\n" + e.message);
         }
+    }
+
+    function toggleScannerTarget() {
+        const isInlineVerifier = document.getElementById('s_role').value === 'INLINE_VERIFIER';
+        document.getElementById('s_target_field').style.display = isInlineVerifier ? 'block' : 'none';
+        document.getElementById('s_target_device').disabled = !isInlineVerifier;
+    }
+
+    async function saveScanner() {
+        const settingsJSON = document.getElementById('s_settings').value.trim() || '{}';
+        try {
+            JSON.parse(settingsJSON);
+        } catch (e) {
+            alert('Настройки сканера должны содержать корректный JSON.');
+            return;
+        }
+
+        const role = document.getElementById('s_role').value;
+        const targetValue = document.getElementById('s_target_device').value;
+        const body = {
+            id: parseInt(document.getElementById('s_id').value) || 0,
+            line_id: parseInt(document.getElementById('s_line').value),
+            name: document.getElementById('s_name').value.trim(),
+            driver_type: document.getElementById('s_driver').value,
+            address: document.getElementById('s_address').value.trim(),
+            port: parseInt(document.getElementById('s_port').value) || 0,
+            role: role,
+            target_device_id: role === 'INLINE_VERIFIER' && targetValue ? parseInt(targetValue) : null,
+            settings_json: settingsJSON,
+            is_active: document.getElementById('s_active').checked
+        };
+
+        try {
+            const res = await fetch('/api/scanners', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!res.ok) {
+                alert('СЕРВЕР ОТКЛОНИЛ СОХРАНЕНИЕ:\n' + await res.text());
+                return;
+            }
+            alert(body.id ? 'Сканер успешно обновлён!' : 'Сканер успешно добавлен!');
+            clearScannerForm();
+            loadSettingsData();
+        } catch (e) {
+            alert('Сбой сети: ' + e.message);
+        }
+    }
+
+    function editScanner(id) {
+        const scanner = window.scannersMap[id];
+        if (!scanner) return;
+
+        document.getElementById('s_id').value = scanner.id;
+        document.getElementById('s_line').value = scanner.line_id;
+        document.getElementById('s_name').value = scanner.name || '';
+        document.getElementById('s_address').value = scanner.address || '';
+        document.getElementById('s_port').value = scanner.port || 23;
+        document.getElementById('s_driver').value = scanner.driver_type || 'tcp_camera';
+        document.getElementById('s_role').value = scanner.role || 'INLINE_VERIFIER';
+        document.getElementById('s_target_device').value = scanner.target_device_id || '';
+        document.getElementById('s_settings').value = scanner.settings_json || '{}';
+        document.getElementById('s_active').checked = !!scanner.is_active;
+        document.getElementById('scanner_form_title').innerText = 'Редактировать сканер';
+        document.getElementById('s_submit_btn').innerText = 'СОХРАНИТЬ ИЗМЕНЕНИЯ';
+        toggleScannerTarget();
+        document.getElementById('scanner_form_title').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function clearScannerForm() {
+        document.getElementById('s_id').value = '';
+        document.getElementById('s_name').value = '';
+        document.getElementById('s_address').value = '';
+        document.getElementById('s_port').value = '23';
+        document.getElementById('s_driver').value = 'tcp_camera';
+        document.getElementById('s_role').value = 'INLINE_VERIFIER';
+        document.getElementById('s_target_device').value = '';
+        document.getElementById('s_settings').value = '{}';
+        document.getElementById('s_active').checked = true;
+        document.getElementById('scanner_form_title').innerText = 'Добавить сканер';
+        document.getElementById('s_submit_btn').innerText = 'СОХРАНИТЬ';
+        toggleScannerTarget();
     }
 
     async function addPrinter() {

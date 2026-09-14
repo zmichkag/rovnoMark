@@ -40,8 +40,8 @@ type ReconcileResult struct {
 }
 
 const (
-	// v2: поддержка динамического веса Catchweight и настроек драйверов
-	TargetMasterSchemaVersion = 2
+	// v5: конфигурация сканеров и восстановление схем БД с некорректным user_version
+	TargetMasterSchemaVersion = 5
 	// v2: добавляем колонку weight в codes_YYYY_MM.db
 	TargetCodesSchemaVersion = 2
 )
@@ -198,6 +198,11 @@ func MigrateMaster(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version;").Scan(&currentVersion); err != nil {
 		return fmt.Errorf("ошибка чтения PRAGMA user_version Master БД: %w", err)
 	}
+	if currentVersion >= 2 {
+		if err := ensurePrinterSettingsColumn(db); err != nil {
+			return err
+		}
+	}
 
 	if currentVersion >= TargetMasterSchemaVersion {
 		slog.Debug("Схема Master БД актуальна", "user_version", currentVersion)
@@ -310,7 +315,52 @@ func MigrateMaster(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_bizerba_responses_printer ON bizerba_responses(printer_id, received_at);
 		`,
+		3: `
+		CREATE TABLE IF NOT EXISTS line_scanners (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			line_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			driver_type TEXT NOT NULL,
+			address TEXT NOT NULL,
+			port INTEGER,
+			role TEXT NOT NULL,
+			target_device_id INTEGER,
+			settings_json TEXT DEFAULT '{}',
+			is_active BOOLEAN DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (line_id) REFERENCES lines(id),
+			FOREIGN KEY (target_device_id) REFERENCES printers(id)
+		);
+
+		CREATE TABLE IF NOT EXISTS scanner_reads (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scanner_id INTEGER NOT NULL,
+			line_id INTEGER NOT NULL,
+			task_id INTEGER,
+			task_code_id INTEGER,
+			code TEXT NOT NULL,
+			raw_data BLOB,
+			match_status TEXT DEFAULT 'unmatched',
+			read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (scanner_id) REFERENCES line_scanners(id),
+			FOREIGN KEY (line_id) REFERENCES lines(id),
+			FOREIGN KEY (task_id) REFERENCES tasks(id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_line_scanners_line
+			ON line_scanners(line_id, is_active);
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_scanner
+			ON scanner_reads(scanner_id, id DESC);
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_task_code
+			ON scanner_reads(task_id, code);
+		`,
 	}
+	// В ранее выпущенных сборках встречался user_version=4 без соответствующего
+	// набора DDL. Оставляем v4 совместимой, а v5 повторно применяет идемпотентную
+	// схему сканеров, чтобы восстановить такие базы.
+	migrations[4] = `SELECT 1;`
+	migrations[5] = migrations[3]
 
 	for v := currentVersion + 1; v <= TargetMasterSchemaVersion; v++ {
 		sqlStep, ok := migrations[v]
@@ -338,7 +388,42 @@ func MigrateMaster(db *sql.DB) error {
 		}
 		slog.Info("Успешно применена миграция Master БД", "version", v)
 	}
+	if err := ensurePrinterSettingsColumn(db); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func ensurePrinterSettingsColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(printers)`)
+	if err != nil {
+		return fmt.Errorf("ошибка проверки схемы printers: %w", err)
+	}
+	foundTable := false
+	foundColumn := false
+	for rows.Next() {
+		foundTable = true
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("ошибка чтения схемы printers: %w", err)
+		}
+		if name == "settings_json" {
+			foundColumn = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("ошибка закрытия результата проверки printers: %w", err)
+	}
+	if !foundTable || foundColumn {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE printers ADD COLUMN settings_json TEXT DEFAULT '{}'`); err != nil {
+		return fmt.Errorf("ошибка восстановления колонки printers.settings_json: %w", err)
+	}
 	return nil
 }
 
@@ -797,14 +882,18 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	}
 	defer rows.Close()
 
-	var list []models.PrinterConfig
+	list := make([]models.PrinterConfig, 0)
 	for rows.Next() {
 		var p models.PrinterConfig
 		var settingsRaw string
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive, &settingsRaw); err == nil {
-			p.Settings = []byte(settingsRaw)
-			list = append(list, p)
+		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive, &settingsRaw); err != nil {
+			return nil, fmt.Errorf("ошибка чтения конфигурации принтера: %w", err)
 		}
+		p.Settings = []byte(settingsRaw)
+		list = append(list, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка обхода конфигураций принтеров: %w", err)
 	}
 	return list, nil
 }

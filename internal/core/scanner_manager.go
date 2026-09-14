@@ -71,11 +71,28 @@ func (manager *ScannerManager) AddScanner(config models.ScannerConfig, scanner S
 	go manager.consume(config, scanner)
 }
 
+// RemoveScanner останавливает драйвер и удаляет сканер из активного пула.
+func (manager *ScannerManager) RemoveScanner(scannerID int) error {
+	manager.mu.Lock()
+	scanner := manager.scanners[scannerID]
+	delete(manager.scanners, scannerID)
+	delete(manager.configs, scannerID)
+	manager.mu.Unlock()
+
+	if scanner == nil {
+		return nil
+	}
+	return scanner.Close()
+}
+
 // consume вычитывает события из канала сканера и фиксирует их в БД
 func (manager *ScannerManager) consume(config models.ScannerConfig, scanner Scanner) {
 	defer manager.wg.Done()
 	for event := range scanner.Events() {
 		if event.IsNoRead {
+			if _, err := manager.store.RecordScannerNoRead(config, event.Code, event.RawData, event.Timestamp); err != nil {
+				slog.Error("Ошибка фиксации Noread", "scanner", config.Name, "err", err)
+			}
 			continue
 		}
 		read, err := manager.store.RecordScannerRead(config, event.Code, event.RawData, event.Timestamp)

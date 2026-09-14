@@ -151,7 +151,57 @@ func nullablePort(port int) interface{} {
 	return port
 }
 
-// RecordScannerRead сохраняет успешное чтение и подтверждает соответствующий код активной задачи.
+// RecordScannerNoRead сохраняет полученный от камеры маркер Noread без сопоставления с кодами задания.
+func (s *Store) RecordScannerNoRead(scanner models.ScannerConfig, code string, rawData []byte, readAt time.Time) (*models.ScannerRead, error) {
+	code = strings.TrimSpace(code)
+	if code != "Noread" {
+		return nil, fmt.Errorf("неподдерживаемый маркер отсутствия чтения %q", code)
+	}
+	if readAt.IsZero() {
+		readAt = time.Now()
+	}
+	readAt = readAt.UTC()
+	if rawData == nil {
+		rawData = []byte{}
+	}
+
+	taskID, err := s.GetActiveTaskByLine(scanner.LineID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка поиска активной задачи линии ID=%d для Noread: %w", scanner.LineID, err)
+	}
+	var nullableTaskID interface{}
+	if taskID > 0 {
+		nullableTaskID = taskID
+	}
+
+	result, err := s.db.Exec(`
+		INSERT INTO scanner_reads (
+			scanner_id, line_id, task_id, code, raw_data, match_status, read_at
+		) VALUES (?, ?, ?, ?, ?, 'no_read', ?)`,
+		scanner.ID, scanner.LineID, nullableTaskID, code, rawData, readAt)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка сохранения Noread сканера ID=%d: %w", scanner.ID, err)
+	}
+	readID, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения ID события Noread: %w", err)
+	}
+
+	read := &models.ScannerRead{
+		ID:          int(readID),
+		ScannerID:   scanner.ID,
+		LineID:      scanner.LineID,
+		Code:        code,
+		MatchStatus: "no_read",
+		ReadAt:      readAt,
+	}
+	if taskID > 0 {
+		read.TaskID = &taskID
+	}
+	return read, nil
+}
+
+// RecordScannerRead сохраняет успешное чтение в отдельном журнале сканера.
 func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, rawData []byte, readAt time.Time) (*models.ScannerRead, error) {
 	code = strings.TrimSpace(strings.ReplaceAll(code, "\x1d", "<GS>"))
 	if code == "" {
@@ -187,96 +237,21 @@ func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, raw
 		return nil, fmt.Errorf("ошибка получения ID чтения сканера: %w", err)
 	}
 
-	matchStatus := "no_active_task"
-	var taskCodeID *int
-	if taskID > 0 {
-		matchedID, previousStatus, matchErr := s.verifyScannedTaskCode(taskID, scanner, code, readAt)
-		if matchErr != nil {
-			matchStatus = "match_error"
-			_, _ = s.db.Exec(`UPDATE scanner_reads SET match_status = ? WHERE id = ?`, matchStatus, readID)
-			return nil, matchErr
-		}
-		if matchedID == 0 {
-			matchStatus = "unknown_code"
-		} else {
-			taskCodeID = &matchedID
-			switch previousStatus {
-			case "in_buffer", "printed":
-				matchStatus = "verified"
-			case "verified":
-				matchStatus = "duplicate"
-			default:
-				matchStatus = "not_printed"
-			}
-		}
-	}
-
-	_, err = s.db.Exec(`
-		UPDATE scanner_reads SET task_code_id = ?, match_status = ? WHERE id = ?`,
-		taskCodeID, matchStatus, readID)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка фиксации результата сопоставления чтения ID=%d: %w", readID, err)
-	}
-
 	read := &models.ScannerRead{
 		ID:          int(readID),
 		ScannerID:   scanner.ID,
 		LineID:      scanner.LineID,
 		Code:        code,
-		MatchStatus: matchStatus,
+		MatchStatus: "unmatched",
 		ReadAt:      readAt,
 	}
 	if taskID > 0 {
 		read.TaskID = &taskID
 	}
-	read.TaskCodeID = taskCodeID
 	return read, nil
 }
 
-func (s *Store) verifyScannedTaskCode(taskID int, scanner models.ScannerConfig, code string, verifiedAt time.Time) (int, string, error) {
-	db := s.getCodesDB()
-	query := `SELECT id, status FROM task_codes WHERE task_id = ? AND code = ?`
-	args := []interface{}{taskID, code}
-	if scanner.TargetDeviceID != nil {
-		query += ` AND printer_id = ?`
-		args = append(args, *scanner.TargetDeviceID)
-	}
-	query += ` ORDER BY id DESC LIMIT 1`
-
-	var codeID int
-	var status string
-	if err := db.QueryRow(query, args...).Scan(&codeID, &status); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, "", nil
-		}
-		return 0, "", fmt.Errorf("ошибка сопоставления кода сканера: %w", err)
-	}
-	if status != "in_buffer" && status != "printed" {
-		return codeID, status, nil
-	}
-
-	result, err := db.Exec(`
-		UPDATE task_codes
-		SET status = 'verified',
-			printed_at = COALESCE(printed_at, ?),
-			verified_at = ?,
-			verified_by_scanner_id = ?
-		WHERE id = ? AND status IN ('in_buffer', 'printed')`,
-		verifiedAt, verifiedAt, scanner.ID, codeID)
-	if err != nil {
-		return 0, "", fmt.Errorf("ошибка подтверждения считанного кода ID=%d: %w", codeID, err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, "", err
-	}
-	if affected == 0 {
-		return codeID, "verified", nil
-	}
-	return codeID, status, nil
-}
-
-// GetRecentScannerReads возвращает последние успешные чтения сканера.
+// GetRecentScannerReads возвращает последние события сканера, включая Noread.
 func (s *Store) GetRecentScannerReads(scannerID, limit int) ([]models.ScannerRead, error) {
 	if scannerID <= 0 {
 		return nil, fmt.Errorf("scanner_id должен быть положительным")

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"rovnoMark/internal/drivers/scanners"
 	"rovnoMark/internal/models"
 	"strconv"
 )
@@ -26,11 +27,24 @@ func (s *Server) handleScanners(w http.ResponseWriter, r *http.Request) {
 			sendJSONError(w, http.StatusBadRequest, "Ошибка разбора JSON: "+err.Error())
 			return
 		}
+		if scanner.DriverType != "tcp_camera" {
+			sendJSONError(w, http.StatusBadRequest, "Неподдерживаемый драйвер сканера: "+scanner.DriverType)
+			return
+		}
 
 		id, err := s.store.SaveLineScanner(scanner)
 		if err != nil {
 			sendJSONError(w, http.StatusBadRequest, "Ошибка сохранения сканера: "+err.Error())
 			return
+		}
+		scanner.ID = int(id)
+		if s.scannerMgr != nil {
+			if scanner.IsActive {
+				s.scannerMgr.AddScanner(scanner, scanners.NewTCPCamera(scanner))
+			} else if err := s.scannerMgr.RemoveScanner(scanner.ID); err != nil {
+				sendJSONError(w, http.StatusInternalServerError, "Ошибка остановки сканера: "+err.Error())
+				return
+			}
 		}
 		sendJSON(w, http.StatusOK, map[string]interface{}{
 			"status":     "saved",

@@ -108,14 +108,29 @@ func (driver *TCPDriver) handleFrame(raw []byte) {
 	if match := regionFramePattern.FindStringSubmatch(text); match != nil {
 		payload = strings.TrimSpace(match[1])
 	}
-	isNoRead := strings.EqualFold(payload, "NoRead")
+	isNoRead := payload == "Noread"
 
 	driver.mu.Lock()
 	driver.status.TotalScans++
 	driver.status.LastHeartbeat = now
-	if isNoRead || payload == "" {
+	if payload == "" {
+		driver.mu.Unlock()
+		return
+	}
+	if isNoRead {
 		driver.status.NoReads++
 		driver.mu.Unlock()
+		event := core.ScanEvent{
+			ScannerID: strconv.Itoa(driver.config.ID),
+			Code:      payload,
+			RawData:   []byte(payload),
+			Timestamp: now,
+			IsNoRead:  true,
+		}
+		select {
+		case driver.events <- event:
+		case <-driver.ctx.Done():
+		}
 		return
 	}
 
