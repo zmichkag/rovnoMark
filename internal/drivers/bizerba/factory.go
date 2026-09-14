@@ -9,7 +9,7 @@ import (
 
 type WeightStore interface {
 	SaveWeightAndMarkPrinted(taskID, printerID, printerIndex int, weight string) error
-	SaveGXNETResponse(printerID int, device, receivedAt, cmd, param, queue, payload string, status int) error
+	SaveGXNETResponse(printerID int, device string, receivedAt time.Time, cmd, param, queue, payload string, status int) error
 	GetActiveTaskByLine(lineID int) (int, error)
 	GetPrinterLineMap() (map[int]int, error)
 }
@@ -37,7 +37,7 @@ func CreateDriver(cfg models.PrinterConfig, store WeightStore) *Driver {
 			return store.SaveGXNETResponse(
 				cfg.ID,
 				bSettings.BCSDevice,
-				resp.ReceivedAt.Format(time.RFC3339),
+				resp.ReceivedAt,
 				resp.Command,
 				resp.Parameter,
 				resp.Queue,
@@ -55,7 +55,6 @@ func CreateDriver(cfg models.PrinterConfig, store WeightStore) *Driver {
 			if activeTaskID == 0 {
 				return fmt.Errorf("нет активной задачи для линии принтера %d", cfg.ID)
 			}
-			// Атомарно пишем вес и ставим статус printed
 			return store.SaveWeightAndMarkPrinted(activeTaskID, cfg.ID, printerIndex, weight)
 		},
 	}

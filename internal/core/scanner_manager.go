@@ -7,8 +7,39 @@ import (
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
 	"sync"
+	"time"
 )
 
+// ScanEvent описывает событие считывания кода камерой/сканером
+type ScanEvent struct {
+	ScannerID string
+	Code      string
+	RawData   []byte
+	Timestamp time.Time
+	IsNoRead  bool
+}
+
+// ScannerStatus содержит оперативную телеметрию устройства технического зрения
+type ScannerStatus struct {
+	Online        bool      `json:"online"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	LastReadAt    time.Time `json:"last_read_at"`
+	LastCode      string    `json:"last_code"`
+	LastError     string    `json:"last_error,omitempty"`
+	TotalScans    int64     `json:"total_scans"`
+	GoodScans     int64     `json:"good_scans"`
+	NoReads       int64     `json:"no_reads"`
+}
+
+// Scanner — аппаратный контракт драйвера сканера / камеры
+type Scanner interface {
+	GetStatus(ctx context.Context) (ScannerStatus, error)
+	Events() <-chan ScanEvent
+	SoftwareTrigger(ctx context.Context) error
+	Close() error
+}
+
+// ScannerManager управляет пулом подключенных сканеров и обработкой входящих кодов
 type ScannerManager struct {
 	mu       sync.RWMutex
 	store    *storage.Store
@@ -17,6 +48,7 @@ type ScannerManager struct {
 	wg       sync.WaitGroup
 }
 
+// NewScannerManager создает экземпляр менеджера сканеров
 func NewScannerManager(store *storage.Store) *ScannerManager {
 	return &ScannerManager{
 		store:    store,
@@ -25,8 +57,12 @@ func NewScannerManager(store *storage.Store) *ScannerManager {
 	}
 }
 
+// AddScanner регистрирует сканер и запускает чтение его потока событий
 func (manager *ScannerManager) AddScanner(config models.ScannerConfig, scanner Scanner) {
 	manager.mu.Lock()
+	if previous, exists := manager.scanners[config.ID]; exists && previous != nil {
+		_ = previous.Close()
+	}
 	manager.scanners[config.ID] = scanner
 	manager.configs[config.ID] = config
 	manager.mu.Unlock()
@@ -35,6 +71,7 @@ func (manager *ScannerManager) AddScanner(config models.ScannerConfig, scanner S
 	go manager.consume(config, scanner)
 }
 
+// consume вычитывает события из канала сканера и фиксирует их в БД
 func (manager *ScannerManager) consume(config models.ScannerConfig, scanner Scanner) {
 	defer manager.wg.Done()
 	for event := range scanner.Events() {
@@ -54,6 +91,23 @@ func (manager *ScannerManager) consume(config models.ScannerConfig, scanner Scan
 	}
 }
 
+// StartPoller запускает периодический сбор телеметрии с камер
+func (manager *ScannerManager) StartPoller(ctx context.Context) {
+	slog.Info("SCANNER-POLLER: Запущен мониторинг состояния камер")
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = manager.GetDashboardData()
+		}
+	}
+}
+
+// GetDashboardData опрашивает все зарегистрированные сканеры
 func (manager *ScannerManager) GetDashboardData() map[int]ScannerStatus {
 	manager.mu.RLock()
 	scanners := make(map[int]Scanner, len(manager.scanners))
@@ -74,6 +128,7 @@ func (manager *ScannerManager) GetDashboardData() map[int]ScannerStatus {
 	return statuses
 }
 
+// Close корректно останавливает все драйверы камер и ждет завершения горутин
 func (manager *ScannerManager) Close() error {
 	manager.mu.RLock()
 	scanners := make([]Scanner, 0, len(manager.scanners))
