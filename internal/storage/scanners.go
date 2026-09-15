@@ -151,10 +151,10 @@ func nullablePort(port int) interface{} {
 	return port
 }
 
-// RecordScannerNoRead сохраняет полученный от камеры маркер Noread без сопоставления с кодами задания.
+// RecordScannerNoRead сохраняет полученный от камеры маркер Noread или NoRead без сопоставления с кодами задания.
 func (s *Store) RecordScannerNoRead(scanner models.ScannerConfig, code string, rawData []byte, readAt time.Time) (*models.ScannerRead, error) {
 	code = strings.TrimSpace(code)
-	if code != "Noread" {
+	if code != "Noread" && code != "NoRead" {
 		return nil, fmt.Errorf("неподдерживаемый маркер отсутствия чтения %q", code)
 	}
 	if readAt.IsZero() {

@@ -14,12 +14,13 @@ func TestHandleFrameEmitsNoreadAndSuccessfulRead(t *testing.T) {
 	}
 
 	driver.handleFrame([]byte("Noread\r\n"))
-	driver.handleFrame([]byte("Region1,Noread\r\n"))
+	driver.handleFrame([]byte("Region1,NoRead\r\n"))
 	driver.handleFrame([]byte("Region247,Noread\r\n"))
+	wantCodes := []string{"Noread", "NoRead", "Noread"}
 	for i := 0; i < 3; i++ {
 		select {
 		case event := <-driver.events:
-			if !event.IsNoRead || event.Code != "Noread" {
+			if !event.IsNoRead || event.Code != wantCodes[i] {
 				t.Fatalf("Noread event = %#v", event)
 			}
 		default:
@@ -50,6 +51,19 @@ func TestHandleFrameEmitsNoreadAndSuccessfulRead(t *testing.T) {
 	}
 	if status.TotalScans != 5 || status.NoReads != 3 || status.GoodScans != 2 {
 		t.Fatalf("scanner status = %#v", status)
+	}
+}
+
+func TestUnobservedNoReadsVariantIsSuccessfulRead(t *testing.T) {
+	driver := &TCPDriver{
+		events: make(chan core.ScanEvent, 1),
+		ctx:    context.Background(),
+	}
+
+	driver.handleFrame([]byte("NoReads\r\n"))
+	event := <-driver.events
+	if event.IsNoRead || event.Code != "NoReads" {
+		t.Fatalf("NoReads event = %#v", event)
 	}
 }
 

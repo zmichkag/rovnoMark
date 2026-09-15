@@ -108,7 +108,7 @@ func (driver *TCPDriver) handleFrame(raw []byte) {
 	if match := regionFramePattern.FindStringSubmatch(text); match != nil {
 		payload = strings.TrimSpace(match[1])
 	}
-	isNoRead := payload == "Noread"
+	isNoRead := payload == "Noread" || payload == "NoRead"
 
 	driver.mu.Lock()
 	driver.status.TotalScans++
