@@ -103,7 +103,11 @@
     </style>
 </head>
 <body>
-<h1>AstraPRINT v0.9_ValentineBuild <span style="color: var(--text-muted); font-size: 1rem;">| Диспетчер печати</span></h1>
+<h1>
+    <span id="app-title">Загрузка...</span>
+    <span style="color: var(--text-muted); font-size: 0.9rem; font-weight: normal;" id="app-version-badge"></span>
+    <span style="color: var(--text-muted); font-size: 1rem;">| Диспетчер печати</span>
+</h1>
 <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('monitoring')">Мониторинг парка</button>
     <button class="tab-btn" onclick="switchTab('control')">Управление печатью</button>
@@ -333,6 +337,31 @@
         if (tabId === 'templatesTab') updateTemplateTargets();
     }
 
+    async function fetchSystemInfo() {
+        try {
+            const res = await fetch('/api/system/info');
+            if (!res.ok) return;
+            const data = await res.json();
+
+            const brandName = data.brand?.name || 'RovnoMark';
+            const buildVer = data.build?.version || 'dev';
+            const gitCommit = data.build?.git_commit ? ` (${data.build.git_commit.slice(0, 7)})` : '';
+
+            // Обновляем заголовок вкладки в браузере
+            document.title = `${brandName} v${buildVer} | Диспетчер`;
+
+            // Обновляем визуальный заголовок в интерфейсе
+            const titleEl = document.getElementById('app-title');
+            const verBadgeEl = document.getElementById('app-version-badge');
+
+            if (titleEl) titleEl.innerText = brandName;
+            if (verBadgeEl) verBadgeEl.innerText = `v${buildVer}${gitCommit}`;
+        } catch (e) {
+            console.warn('Не удалось загрузить версию системы:', e);
+            document.getElementById('app-title').innerText = 'RovnoMark';
+        }
+    }
+
     function togglePumperFields() {
         const mode = document.getElementById('p_pumper_mode').value;
         const leadLoopField = document.getElementById('field_lead_loop');
@@ -360,6 +389,7 @@
     window.dragOffsetY = 0;
 
     document.addEventListener("DOMContentLoaded", () => {
+        fetchSystemInfo();
         const canvas = document.getElementById('labelCanvas');
         if (!canvas) return;
 
