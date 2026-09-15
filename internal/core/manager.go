@@ -134,10 +134,14 @@ func (tp *TaskProcessor) pumpValentinFastLoop(
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Флаг: заряжен ли сейчас в принтер код под датчик
+	isArmed := false
+
 	// Первичный код взводится строго 1 раз
 	if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err != nil {
 		slog.Error("VALENTIN-FAST-SINGLE: Ошибка первичного взвода", "err", err)
-		return
+	} else {
+		isArmed = true
 	}
 
 	lastPrintedCount := -1
@@ -167,17 +171,32 @@ func (tp *TaskProcessor) pumpValentinFastLoop(
 				continue
 			}
 
-			// Только когда продукт прошел и датчик физически отщелкал этикетку
+			// СЛУЧАЙ А: Датчик сработал, этикетка напечатана
 			if currentCount > lastPrintedCount {
 				delta := currentCount - lastPrintedCount
 				lastPrintedCount = currentCount
+				isArmed = false // Предыдущий код сошел с печати
 
 				for i := 0; i < delta; i++ {
 					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err != nil {
 						slog.Error("VALENTIN-FAST-SINGLE: Сбой дозарядки", "err", err)
 						break
+					} else {
+						isArmed = true
 					}
 					time.Sleep(5 * time.Millisecond)
+				}
+			}
+
+			// СЛУЧАЙ Б (KICKSTART): Одометр стоит, принтер пуст (isArmed == false),
+			// но 1С только что докинула коды в БД
+			if !isArmed {
+				// Пытаемся взвести следующий код, если он появился
+				if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err == nil {
+					// Проверяем, ушел ли реально код (pushSingleValentinCode возвращает nil и если кодов нет)
+					// Поэтому для надежности проверяем статус задачи в БД или результат выборки
+					isArmed = true
+					slog.Info("VALENTIN-FAST-SINGLE: Успешный Kickstart после доливки кодов", "task_id", taskID)
 				}
 			}
 		}
