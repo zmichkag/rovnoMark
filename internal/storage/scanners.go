@@ -201,6 +201,68 @@ func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, raw
 	return read, nil
 }
 
+// GetTaskCodesDump возвращает полный массив кодов задания из шарда кодов
+func (s *Store) GetTaskCodesDump(taskID int) ([]models.TaskCode, error) {
+	db := s.getCodesDB()
+	query := `
+		SELECT id, task_id, code, COALESCE(weight, ''), COALESCE(ext_id, ''), status, 
+		       COALESCE(printer_id, 0), COALESCE(printer_index, 0), COALESCE(printed_at, '')
+		FROM task_codes 
+		WHERE task_id = ? 
+		ORDER BY id ASC`
+
+	rows, err := db.Query(query, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выгрузки task_codes: %w", err)
+	}
+	defer rows.Close()
+
+	var list []models.TaskCode
+	for rows.Next() {
+		var tc models.TaskCode
+		var printedAtStr string
+		if err := rows.Scan(&tc.ID, &tc.TaskID, &tc.Code, &tc.Weight, &tc.ExternalID, &tc.Status, &tc.PrinterID, &tc.PrinterIndex, &printedAtStr); err != nil {
+			return nil, fmt.Errorf("ошибка сканирования task_codes: %w", err)
+		}
+		if printedAtStr != "" {
+			tc.PrintedAt, _ = time.Parse("2006-01-02 15:04:05", printedAtStr)
+		}
+		list = append(list, tc)
+	}
+	if list == nil {
+		list = make([]models.TaskCode, 0)
+	}
+	return list, nil
+}
+
+// GetTaskScanReadsDump возвращает все сканы по конкретному заданию
+func (s *Store) GetTaskScanReadsDump(taskID int) ([]models.ScannerRead, error) {
+	query := `
+		SELECT id, scanner_id, line_id, task_id, task_code_id, code, match_status, read_at
+		FROM scanner_reads
+		WHERE task_id = ?
+		ORDER BY id ASC`
+
+	rows, err := s.db.Query(query, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка выгрузки scanner_reads: %w", err)
+	}
+	defer rows.Close()
+
+	var list []models.ScannerRead
+	for rows.Next() {
+		var sr models.ScannerRead
+		if err := rows.Scan(&sr.ID, &sr.ScannerID, &sr.LineID, &sr.TaskID, &sr.TaskCodeID, &sr.Code, &sr.MatchStatus, &sr.ReadAt); err != nil {
+			return nil, fmt.Errorf("ошибка сканирования scanner_reads: %w", err)
+		}
+		list = append(list, sr)
+	}
+	if list == nil {
+		list = make([]models.ScannerRead, 0)
+	}
+	return list, nil
+}
+
 // GetRecentScannerReads возвращает последние успешные чтения сканера.
 func (s *Store) GetRecentScannerReads(scannerID, limit int) ([]models.ScannerRead, error) {
 	if scannerID <= 0 {

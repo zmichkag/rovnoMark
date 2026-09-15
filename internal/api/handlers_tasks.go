@@ -557,3 +557,65 @@ func (s *Server) handleDashboardLive(w http.ResponseWriter, r *http.Request) {
 		"logs":      logs,
 	})
 }
+
+func (s *Server) handleTaskCodesDump(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только метод GET")
+		return
+	}
+
+	taskIDStr := strings.TrimPrefix(r.URL.Path, "/api/task_codes/")
+	if taskIDStr == "" || strings.Contains(taskIDStr, "/") {
+		taskIDStr = r.URL.Query().Get("task_id")
+	}
+
+	taskID, err := strconv.Atoi(taskIDStr)
+	if err != nil || taskID <= 0 {
+		sendJSONError(w, http.StatusBadRequest, "Неверный или отсутствующий ID задания")
+		return
+	}
+
+	codes, err := s.store.GetTaskCodesDump(taskID)
+	if err != nil {
+		slog.Error("API TASK-CODES-DUMP: Сбой вычитки", "task_id", taskID, "err", err)
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(codes); err != nil {
+		slog.Error("API TASK-CODES-DUMP: Сбой потоковой передачи JSON", "task_id", taskID, "err", err)
+	}
+}
+
+func (s *Server) handleTaskCodesScanDump(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		sendJSONError(w, http.StatusMethodNotAllowed, "Разрешен только метод GET")
+		return
+	}
+
+	taskIDStr := strings.TrimPrefix(r.URL.Path, "/api/task_codes_scan/")
+	if taskIDStr == "" || strings.Contains(taskIDStr, "/") {
+		taskIDStr = r.URL.Query().Get("task_id")
+	}
+
+	taskID, err := strconv.Atoi(taskIDStr)
+	if err != nil || taskID <= 0 {
+		sendJSONError(w, http.StatusBadRequest, "Неверный или отсутствующий ID задания")
+		return
+	}
+
+	scans, err := s.store.GetTaskScanReadsDump(taskID)
+	if err != nil {
+		slog.Error("API TASK-CODES-SCAN-DUMP: Сбой вычитки", "task_id", taskID, "err", err)
+		sendJSONError(w, http.StatusInternalServerError, "Ошибка БД: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(scans); err != nil {
+		slog.Error("API TASK-CODES-SCAN-DUMP: Сбой потоковой передачи JSON", "task_id", taskID, "err", err)
+	}
+}
