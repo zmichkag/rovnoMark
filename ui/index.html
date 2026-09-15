@@ -74,12 +74,11 @@
         .scanner-card.online .status-badge { color: #a78bfa; }
         .scanner-card.offline .status-badge { color: #a78bfa; }
         .scanner-code { overflow-wrap: anywhere; color: #fff; font-weight: bold; }
-        .scanner-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+        .scanner-stats { margin: 10px 0; }
         .scanner-stat { background: rgba(0, 0, 0, 0.22); border: 1px solid #403752; border-radius: 5px; padding: 8px; text-align: center; }
         .scanner-stat-value { display: block; font-size: 1.15rem; font-weight: bold; }
         .scanner-stat-label { display: block; margin-top: 2px; color: var(--text-muted); font-size: 0.68rem; font-weight: bold; letter-spacing: 0.05em; }
         .scanner-stat.good .scanner-stat-value { color: var(--success); }
-        .scanner-stat.bad .scanner-stat-value { color: var(--danger); }
         dialog { background: #181818; color: var(--text); border: 1px solid #444; border-radius: 8px; padding: 20px; width: min(760px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; }
         dialog::backdrop { background: rgba(0, 0, 0, 0.75); }
 
@@ -636,15 +635,10 @@
                 <div>Драйвер: <b>${scanner.driver_type || '-'}</b></div>
                 <div>Роль: <b>${scannerRoleLabel(scanner.role)}</b></div>
                 <div>Цель: <b>${targetName}</b></div>
-                <div>Всего попыток: <b>${scanner.total_scans || 0}</b></div>
                 <div class="scanner-stats">
                     <div class="scanner-stat good">
                         <span class="scanner-stat-value">${scanner.good_scans || 0}</span>
                         <span class="scanner-stat-label">УСПЕШНО</span>
-                    </div>
-                    <div class="scanner-stat bad">
-                        <span class="scanner-stat-value">${scanner.no_reads || 0}</span>
-                        <span class="scanner-stat-label">NOREAD</span>
                     </div>
                 </div>
                 <div>Последнее чтение: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
@@ -694,11 +688,10 @@
                 return;
             }
             content.innerHTML = `<table style="margin-bottom:0;">
-                <thead><tr><th>Время</th><th>Код</th><th>Результат</th></tr></thead>
+                <thead><tr><th>Время</th><th>Код</th></tr></thead>
                 <tbody>${reads.map(read => `<tr>
                     <td>${formatScannerTime(read.read_at)}</td>
                     <td class="scanner-code">${read.code || '-'}</td>
-                    <td>${read.match_status || '-'}</td>
                 </tr>`).join('')}</tbody>
             </table>`;
         } catch (e) {

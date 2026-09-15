@@ -85,14 +85,11 @@ func (manager *ScannerManager) RemoveScanner(scannerID int) error {
 	return scanner.Close()
 }
 
-// consume вычитывает события из канала сканера и фиксирует их в БД
+// consume вычитывает события из канала сканера и сохраняет в БД только успешные чтения.
 func (manager *ScannerManager) consume(config models.ScannerConfig, scanner Scanner) {
 	defer manager.wg.Done()
 	for event := range scanner.Events() {
 		if event.IsNoRead {
-			if _, err := manager.store.RecordScannerNoRead(config, event.Code, event.RawData, event.Timestamp); err != nil {
-				slog.Error("Ошибка фиксации Noread", "scanner", config.Name, "err", err)
-			}
 			continue
 		}
 		read, err := manager.store.RecordScannerRead(config, event.Code, event.RawData, event.Timestamp)

@@ -151,56 +151,6 @@ func nullablePort(port int) interface{} {
 	return port
 }
 
-// RecordScannerNoRead сохраняет полученный от камеры маркер Noread или NoRead без сопоставления с кодами задания.
-func (s *Store) RecordScannerNoRead(scanner models.ScannerConfig, code string, rawData []byte, readAt time.Time) (*models.ScannerRead, error) {
-	code = strings.TrimSpace(code)
-	if code != "Noread" && code != "NoRead" {
-		return nil, fmt.Errorf("неподдерживаемый маркер отсутствия чтения %q", code)
-	}
-	if readAt.IsZero() {
-		readAt = time.Now()
-	}
-	readAt = readAt.UTC()
-	if rawData == nil {
-		rawData = []byte{}
-	}
-
-	taskID, err := s.GetActiveTaskByLine(scanner.LineID)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка поиска активной задачи линии ID=%d для Noread: %w", scanner.LineID, err)
-	}
-	var nullableTaskID interface{}
-	if taskID > 0 {
-		nullableTaskID = taskID
-	}
-
-	result, err := s.db.Exec(`
-		INSERT INTO scanner_reads (
-			scanner_id, line_id, task_id, code, raw_data, match_status, read_at
-		) VALUES (?, ?, ?, ?, ?, 'no_read', ?)`,
-		scanner.ID, scanner.LineID, nullableTaskID, code, rawData, readAt)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка сохранения Noread сканера ID=%d: %w", scanner.ID, err)
-	}
-	readID, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка получения ID события Noread: %w", err)
-	}
-
-	read := &models.ScannerRead{
-		ID:          int(readID),
-		ScannerID:   scanner.ID,
-		LineID:      scanner.LineID,
-		Code:        code,
-		MatchStatus: "no_read",
-		ReadAt:      readAt,
-	}
-	if taskID > 0 {
-		read.TaskID = &taskID
-	}
-	return read, nil
-}
-
 // RecordScannerRead сохраняет успешное чтение в отдельном журнале сканера.
 func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, rawData []byte, readAt time.Time) (*models.ScannerRead, error) {
 	code = strings.TrimSpace(strings.ReplaceAll(code, "\x1d", "<GS>"))
@@ -251,7 +201,7 @@ func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, raw
 	return read, nil
 }
 
-// GetRecentScannerReads возвращает последние события сканера, включая Noread.
+// GetRecentScannerReads возвращает последние успешные чтения сканера.
 func (s *Store) GetRecentScannerReads(scannerID, limit int) ([]models.ScannerRead, error) {
 	if scannerID <= 0 {
 		return nil, fmt.Errorf("scanner_id должен быть положительным")
@@ -261,7 +211,9 @@ func (s *Store) GetRecentScannerReads(scannerID, limit int) ([]models.ScannerRea
 	}
 	rows, err := s.db.Query(`
 		SELECT id, scanner_id, line_id, task_id, task_code_id, code, match_status, read_at
-		FROM scanner_reads WHERE scanner_id = ? ORDER BY id DESC LIMIT ?`, scannerID, limit)
+		FROM scanner_reads
+		WHERE scanner_id = ? AND match_status <> 'no_read'
+		ORDER BY id DESC LIMIT ?`, scannerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка получения чтений сканера ID=%d: %w", scannerID, err)
 	}
