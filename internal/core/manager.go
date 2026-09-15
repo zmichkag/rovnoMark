@@ -121,6 +121,8 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 // ----------------------------------------------------------------------------
 // РЕЖИМ 1: Классический реактивный (Fast Single) - строго 1 шт под датчик
 // ----------------------------------------------------------------------------
+// internal/core/manager.go
+
 func (tp *TaskProcessor) pumpValentinFastLoop(
 	ctx context.Context,
 	lineID, taskID, printerID int,
@@ -131,17 +133,17 @@ func (tp *TaskProcessor) pumpValentinFastLoop(
 	defer tp.stopTaskTracking(taskID)
 	slog.Info("VALENTIN-FAST-SINGLE: Запуск цикла строго под фотодатчик", "task_id", taskID, "printer_id", printerID)
 
+	// Проверяем, сколько принтеров реально привязано к этой линии
+	printersOnLine, err := tp.Store.GetPrintersByLine(lineID)
+	isSinglePrinter := err == nil && len(printersOnLine) <= 1
+
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Флаг: заряжен ли сейчас в принтер код под датчик
-	isArmed := false
-
 	// Первичный код взводится строго 1 раз
-	if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err != nil {
+	if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false, isSinglePrinter); err != nil {
 		slog.Error("VALENTIN-FAST-SINGLE: Ошибка первичного взвода", "err", err)
-	} else {
-		isArmed = true
+		return
 	}
 
 	lastPrintedCount := -1
@@ -171,32 +173,16 @@ func (tp *TaskProcessor) pumpValentinFastLoop(
 				continue
 			}
 
-			// СЛУЧАЙ А: Датчик сработал, этикетка напечатана
 			if currentCount > lastPrintedCount {
 				delta := currentCount - lastPrintedCount
 				lastPrintedCount = currentCount
-				isArmed = false // Предыдущий код сошел с печати
 
 				for i := 0; i < delta; i++ {
-					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err != nil {
+					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false, isSinglePrinter); err != nil {
 						slog.Error("VALENTIN-FAST-SINGLE: Сбой дозарядки", "err", err)
 						break
-					} else {
-						isArmed = true
 					}
 					time.Sleep(5 * time.Millisecond)
-				}
-			}
-
-			// СЛУЧАЙ Б (KICKSTART): Одометр стоит, принтер пуст (isArmed == false),
-			// но 1С только что докинула коды в БД
-			if !isArmed {
-				// Пытаемся взвести следующий код, если он появился
-				if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err == nil {
-					// Проверяем, ушел ли реально код (pushSingleValentinCode возвращает nil и если кодов нет)
-					// Поэтому для надежности проверяем статус задачи в БД или результат выборки
-					isArmed = true
-					slog.Info("VALENTIN-FAST-SINGLE: Успешный Kickstart после доливки кодов", "task_id", taskID)
 				}
 			}
 		}
@@ -220,13 +206,18 @@ func (tp *TaskProcessor) pumpValentinRibbonBuffer(
 		"lead_loop", leadLoop,
 	)
 
+	// Проверяем количество активных принтеров на линии
+	printersOnLine, err := tp.Store.GetPrintersByLine(lineID)
+	isSinglePrinter := err == nil && len(printersOnLine) <= 1
+
 	// ФАЗА 1: Стартовая накачка физической петли кодов на ленте (hostDriven = true)
 	for i := 0; i < leadLoop; i++ {
-		if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, true); err != nil {
+		// ДОБАВЛЕН АРГУМЕНТ isSinglePrinter (строка 206)
+		if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, true, isSinglePrinter); err != nil {
 			slog.Error("VALENTIN-RIBBON-BUFFER: Ошибка стартовой накачки петли", "err", err)
 			break
 		}
-		time.Sleep(30 * time.Millisecond) // Задержка на протяжку ленты принтером
+		time.Sleep(30 * time.Millisecond)
 	}
 
 	ticker := time.NewTicker(30 * time.Millisecond)
@@ -266,7 +257,8 @@ func (tp *TaskProcessor) pumpValentinRibbonBuffer(
 
 				// Аппликатор нанес этикетки: допечатываем ровно delta штук, сохраняя петлю
 				for i := 0; i < delta; i++ {
-					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, true); err != nil {
+					// ДОБАВЛЕН АРГУМЕНТ isSinglePrinter (строка 250)
+					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, true, isSinglePrinter); err != nil {
 						slog.Error("VALENTIN-RIBBON-BUFFER: Сбой допечатки в петлю", "err", err)
 						break
 					}
@@ -278,9 +270,27 @@ func (tp *TaskProcessor) pumpValentinRibbonBuffer(
 }
 
 // pushSingleValentinCode отправляет код с явным указанием hostDriven режима
-func (tp *TaskProcessor) pushSingleValentinCode(taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver, hostDriven bool) error {
-	codes, err := tp.Store.FetchAndAssignCodesAlternating(taskID, printerID, role, 1)
-	if err != nil || len(codes) == 0 {
+func (tp *TaskProcessor) pushSingleValentinCode(
+	taskID, printerID int,
+	role string,
+	vDriver *valentine.NiceLabelDriver,
+	hostDriven bool,
+	isSinglePrinter bool,
+) error {
+	var codes []models.TaskCode
+	var err error
+
+	// Если на линии всего один принтер — забираем ВСЕ коды подряд (без деления на чет/нечет)
+	if isSinglePrinter || strings.ToUpper(strings.TrimSpace(role)) == "SINGLE" || role == "" {
+		codes, err = tp.Store.FetchAndAssignCodes(taskID, printerID, 1)
+	} else {
+		codes, err = tp.Store.FetchAndAssignCodesAlternating(taskID, printerID, role, 1)
+	}
+
+	if err != nil {
+		return fmt.Errorf("ошибка выборки кодов из БД: %w", err)
+	}
+	if len(codes) == 0 {
 		return nil
 	}
 
