@@ -40,8 +40,8 @@ type ReconcileResult struct {
 }
 
 const (
-	// v5: конфигурация сканеров и восстановление схем БД с некорректным user_version
-	TargetMasterSchemaVersion = 5
+	// v6:
+	TargetMasterSchemaVersion = 6
 	// v2: добавляем колонку weight в codes_YYYY_MM.db
 	TargetCodesSchemaVersion = 2
 )
@@ -361,6 +361,11 @@ func MigrateMaster(db *sql.DB) error {
 	// схему сканеров, чтобы восстановить такие базы.
 	migrations[4] = `SELECT 1;`
 	migrations[5] = migrations[3]
+	migrations[6] = `
+		ALTER TABLE printers ADD COLUMN pumper_mode TEXT DEFAULT 'fast_single';
+		ALTER TABLE printers ADD COLUMN buffer_limit INTEGER DEFAULT 30;
+		ALTER TABLE printers ADD COLUMN lead_loop INTEGER DEFAULT 5;
+	`
 
 	for v := currentVersion + 1; v <= TargetMasterSchemaVersion; v++ {
 		sqlStep, ok := migrations[v]
@@ -875,7 +880,12 @@ func (s *Store) GetAllLines() ([]models.LineConfig, error) {
 }
 
 func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
-	query := `SELECT id, name, ip, port, driver_type, is_active, COALESCE(settings_json, '{}') FROM printers WHERE is_deleted = 0`
+	query := `SELECT id, name, ip, port, driver_type, is_active, 
+	                 COALESCE(pumper_mode, 'fast_single'), 
+	                 COALESCE(buffer_limit, 30), 
+	                 COALESCE(lead_loop, 5), 
+	                 COALESCE(settings_json, '{}') 
+	          FROM printers WHERE is_deleted = 0`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -886,9 +896,14 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 	for rows.Next() {
 		var p models.PrinterConfig
 		var settingsRaw string
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive, &settingsRaw); err != nil {
+		var pumperMode string
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.IsActive,
+			&pumperMode, &p.BufferLimit, &p.LeadLoop, &settingsRaw,
+		); err != nil {
 			return nil, fmt.Errorf("ошибка чтения конфигурации принтера: %w", err)
 		}
+		p.PumperMode = models.PumperMode(pumperMode)
 		p.Settings = []byte(settingsRaw)
 		list = append(list, p)
 	}
@@ -899,7 +914,9 @@ func (s *Store) GetAllPrinters() ([]models.PrinterConfig, error) {
 }
 
 func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
-	query := `INSERT OR REPLACE INTO printers (id, name, ip, port, driver_type, is_active, settings_json) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT OR REPLACE INTO printers 
+		(id, name, ip, port, driver_type, is_active, pumper_mode, buffer_limit, lead_loop, settings_json) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	var id interface{} = p.ID
 	if p.ID == 0 {
 		id = nil
@@ -909,7 +926,11 @@ func (s *Store) SavePrinter(p models.PrinterConfig) (int64, error) {
 		settingsStr = "{}"
 	}
 
-	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive, settingsStr)
+	pumperMode := string(p.GetEffectivePumperMode())
+	bufferLimit := p.GetEffectiveBufferLimit()
+	leadLoop := p.GetEffectiveLeadLoop()
+
+	res, err := s.db.Exec(query, id, p.Name, p.IP, p.Port, p.DriverType, p.IsActive, pumperMode, bufferLimit, leadLoop, settingsStr)
 	if err != nil {
 		return 0, err
 	}
@@ -935,7 +956,12 @@ func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
 }
 
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
-	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, COALESCE(lp.role, 'PRIMARY'), COALESCE(p.settings_json, '{}')
+	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, 
+	                 COALESCE(lp.role, 'PRIMARY'),
+	                 COALESCE(p.pumper_mode, 'fast_single'),
+	                 COALESCE(p.buffer_limit, 30),
+	                 COALESCE(p.lead_loop, 5),
+	                 COALESCE(p.settings_json, '{}')
 		FROM printers p
 		JOIN line_printers lp ON p.id = lp.printer_id
 		WHERE lp.line_id = ? AND p.is_active = 1`
@@ -949,10 +975,15 @@ func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	for rows.Next() {
 		var p models.PrinterConfig
 		var settingsRaw string
-		if err := rows.Scan(&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.Role, &settingsRaw); err != nil {
+		var pumperMode string
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.IP, &p.Port, &p.DriverType, &p.Role,
+			&pumperMode, &p.BufferLimit, &p.LeadLoop, &settingsRaw,
+		); err != nil {
 			slog.Error("GetPrintersByLine scan error", "err", err)
 			continue
 		}
+		p.PumperMode = models.PumperMode(pumperMode)
 		p.Settings = []byte(settingsRaw)
 		list = append(list, p)
 	}

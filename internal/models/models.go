@@ -6,17 +6,61 @@ import (
 	"time"
 )
 
-// Физическое устройство
+// PumperMode определяет алгоритм прокачки кодов в принтер
+type PumperMode string
+
+const (
+	ModeFastSingle   PumperMode = "fast_single"   // Реактивный под фотодатчик (по 1 шт)
+	ModeRibbonBuffer PumperMode = "ribbon_buffer" // Программная петля упреждения на ленте
+)
+
+// Константы буферизации по умолчанию
+const (
+	DefaultBufferLimit = 30 // Стандартный лимит аппаратного буфера принтера
+	DefaultLeadLoop    = 5  // Стандартная глубина стартовой петли упреждения
+)
+
+// PrinterConfig описывает конфигурацию физического печатающего устройства
 type PrinterConfig struct {
-	ID         int             `json:"id"`
-	Name       string          `json:"name"`
-	IP         string          `json:"ip"`
-	Port       int             `json:"port"`
-	DriverType string          `json:"driver_type"`
-	Role       string          `json:"role"`
-	IsActive   bool            `json:"is_active"`
-	IsDeleted  bool            `json:"is_deleted"`
-	Settings   json.RawMessage `json:"settings,omitempty"` // Специфика драйвера
+	ID          int             `json:"id" db:"id"`
+	Name        string          `json:"name" db:"name"`
+	IP          string          `json:"ip" db:"ip"`
+	Port        int             `json:"port" db:"port"`
+	DriverType  string          `json:"driver_type" db:"driver_type"`
+	Role        string          `json:"role" db:"role"`
+	PumperMode  PumperMode      `json:"pumper_mode,omitempty" db:"pumper_mode"`   // fast_single или ribbon_buffer
+	BufferLimit int             `json:"buffer_limit,omitempty" db:"buffer_limit"` // Глубина очереди / шаг дозарядки
+	LeadLoop    int             `json:"lead_loop,omitempty" db:"lead_loop"`       // Стартовая петля опережения триггера
+	IsActive    bool            `json:"is_active" db:"is_active"`
+	IsDeleted   bool            `json:"is_deleted" db:"is_deleted"`
+	Settings    json.RawMessage `json:"settings,omitempty" db:"settings_json"`
+}
+
+// GetEffectiveBufferLimit возвращает безопасный размер буфера с фоллбэком на дефолт
+func (p *PrinterConfig) GetEffectiveBufferLimit() int {
+	if p.BufferLimit <= 0 {
+		return DefaultBufferLimit
+	}
+	return p.BufferLimit
+}
+
+// GetEffectiveLeadLoop возвращает безопасный размер стартовой петли
+func (p *PrinterConfig) GetEffectiveLeadLoop() int {
+	if p.LeadLoop <= 0 {
+		return DefaultLeadLoop
+	}
+	if limit := p.GetEffectiveBufferLimit(); p.LeadLoop > limit {
+		return limit
+	}
+	return p.LeadLoop
+}
+
+// GetEffectivePumperMode возвращает режим работы с фоллбэком на классический реактивный
+func (p *PrinterConfig) GetEffectivePumperMode() PumperMode {
+	if p.PumperMode == ModeRibbonBuffer {
+		return ModeRibbonBuffer
+	}
+	return ModeFastSingle
 }
 
 type ScannerConfig struct {
@@ -54,7 +98,6 @@ type ScannerRead struct {
 	ReadAt      time.Time `json:"read_at"`
 }
 
-// LineConfig описывает производственную линию
 type LineConfig struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
@@ -63,7 +106,6 @@ type LineConfig struct {
 	IsDeleted   bool   `json:"is_deleted"`
 }
 
-// PrinterState хранит оперативное состояние и телеметрию принтера в ОЗУ
 type PrinterState struct {
 	LastTemplate   string
 	LastStaticHash string
@@ -73,23 +115,20 @@ type PrinterState struct {
 	Speed          string `json:"speed"`
 	CurCount       string `json:"cur_count"`
 	CurTemplate    string `json:"cur_template"`
-	LastWeight     string `json:"last_weight,omitempty"` // Последний отвес для UI
+	LastWeight     string `json:"last_weight,omitempty"`
 }
 
-// LogEntry представляет строковый лог для веб-интерфейса и дашборда
 type LogEntry struct {
 	Time    string `json:"time"`
 	Printer string `json:"printer"`
 	Event   string `json:"event"`
 }
 
-// InboundCodeItem представляет универсальный элемент кода от 1С
 type InboundCodeItem struct {
 	Code  string `json:"code"`
 	ExtID string `json:"ext_id"`
 }
 
-// UnmarshalJSON безопасно читает ext_id как число (11), строку ("11") или null
 func (item *InboundCodeItem) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Code  string          `json:"code"`
@@ -105,7 +144,6 @@ func (item *InboundCodeItem) UnmarshalJSON(data []byte) error {
 	if len(raw.ExtID) > 0 {
 		val := strings.TrimSpace(string(raw.ExtID))
 		if val != "null" {
-			// Отрезаем кавычки, если пришла строка, или оставляем число как строку
 			item.ExtID = strings.Trim(val, `"`)
 		}
 	}
@@ -113,20 +151,18 @@ func (item *InboundCodeItem) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// TaskCode представляет единицу маркировки в шарде БД
 type TaskCode struct {
 	ID           int       `json:"id"`
 	TaskID       int       `json:"task_id"`
 	PrinterID    int       `json:"printer_id"`
 	Code         string    `json:"code"`
-	Weight       string    `json:"weight,omitempty"` // Фактический вес упаковки (Catchweight)
+	Weight       string    `json:"weight,omitempty"`
 	ExternalID   string    `json:"ext_id"`
-	Status       string    `json:"status"`        // 'pending', 'in_buffer', 'printed'
-	PrinterIndex int       `json:"printer_index"` // Индекс SID от принтера
+	Status       string    `json:"status"`
+	PrinterIndex int       `json:"printer_index"`
 	PrintedAt    time.Time `json:"printed_at"`
 }
 
-// EventLogItem представляет запись системного или аппаратного события в Master DB
 type EventLogItem struct {
 	ID        int       `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
@@ -134,15 +170,14 @@ type EventLogItem struct {
 	LineName  string    `json:"line_name,omitempty"`
 	PrinterID *int      `json:"printer_id,omitempty"`
 	Printer   string    `json:"printer_name,omitempty"`
-	EventType string    `json:"event_type"` // 'error', 'warn', 'info', 'success'
+	EventType string    `json:"event_type"`
 	Message   string    `json:"message"`
 }
 
-// LogFilter содержит параметры фильтрации истории событий
 type LogFilter struct {
 	LineID    int       `json:"line_id"`
 	PrinterID int       `json:"printer_id"`
-	EventType string    `json:"event_type"` // 'error', 'warn', 'info', 'success'
+	EventType string    `json:"event_type"`
 	DateFrom  time.Time `json:"date_from"`
 	DateTo    time.Time `json:"date_to"`
 	Limit     int       `json:"limit"`

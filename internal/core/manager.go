@@ -17,7 +17,6 @@ import (
 	"time"
 )
 
-// Printer - расширенный контракт для промышленного оборудования
 type Printer interface {
 	GetStatus() (string, error)
 	PrintTemplate(template string, fields map[string]string) error
@@ -38,12 +37,18 @@ type Printer interface {
 	SelectTemplate(template string, fields map[string]string) error
 }
 
-// TaskProcessor управляет фоновыми потоками отправки данных в маркираторы
+func (pm *PrinterManager) GetPrinterConfig(id int) (models.PrinterConfig, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	cfg, ok := pm.configs[id]
+	return cfg, ok
+}
+
 type TaskProcessor struct {
 	Store       *storage.Store
 	Manager     *PrinterManager
 	activeMu    sync.Mutex
-	activeTasks map[int]bool // Реестр активных задач, чтобы не плодить дублирующие горутины
+	activeTasks map[int]bool
 }
 
 func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
@@ -54,7 +59,7 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 
 	if tp.activeTasks[taskID] {
 		tp.activeMu.Unlock()
-		slog.Debug("Pumper: Насос для этой задачи уже работает, дублирование проигнорировано", "task_id", taskID)
+		slog.Debug("Pumper: Насос для этой задачи уже работает", "task_id", taskID)
 		return
 	}
 
@@ -77,28 +82,30 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 			hasSpecializedDriver = true
 			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 			if bDriver, ok := pPrinter.(*bizerba.Driver); ok {
-				slog.Info("Pumper: Запуск реактивного Bizerba Fast Loop (Catchweight)",
-					"line_id", lineID,
-					"printer", pCfg.Name,
-					"printer_id", pCfg.ID,
-				)
+				slog.Info("Pumper: Запуск Bizerba Fast Loop", "printer", pCfg.Name, "printer_id", pCfg.ID)
 				go tp.RunBizerbaFastPumper(ctx, lineID, taskID, pCfg.ID, bDriver)
-			} else {
-				slog.Error("Pumper: Ошибка приведения типа к *bizerba.Driver", "printer_id", pCfg.ID)
 			}
 
-		case "valentine_nice":
+		case "valentine_nice", "valentin", "valentine":
 			hasSpecializedDriver = true
 			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
 			if vDriver, ok := pPrinter.(*valentine.NiceLabelDriver); ok {
-				slog.Info("Pumper: Запуск реактивного Valentin Fast Loop",
-					"line_id", lineID,
+				limit := pCfg.GetEffectiveBufferLimit()
+				lead := pCfg.GetEffectiveLeadLoop()
+				mode := pCfg.GetEffectivePumperMode()
+
+				slog.Info("Pumper: Запуск Valentin",
+					"mode", mode,
 					"printer", pCfg.Name,
-					"role", pCfg.Role,
+					"buffer_limit", limit,
+					"lead_loop", lead,
 				)
-				go tp.RunValentinFastPumper(ctx, lineID, taskID, pCfg.ID, pCfg.Role, vDriver)
-			} else {
-				slog.Error("Pumper: Ошибка приведения типа к *valentine.NiceLabelDriver", "printer_id", pCfg.ID)
+
+				if mode == models.ModeRibbonBuffer {
+					go tp.pumpValentinRibbonBuffer(ctx, lineID, taskID, pCfg.ID, pCfg.Role, vDriver, limit, lead)
+				} else {
+					go tp.pumpValentinFastLoop(ctx, lineID, taskID, pCfg.ID, pCfg.Role, vDriver, limit, lead)
+				}
 			}
 		}
 	}
@@ -107,24 +114,39 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 		return
 	}
 
-	slog.Info("Pumper: Запуск штатного пачечного насоса", "line_id", lineID, "task_id", taskID)
+	slog.Info("Pumper: Запуск стандартного пачечного насоса", "line_id", lineID, "task_id", taskID)
 	go tp.RunDefaultPumper(ctx, lineID, taskID)
 }
 
-func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver) {
+// ----------------------------------------------------------------------------
+// РЕЖИМ 1: Классический реактивный (Fast Single) - строго 1 шт под датчик
+// ----------------------------------------------------------------------------
+func (tp *TaskProcessor) pumpValentinFastLoop(
+	ctx context.Context,
+	lineID, taskID, printerID int,
+	role string,
+	vDriver *valentine.NiceLabelDriver,
+	bufferLimit, leadLoop int,
+) {
 	defer tp.stopTaskTracking(taskID)
-	slog.Info("VALENTIN-PUMPER: Запущен реактивный насос", "line_id", lineID, "printer_id", printerID)
+	slog.Info("VALENTIN-FAST-SINGLE: Запуск цикла строго под фотодатчик", "task_id", taskID, "printer_id", printerID)
 
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
-	_ = tp.pushSingleValentinCode(taskID, printerID, role, vDriver)
+	// Первичный код взводится строго 1 раз
+	if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err != nil {
+		slog.Error("VALENTIN-FAST-SINGLE: Ошибка первичного взвода", "err", err)
+		return
+	}
+
 	lastPrintedCount := -1
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
 		case <-ticker.C:
 			status, err := tp.Store.GetTaskStatus(taskID)
 			if err != nil || status == "stopped" || status == "completed" {
@@ -135,7 +157,84 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 			if err != nil {
 				continue
 			}
-			currentCount, _ := strconv.Atoi(countStr)
+			currentCount, convErr := strconv.Atoi(countStr)
+			if convErr != nil {
+				continue
+			}
+
+			if lastPrintedCount == -1 {
+				lastPrintedCount = currentCount
+				continue
+			}
+
+			// Только когда продукт прошел и датчик физически отщелкал этикетку
+			if currentCount > lastPrintedCount {
+				delta := currentCount - lastPrintedCount
+				lastPrintedCount = currentCount
+
+				for i := 0; i < delta; i++ {
+					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false); err != nil {
+						slog.Error("VALENTIN-FAST-SINGLE: Сбой дозарядки", "err", err)
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+// РЕЖИМ 2: Буфер на ленте (Ribbon Buffer) - программный тираж вперед
+// ----------------------------------------------------------------------------
+func (tp *TaskProcessor) pumpValentinRibbonBuffer(
+	ctx context.Context,
+	lineID, taskID, printerID int,
+	role string,
+	vDriver *valentine.NiceLabelDriver,
+	bufferLimit, leadLoop int,
+) {
+	defer tp.stopTaskTracking(taskID)
+	slog.Info("VALENTIN-RIBBON-BUFFER: Старт петли упреждения",
+		"task_id", taskID,
+		"buffer_limit", bufferLimit,
+		"lead_loop", leadLoop,
+	)
+
+	// ФАЗА 1: Стартовая накачка физической петли кодов на ленте (hostDriven = true)
+	for i := 0; i < leadLoop; i++ {
+		if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, true); err != nil {
+			slog.Error("VALENTIN-RIBBON-BUFFER: Ошибка стартовой накачки петли", "err", err)
+			break
+		}
+		time.Sleep(30 * time.Millisecond) // Задержка на протяжку ленты принтером
+	}
+
+	ticker := time.NewTicker(30 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastPrintedCount := -1
+
+	// ФАЗА 2: Цикл восполнения петли по одометру FBBC
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			status, err := tp.Store.GetTaskStatus(taskID)
+			if err != nil || status == "stopped" || status == "completed" {
+				return
+			}
+
+			countStr, err := vDriver.GetCurrentPrintCount()
+			if err != nil {
+				continue
+			}
+			currentCount, convErr := strconv.Atoi(countStr)
+			if convErr != nil {
+				continue
+			}
 
 			if lastPrintedCount == -1 {
 				lastPrintedCount = currentCount
@@ -146,19 +245,21 @@ func (tp *TaskProcessor) RunValentinFastPumper(ctx context.Context, lineID, task
 				delta := currentCount - lastPrintedCount
 				lastPrintedCount = currentCount
 
+				// Аппликатор нанес этикетки: допечатываем ровно delta штук, сохраняя петлю
 				for i := 0; i < delta; i++ {
-					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver); err != nil {
-						slog.Error("VALENTIN-PUMPER: Сбой дозарядки буфера", "err", err)
+					if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, true); err != nil {
+						slog.Error("VALENTIN-RIBBON-BUFFER: Сбой допечатки в петлю", "err", err)
 						break
 					}
-					time.Sleep(5 * time.Millisecond)
+					time.Sleep(10 * time.Millisecond)
 				}
 			}
 		}
 	}
 }
 
-func (tp *TaskProcessor) pushSingleValentinCode(taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver) error {
+// pushSingleValentinCode отправляет код с явным указанием hostDriven режима
+func (tp *TaskProcessor) pushSingleValentinCode(taskID, printerID int, role string, vDriver *valentine.NiceLabelDriver, hostDriven bool) error {
 	codes, err := tp.Store.FetchAndAssignCodesAlternating(taskID, printerID, role, 1)
 	if err != nil || len(codes) == 0 {
 		return nil
@@ -170,7 +271,7 @@ func (tp *TaskProcessor) pushSingleValentinCode(taskID, printerID int, role stri
 		cleanCode = cleanCode[:idx]
 	}
 
-	_, err = vDriver.PrintBatchIndexed("20", codeObj.PrinterIndex, []string{cleanCode})
+	_, err = vDriver.PrintBatchIndexedMode("20", codeObj.PrinterIndex, []string{cleanCode}, hostDriven)
 	if err != nil {
 		return fmt.Errorf("сбой отправки КМ в Valentin: %w", err)
 	}
@@ -264,7 +365,7 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 
 				loaded, err := pPrinter.PrintBatchIndexed(compositeFields, startIndex, compositePayloads)
 				if err != nil {
-					slog.Error("Pumper: Ошибка отправки пакета в сокет", "printer", pCfg.Name, "err", err)
+					slog.Error("Pumper: Ошибка отправки пакета", "printer", pCfg.Name, "err", err)
 				} else if loaded > 0 {
 					slog.Debug("Pumper: Пачка загружена", "printer", pCfg.Name, "loaded", loaded)
 				}

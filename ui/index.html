@@ -180,6 +180,26 @@
                 </select>
             </div>
 
+            <!-- Блок настроек подкачки (Pumper Mode) -->
+            <div id="pumper_settings_block" style="background: #181818; border: 1px solid #333; border-radius: 6px; padding: 10px; margin-bottom: 10px;">
+                <h4 style="margin: 0 0 10px 0; font-size: 0.9rem; color: var(--primary);">Режим подачи и буферизации</h4>
+                <div class="field">
+                    <label>Режим пампера:</label>
+                    <select id="p_pumper_mode" onchange="togglePumperFields()">
+                        <option value="fast_single">Fast Single (По 1 шт под датчик)</option>
+                        <option value="ribbon_buffer">Ribbon Buffer (Петля на ленте)</option>
+                    </select>
+                </div>
+                <div class="field" id="field_lead_loop" style="display: none;">
+                    <label>Петля опережения (Lead Loop, шт):</label>
+                    <input type="number" id="p_lead_loop" value="5" min="1" max="50">
+                </div>
+                <div class="field">
+                    <label>Лимит буфера (Buffer Limit, шт):</label>
+                    <input type="number" id="p_buffer_limit" value="30" min="1" max="200">
+                </div>
+            </div>
+
             <!-- Блок настроек Bizerba (отображается при выборе драйвера) -->
             <div id="bizerba_extra_settings" class="bizerba-panel" style="display: none;">
                 <h4 style="margin: 0 0 10px 0; font-size: 0.9rem; color: var(--warning);">Параметры весового комплекса</h4>
@@ -247,7 +267,7 @@
     <h4>Линии</h4>
     <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th><th>Действие</th></tr></thead><tbody id="lines-list-table"></tbody></table>
     <h4>Принтеры</h4>
-    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Вес</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
+    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Режим</th><th>Вес</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
     <h4>Сканеры</h4>
     <table><thead><tr><th>ID</th><th>Линия</th><th>Имя</th><th>Адрес</th><th>Роль</th><th>Состояние</th><th>Действие</th></tr></thead><tbody id="scanners-list-table"></tbody></table>
 </div>
@@ -311,6 +331,16 @@
         if (tabId === 'settings') loadSettingsData();
         if (tabId === 'control') updateControlTargets();
         if (tabId === 'templatesTab') updateTemplateTargets();
+    }
+
+    function togglePumperFields() {
+        const mode = document.getElementById('p_pumper_mode').value;
+        const leadLoopField = document.getElementById('field_lead_loop');
+        if (mode === 'ribbon_buffer') {
+            leadLoopField.style.display = 'block';
+        } else {
+            leadLoopField.style.display = 'none';
+        }
     }
 
     function toggleDriverExtraFields() {
@@ -929,19 +959,23 @@
             document.getElementById('assign_printer').innerHTML = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
             document.getElementById('s_target_device').innerHTML = '<option value="">Не выбран</option>' + printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
             document.getElementById('printers-list-table').innerHTML = printers.map(p => {
-                // Поддержка как старого поля capture_weight, так и нового settings.capture_weight
                 let hasWeight = "Нет";
                 if (p.capture_weight) hasWeight = "Да";
                 else if (p.settings && p.settings.capture_weight) hasWeight = "Да";
 
+                const pumperLabel = p.pumper_mode === 'ribbon_buffer'
+                    ? `<span style="color: var(--warning)">Ribbon (${p.lead_loop || 5})</span>`
+                    : `<span style="color: var(--success)">Single (1)</span>`;
+
                 return `<tr>
-                    <td>${p.id}</td>
-                    <td>${p.name}</td>
-                    <td>${p.ip}:${p.port}</td>
-                    <td>${p.driver_type}</td>
-                    <td>${hasWeight}</td>
-                    <td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td>
-                </tr>`;
+            <td>${p.id}</td>
+            <td>${p.name}</td>
+            <td>${p.ip}:${p.port}</td>
+            <td>${p.driver_type}</td>
+            <td>${pumperLabel}</td>
+            <td>${hasWeight}</td>
+            <td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td>
+        </tr>`;
             }).join('');
 
             const sRes = await fetch('/api/scanners');
@@ -1071,10 +1105,12 @@
             ip: document.getElementById('p_ip').value,
             port: parseInt(document.getElementById('p_port').value),
             driver_type: driverType,
+            pumper_mode: document.getElementById('p_pumper_mode').value,
+            buffer_limit: parseInt(document.getElementById('p_buffer_limit').value) || 30,
+            lead_loop: parseInt(document.getElementById('p_lead_loop').value) || 5,
             is_active: document.getElementById('p_active').checked
         };
 
-        // Если выбрана Bizerba, упаковываем специфичные свойства в settings
         if (driverType === 'bizerba') {
             body.settings = {
                 bcs_device: document.getElementById('p_bcs_device').value || 'GLPMax',
@@ -1114,9 +1150,13 @@
         document.getElementById('p_driver').value = p.driver_type;
         document.getElementById('p_active').checked = p.is_active;
 
+        document.getElementById('p_pumper_mode').value = p.pumper_mode || 'fast_single';
+        document.getElementById('p_buffer_limit').value = p.buffer_limit || 30;
+        document.getElementById('p_lead_loop').value = p.lead_loop || 5;
+        togglePumperFields();
+
         toggleDriverExtraFields();
 
-        // Заполняем настройки Bizerba, если они есть
         const s = p.settings || {};
         document.getElementById('p_bcs_device').value = s.bcs_device || p.bcs_device || '';
         document.getElementById('p_bizerba_mode').value = s.mode || p.bizerba_mode || 'stream';
@@ -1132,6 +1172,11 @@
         document.getElementById('p_name').value = '';
         document.getElementById('p_ip').value = '';
         document.getElementById('p_port').value = '9100';
+        document.getElementById('p_pumper_mode').value = 'fast_single';
+        document.getElementById('p_buffer_limit').value = '30';
+        document.getElementById('p_lead_loop').value = '5';
+        togglePumperFields();
+
         document.getElementById('p_bcs_device').value = '';
         document.getElementById('p_bizerba_mode').value = 'stream';
         document.getElementById('p_bizerba_conveyor').checked = false;
