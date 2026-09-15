@@ -314,6 +314,18 @@
     </div>
 </div>
 
+<dialog id="stop_task_dialog" style="background: #1e1e1e; border: 1px solid var(--danger); border-radius: 8px; padding: 20px; color: var(--text);">
+    <h3 style="margin-top:0; color: var(--danger);">Подтверждение остановки</h3>
+    <p id="stop_task_dialog_text">Введите PIN-код для остановки задачи:</p>
+    <div class="field">
+        <input type="password" id="stop_task_pin_input" placeholder="ПИН-код" style="font-size: 1.2rem; text-align: center; letter-spacing: 4px;">
+    </div>
+    <div style="display: flex; gap: 10px; margin-top: 15px;">
+        <button class="btn" style="flex: 1; background: var(--danger);" onclick="confirmTaskStop()">ОСТАНОВИТЬ</button>
+        <button class="btn" style="flex: 1;" onclick="closeStopTaskDialog()">ОТМЕНА</button>
+    </div>
+</dialog>
+
 <dialog id="scanner_history_dialog">
     <div style="display:flex; justify-content:space-between; align-items:center; gap:15px;">
         <h3 id="scanner_history_title" style="margin:0;">История чтений</h3>
@@ -327,6 +339,46 @@
     window.linesMap = {};
     window.scannersMap = {};
     window.assignmentsList = [];
+
+    let pendingStopTaskId = null;
+
+    window.stopTask = function(taskId, lineId) {
+        pendingStopTaskId = taskId;
+        const dialog = document.getElementById('stop_task_dialog');
+        document.getElementById('stop_task_dialog_text').innerText = `Введите PIN для остановки задачи #${taskId}:`;
+        document.getElementById('stop_task_pin_input').value = '';
+        dialog.showModal();
+        document.getElementById('stop_task_pin_input').focus();
+    };
+
+    window.closeStopTaskDialog = function() {
+        pendingStopTaskId = null;
+        document.getElementById('stop_task_dialog').close();
+    };
+
+    window.confirmTaskStop = async function() {
+        const STOP_PIN = "144774";
+        const enteredPin = document.getElementById('stop_task_pin_input').value.trim();
+
+        if (enteredPin !== STOP_PIN) {
+            alert("Неверный PIN-код!");
+            return;
+        }
+
+        const taskId = pendingStopTaskId;
+        closeStopTaskDialog();
+
+        try {
+            const res = await fetch(`/api/task/stop?task_id=${taskId}`);
+            if (res.ok) {
+                fetchActiveTasks();
+            } else {
+                alert('Ошибка сервера:\n' + await res.text());
+            }
+        } catch (e) {
+            alert('Ошибка связи: ' + e.message);
+        }
+    };
 
     function switchTab(tabId) {
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
