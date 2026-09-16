@@ -20,6 +20,7 @@ import (
 	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
+	"rovnoMark/internal/drivers/markem_async"
 	"rovnoMark/internal/drivers/savema"
 	scannerdrivers "rovnoMark/internal/drivers/scanners"
 	"rovnoMark/internal/drivers/valentine"
@@ -115,6 +116,8 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 		case "markem":
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
+		case "markem_async":
+			manager.AddPrinter(cfg, markem_async.New(cfg.IP, cfg.Port, "Actor1"))
 		case "ext_server", "nicelabel_http":
 			manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
 		case "bizerba":
