@@ -8,6 +8,7 @@ import (
 	"rovnoMark/internal/drivers/bizerba"
 	"rovnoMark/internal/drivers/extserver"
 	"rovnoMark/internal/drivers/markem"
+	"rovnoMark/internal/drivers/markem_async"
 	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/drivers/videojet"
@@ -126,6 +127,8 @@ func (s *Server) handlePrintersAdd(w http.ResponseWriter, r *http.Request) {
 		s.manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
 	case "markem":
 		s.manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
+	case "markem_async":
+		s.manager.AddPrinter(cfg, markem_async.New(cfg.IP, cfg.Port, "Actor1"))
 	case "ext_server", "nicelabel_http":
 		s.manager.AddPrinter(cfg, extserver.New(cfg.IP, cfg.Port))
 	case "bizerba":
