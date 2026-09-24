@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"rovnoMark/web"
 	"strconv"
 	"syscall"
 	"time"
@@ -28,8 +29,7 @@ import (
 	"rovnoMark/internal/version"
 
 	"rovnoMark/ui"
-	"rovnoMark/ui2"
-	ui_okk "rovnoMark/ui_okk"
+	"rovnoMark/ui_okk"
 )
 
 const serviceName = "RovnoMarkGateway"
@@ -168,8 +168,13 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 
 	// 5. Подготовка встроенных веб-интерфейсов
 	contentUI, _ := fs.Sub(ui.FS, ".")
-	contentUI2, _ := fs.Sub(ui2.FS, ".")
 	contentOKK, _ := fs.Sub(ui_okk.FS, ".")
+
+	// Подключаем собранный React из пакета web
+	contentUI2, errSub := fs.Sub(web.FS, "dist")
+	if errSub != nil {
+		slog.Error("Ошибка монтирования React web/dist", "err", errSub)
+	}
 
 	// 6. Инициализация HTTP API (передаем и принтеры, и сканеры)
 	apiServer := api.NewServer(store, manager, scannerMgr, taskProcessor, validateGS1, contentUI, contentUI2, contentOKK)
