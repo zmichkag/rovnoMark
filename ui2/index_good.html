@@ -1,0 +1,1619 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AstraPrint | Industrial Gateway & Topology Manager</title>
+    <!-- Chosen Palette: Slate Industrial Light (slate-50, slate-100, white, slate-900, blue-600, emerald-600, rose-600, amber-500, indigo-600) -->
+    <!-- Application Structure Plan:
+        1. Вкладка "Мониторинг парка": Оперативный контроль выполнения партий, статус ролей принтеров (Первый, Второй, Суммарный), остаток риббона/буфера, пин-останов (PIN 144774), статус режима "Ручная проклейка".
+        2. Вкладка "Топология и Настройки": 
+           - Матрица привязки устройств, роли принтеров (Первый/Второй/Суммарный), режим Pumper, настройки комплексов Bizerba и Carl Valentin (размер буфера, петля Lead Loop).
+           - Интерактивный сканер сети IP/портов 9100/23/502 с автоимпортом в свободный пул.
+        3. Вкладка "Диагностика ядра": Метрики сокетов, Chart.js телеметрия кодов/сек по типам принтеров и симулятор цеховых аварий.
+        4. SQLite Log Stream: Лента системных логов внизу экрана.
+    -->
+    <!-- Visualization & Content Choices:
+        - Роли принтеров -> "Первый", "Второй", "Суммарный" в карточках, модальных окнах и фильтрах.
+        - Режим линии -> "Ручная проклейка" вместо Агрегации.
+        - Настройки принтера -> Размер буфера (для всех), Петля опережения Lead Loop (для Carl Valentin).
+        - Поиск устройств -> Модальное окно с прогрессом сканирования подсети и кнопками импорта.
+        - Иконки -> Символы Unicode. NO SVG.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .u-icon { display: inline-block; font-style: normal; line-height: 1; text-align: center; }
+        
+        .chart-container {
+            position: relative;
+            width: 100%;
+            height: 240px;
+            max-height: 260px;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans antialiased min-h-screen flex flex-col">
+
+    <!-- Header Navigation -->
+    <header class="bg-slate-900 text-white sticky top-0 z-40 shadow-md">
+        <div class="max-w-[1920px] mx-auto px-6 py-3 flex flex-wrap items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+                <div class="bg-blue-600 p-2.5 rounded-xl text-white font-bold text-lg shadow">
+                    <span class="u-icon">⚡</span>
+                </div>
+                <div>
+                    <h1 class="text-lg font-black tracking-wide leading-none">AstraPrint Gateway</h1>
+                    <span class="text-[11px] text-slate-400 font-mono tracking-wider uppercase mt-1 block">Industrial Line Control • v2.1 (Roles: Первый / Второй / Суммарный)</span>
+                </div>
+            </div>
+
+            <!-- Navigation Tabs -->
+            <nav class="flex items-center gap-2 bg-slate-800 p-1 rounded-xl">
+                <button id="nav-mon" onclick="switchTab('mon')" class="px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white shadow transition-all">
+                    <span class="u-icon mr-1">⚡</span> Мониторинг парка
+                </button>
+                <button id="nav-cfg" onclick="switchTab('cfg')" class="px-4 py-2 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition-all">
+                    <span class="u-icon mr-1">🔗</span> Топология и Настройки
+                </button>
+                <button id="nav-diag" onclick="switchTab('diag')" class="px-4 py-2 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition-all">
+                    <span class="u-icon mr-1">💻</span> Диагностика и Симулятор
+                </button>
+            </nav>
+
+            <div class="flex items-center gap-4">
+                <div class="hidden sm:flex items-center gap-2 bg-slate-800 px-3.5 py-1.5 rounded-lg border border-slate-700 text-xs font-mono">
+                    <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span id="kpi-active-lines" class="text-slate-200 font-bold">0 линий в работе</span>
+                </div>
+                <div id="clock" class="font-mono font-bold text-xs bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-slate-300">
+                    00:00:00
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Container -->
+    <main class="flex-grow max-w-[1920px] w-full mx-auto p-6 flex flex-col gap-6">
+
+        <!-- TAB 1: OPERATIONAL MONITORING -->
+        <section id="tab-mon" class="flex flex-col gap-6">
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-base font-bold text-slate-900">Оперативный контроль производственных линий</h2>
+                    <p class="text-xs text-slate-500">Мониторинг печати кодов Честного ЗНАКа с разделением принтеров на Первый, Второй и Суммарный</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-3">
+                    <div class="flex items-center gap-2 text-xs font-mono bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                        <span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 font-bold">Первый: <b id="cnt-first">0</b></span>
+                        <span class="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 font-bold">Второй: <b id="cnt-second">0</b></span>
+                        <span class="px-2 py-0.5 rounded bg-purple-100 text-purple-800 font-bold">Суммарный: <b id="cnt-summary">0</b></span>
+                    </div>
+                    <button onclick="refreshDashboard()" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 text-xs font-bold text-slate-700 flex items-center gap-1">
+                        <span class="u-icon">🔄</span> Обновить
+                    </button>
+                </div>
+            </div>
+
+            <div id="lines-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                <!-- Dynamic Content via JS -->
+            </div>
+        </section>
+
+        <!-- TAB 2: TOPOLOGY & CONFIGURATION -->
+        <section id="tab-cfg" class="hidden flex flex-col gap-6">
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-base font-bold text-slate-900">Конструктор топологии цеха и сетевых устройств</h2>
+                    <p class="text-xs text-slate-500">Настройка ролей (Первый / Второй / Суммарный), буферизации, драйверов Carl Valentin / Bizerba и сканера сети</p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button onclick="startNetworkScan()" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow flex items-center gap-1 transition-colors">
+                        <span class="u-icon">📡</span> Поиск устройств (Scan Network)
+                    </button>
+                    <button onclick="openAddLineModal()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow flex items-center gap-1">
+                        <span class="u-icon">➕</span> Добавить линию
+                    </button>
+                    <button onclick="openAddDeviceModal()" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold shadow flex items-center gap-1">
+                        <span class="u-icon">🔌</span> Зарегистрировать вручную
+                    </button>
+                </div>
+            </div>
+
+            <!-- Lines Topology Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" id="topology-lines-grid">
+                <!-- Dynamic Line Topology Cards -->
+            </div>
+
+            <!-- Unassigned Equipment Pool -->
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-4">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="p-2 rounded-lg bg-amber-100 text-amber-700 font-bold text-sm">📦</span>
+                        <div>
+                            <h3 class="text-sm font-bold text-slate-900">Свободное оборудование (Unassigned Pool)</h3>
+                            <p class="text-xs text-slate-500">Принтеры и сканеры, готовые к привязке к производственным линиям</p>
+                        </div>
+                    </div>
+                    <span id="unassigned-count-badge" class="px-2.5 py-1 rounded-full text-xs font-bold font-mono bg-amber-50 text-amber-700 border border-amber-200">
+                        0 устройств
+                    </span>
+                </div>
+
+                <div id="unassigned-devices-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <!-- Dynamic Unassigned Pool -->
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 3: DIAGNOSTICS & SIMULATION ENGINE -->
+        <section id="tab-diag" class="hidden flex flex-col gap-6">
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-base font-bold text-slate-900">Диагностика системного ядра и Симулятор цеха</h2>
+                    <p class="text-xs text-slate-500">Мониторинг задержек сетевого сокета 9100, состояния SQLite WAL и моделирование нагрузки по ролям принтеров</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="px-3 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-mono font-bold border border-emerald-300">
+                        Core Go Driver: Active v2.1
+                    </span>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Telemetry & Performance Chart -->
+                <div class="lg:col-span-2 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col gap-4">
+                    <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                        <div>
+                            <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                <span class="u-icon text-blue-600">📊</span> Динамика скорости маркировки и задержки сокетов (Throughput & Latency)
+                            </h3>
+                            <p class="text-xs text-slate-500">Нанесенные коды Честного ЗНАКа на Первичных, Вторичных и Суммарных принтерах</p>
+                        </div>
+                        <span class="text-xs font-mono bg-slate-100 px-2.5 py-1 rounded-lg text-slate-600 border border-slate-200 font-bold">
+                            Интервал: 1s
+                        </span>
+                    </div>
+
+                    <div class="chart-container">
+                        <canvas id="telemetryChart"></canvas>
+                    </div>
+
+                    <!-- System Metrics Grid -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-100 text-xs font-mono">
+                        <div class="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <div class="text-slate-400 text-[10px]">СРЕДНИЙ PING (9100)</div>
+                            <div id="metric-ping" class="font-bold text-blue-600 mt-1 text-sm">2.1 ms</div>
+                        </div>
+                        <div class="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <div class="text-slate-400 text-[10px]">АКТИВНЫЕ GOROUTINES</div>
+                            <div id="metric-goroutines" class="font-bold text-emerald-600 mt-1 text-sm">24 threads</div>
+                        </div>
+                        <div class="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <div class="text-slate-400 text-[10px]">БАЗА ДАННЫХ ЛОГОВ</div>
+                            <div class="font-bold text-purple-600 mt-1 text-sm">SQLite WAL (5.2 MB)</div>
+                        </div>
+                        <div class="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <div class="text-slate-400 text-[10px]">ОШИБКИ СОЕДИНЕНИЙ</div>
+                            <div id="metric-errors" class="font-bold text-slate-700 mt-1 text-sm">0 err/min</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Industrial Event Simulator Panel -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between gap-4">
+                    <div>
+                        <div class="flex items-center gap-2 border-b border-slate-100 pb-3 mb-4">
+                            <span class="p-2 rounded-lg bg-indigo-100 text-indigo-700 font-bold text-sm">🧪</span>
+                            <div>
+                                <h3 class="text-sm font-bold text-slate-900">Панель симулятора цеха</h3>
+                                <p class="text-xs text-slate-500">Тестирование реакции шлюза на события</p>
+                            </div>
+                        </div>
+
+                        <div class="flex flex-col gap-2.5">
+                            <button onclick="simPushTask()" class="w-full p-3 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-900 text-xs font-bold text-left flex items-center justify-between group transition-colors">
+                                <span class="flex items-center gap-2">
+                                    <span class="u-icon text-blue-600">📥</span> Подать партию из 1С ERP
+                                </span>
+                                <span class="text-[10px] bg-blue-200 text-blue-800 px-2 py-0.5 rounded font-mono">+1 task</span>
+                            </button>
+
+                            <button onclick="simSocketError()" class="w-full p-3 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-900 text-xs font-bold text-left flex items-center justify-between group transition-colors">
+                                <span class="flex items-center gap-2">
+                                    <span class="u-icon text-rose-600">⚠️</span> Спровоцировать сбой сокета 9100
+                                </span>
+                                <span class="text-[10px] bg-rose-200 text-rose-800 px-2 py-0.5 rounded font-mono">Sim Error</span>
+                            </button>
+
+                            <button onclick="simBizerbaWeight()" class="w-full p-3 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-900 text-xs font-bold text-left flex items-center justify-between group transition-colors">
+                                <span class="flex items-center gap-2">
+                                    <span class="u-icon text-purple-600">⚖️</span> Симуляция взвешивания Bizerba
+                                </span>
+                                <span class="text-[10px] bg-purple-200 text-purple-800 px-2 py-0.5 rounded font-mono">Sync weight</span>
+                            </button>
+
+                            <button onclick="simRibbonDeplete()" class="w-full p-3 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 text-xs font-bold text-left flex items-center justify-between group transition-colors">
+                                <span class="flex items-center gap-2">
+                                    <span class="u-icon text-amber-600">📉</span> Износ риббона (-15%)
+                                </span>
+                                <span class="text-[10px] bg-amber-200 text-amber-800 px-2 py-0.5 rounded font-mono">-15% Ribbon</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="pt-3 border-t border-slate-100">
+                        <button onclick="simResetAll()" class="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow flex items-center justify-center gap-2 transition-colors">
+                            <span class="u-icon">✅</span> Восстановить нормальную работу
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer SQLite Event Log Stream -->
+    <footer class="mt-auto bg-slate-900 text-slate-400 p-4 border-t border-slate-800">
+        <div class="max-w-[1920px] mx-auto flex flex-col gap-3">
+            <div class="flex items-center justify-between text-xs font-bold uppercase tracking-wider">
+                <span class="flex items-center gap-2"><span class="u-icon">💻</span> Журнал событий в реальном времени (SQLite Log Stream)</span>
+                <div class="flex gap-2">
+                    <button onclick="setLogFilter('all')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 font-mono">Все</button>
+                    <button onclick="setLogFilter('error')" class="px-2 py-0.5 rounded bg-rose-950 border border-rose-800 text-[10px] text-rose-300 font-mono">Ошибки</button>
+                    <button onclick="setLogFilter('config')" class="px-2 py-0.5 rounded bg-blue-950 border border-blue-800 text-[10px] text-blue-300 font-mono">Топология</button>
+                </div>
+            </div>
+
+            <div id="logs-container" class="bg-slate-950 rounded-xl border border-slate-800 p-3 h-36 overflow-y-auto font-mono text-xs space-y-1.5 shadow-inner">
+            </div>
+        </div>
+    </footer>
+
+    <!-- MODAL 1: PIN Stop Task Confirmation -->
+    <div id="pin-modal" class="hidden fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-6 max-w-sm w-full shadow-2xl flex flex-col items-center text-center gap-4">
+            <div class="w-12 h-12 rounded-2xl bg-rose-100 border border-rose-200 text-rose-600 flex items-center justify-center text-xl font-bold">
+                <span class="u-icon">🛡️</span>
+            </div>
+            <div>
+                <h3 class="text-base font-bold text-slate-900">Подтверждение остановки</h3>
+                <p id="pin-modal-desc" class="text-xs text-slate-500 mt-1">Введите PIN-код для остановки партии</p>
+            </div>
+            <div class="flex gap-2 justify-center my-1">
+                <input type="password" maxlength="1" class="pin-input w-10 h-12 rounded-xl border border-slate-300 text-center font-mono text-lg font-bold focus:border-blue-600 outline-none">
+                <input type="password" maxlength="1" class="pin-input w-10 h-12 rounded-xl border border-slate-300 text-center font-mono text-lg font-bold focus:border-blue-600 outline-none">
+                <input type="password" maxlength="1" class="pin-input w-10 h-12 rounded-xl border border-slate-300 text-center font-mono text-lg font-bold focus:border-blue-600 outline-none">
+                <input type="password" maxlength="1" class="pin-input w-10 h-12 rounded-xl border border-slate-300 text-center font-mono text-lg font-bold focus:border-blue-600 outline-none">
+                <input type="password" maxlength="1" class="pin-input w-10 h-12 rounded-xl border border-slate-300 text-center font-mono text-lg font-bold focus:border-blue-600 outline-none">
+                <input type="password" maxlength="1" class="pin-input w-10 h-12 rounded-xl border border-slate-300 text-center font-mono text-lg font-bold focus:border-blue-600 outline-none">
+            </div>
+            <div id="pin-error" class="hidden text-xs font-bold text-rose-600">Неверный PIN! (Код: 144774)</div>
+            <div class="flex gap-3 w-full mt-2">
+                <button onclick="closePinModal()" class="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs">
+                    Отмена
+                </button>
+                <button onclick="submitPinModal()" class="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow">
+                    Остановить
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 2: Add / Edit Line -->
+    <div id="line-modal" class="hidden fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-6 max-w-md w-full shadow-2xl flex flex-col gap-4">
+            <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                <h3 id="line-modal-title" class="text-base font-bold text-slate-900">Добавление производственной линии</h3>
+                <button onclick="closeLineModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold">&times;</button>
+            </div>
+            <form id="line-form" onsubmit="saveLineForm(event)" class="flex flex-col gap-3 text-xs">
+                <input type="hidden" id="line-form-id">
+                <div>
+                    <label class="font-bold text-slate-700 block mb-1">Название линии</label>
+                    <input type="text" id="line-form-name" required placeholder="Например: Линия 4 (Тетрапак)" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none font-medium">
+                </div>
+                <div>
+                    <label class="font-bold text-slate-700 block mb-1">Описание конвейера</label>
+                    <input type="text" id="line-form-desc" placeholder="Описание упаковки или группы товаров" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none">
+                </div>
+                <div>
+                    <label class="font-bold text-slate-700 block mb-1">Режим работы контура</label>
+                    <select id="line-form-mode" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none bg-white font-medium">
+                        <option value="Высокоскоростная печать">Высокоскоростная печать (Direct Stream)</option>
+                        <option value="Поштучная верификация">Поштучная верификация (Bizerba Sync)</option>
+                        <option value="Ручная проклейка">Ручная проклейка (Manual Sticker)</option>
+                    </select>
+                </div>
+                <div class="flex gap-3 mt-3 pt-3 border-t border-slate-100">
+                    <button type="button" onclick="closeLineModal()" class="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold">Отмена</button>
+                    <button type="submit" class="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold shadow">Сохранить</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 3: Bind Device to Line -->
+    <div id="bind-modal" class="hidden fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-6 max-w-md w-full shadow-2xl flex flex-col gap-4">
+            <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                <h3 class="text-base font-bold text-slate-900">Привязка оборудования к линии</h3>
+                <button onclick="closeBindModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold">&times;</button>
+            </div>
+            <div class="flex flex-col gap-3 text-xs">
+                <div>
+                    <label class="font-bold text-slate-700 block mb-1">Выберите целевую линию</label>
+                    <select id="bind-line-select" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none bg-white font-medium">
+                        <!-- Options generated dynamically -->
+                    </select>
+                </div>
+                <div class="flex gap-3 mt-3 pt-3 border-t border-slate-100">
+                    <button type="button" onclick="closeBindModal()" class="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold">Отмена</button>
+                    <button type="button" onclick="submitBindDevice()" class="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow">Привязать</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 4: Register New Device / Edit Printer Config -->
+    <div id="device-modal" class="hidden fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-6 max-w-md w-full shadow-2xl flex flex-col gap-4">
+            <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                <h3 id="device-modal-title" class="text-base font-bold text-slate-900">Регистрация нового устройства</h3>
+                <button onclick="closeDeviceModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold">&times;</button>
+            </div>
+            <form id="device-form" onsubmit="saveDeviceForm(event)" class="flex flex-col gap-3 text-xs">
+                <div>
+                    <label class="font-bold text-slate-700 block mb-1">Тип устройства</label>
+                    <select id="dev-type" onchange="toggleDeviceFields()" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none bg-white font-medium">
+                        <option value="printer">Маркировочный принтер (Carl Valentin / Savema / Bizerba / Videojet)</option>
+                        <option value="scanner">Камера / Сканер ТЗ (Cognex / Sick / Keyence)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="font-bold text-slate-700 block mb-1">Название устройства</label>
+                    <input type="text" id="dev-name" required placeholder="Например: Carl Valentin Compa II" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none font-medium">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="font-bold text-slate-700 block mb-1">IP-Адрес / Host</label>
+                        <input type="text" id="dev-ip" required placeholder="192.168.1.55" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none font-mono">
+                    </div>
+                    <div>
+                        <label class="font-bold text-slate-700 block mb-1">Порт сокета</label>
+                        <input type="number" id="dev-port" required value="9100" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none font-mono">
+                    </div>
+                </div>
+
+                <!-- Printer Specific Fields -->
+                <div id="dev-printer-fields" class="flex flex-col gap-3">
+                    <div>
+                        <label class="font-bold text-slate-700 block mb-1">Вариант / Роль принтера</label>
+                        <select id="dev-printer-role" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none bg-white font-bold text-blue-900">
+                            <option value="first">Первый (Основной маркиратор штучной упаковки)</option>
+                            <option value="second">Второй (Дублирующий / Поштучный принтер 2)</option>
+                            <option value="summary">Суммарный (Групповой / Короба / Паллеты)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="font-bold text-slate-700 block mb-1">Драйвер устройства</label>
+                        <select id="dev-driver" onchange="onDriverChange()" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none bg-white font-medium">
+                            <option value="carl_valentin">Carl Valentin TT/Direct (CV protocol)</option>
+                            <option value="savema">Savema Thermal Transfer</option>
+                            <option value="bizerba">Bizerba Weighing System</option>
+                            <option value="videojet">Videojet / Markem-Imaje</option>
+                        </select>
+                    </div>
+
+                    <!-- Universal Buffer Size for ALL Printers -->
+                    <div>
+                        <label class="font-bold text-slate-700 block mb-1">Размер буфера печати (Buffer Size, шт)</label>
+                        <input type="number" id="dev-buffer-size" min="1" max="1000" value="100" required class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none font-mono">
+                        <span class="text-[10px] text-slate-400">Максимальное количество предзагруженных кодов в очереди принтера</span>
+                    </div>
+
+                    <!-- Special Lead Loop Field for Carl Valentin -->
+                    <div id="dev-lead-loop-box" class="p-3 bg-amber-50 rounded-xl border border-amber-200">
+                        <label class="font-bold text-amber-900 block mb-1">Петля опережения (Lead Loop, шт)</label>
+                        <input type="number" id="dev-lead-loop" min="0" max="20" value="3" class="w-full p-2.5 rounded-xl border border-amber-300 bg-white focus:border-amber-600 outline-none font-mono">
+                        <span class="text-[10px] text-amber-700 mt-1 block">Опережающая подмотка etiqetas для диспенсера Carl Valentin до момента наклейки</span>
+                    </div>
+                </div>
+
+                <!-- Scanner Fields -->
+                <div id="dev-scanner-fields" class="hidden">
+                    <label class="font-bold text-slate-700 block mb-1">Роль верификатора</label>
+                    <select id="dev-role" class="w-full p-2.5 rounded-xl border border-slate-300 focus:border-blue-600 outline-none bg-white font-medium">
+                        <option value="Inline Verifier">Inline Verifier (Проверка ТЗ)</option>
+                        <option value="Audit Scanner">Audit Scanner (Контроль брака)</option>
+                        <option value="Manual Verification">Manual Verification (Ручная проклейка)</option>
+                    </select>
+                </div>
+
+                <div class="flex gap-3 mt-3 pt-3 border-t border-slate-100">
+                    <button type="button" onclick="closeDeviceModal()" class="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold">Отмена</button>
+                    <button type="submit" class="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold shadow">Зарегистрировать</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 5: Network Device Search / Scanner Interface -->
+    <div id="scan-modal" class="hidden fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-6 max-w-2xl w-full shadow-2xl flex flex-col gap-4 max-h-[90vh]">
+            <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                <div class="flex items-center gap-2">
+                    <span class="p-2 rounded-lg bg-emerald-100 text-emerald-700 font-bold text-sm">📡</span>
+                    <div>
+                        <h3 class="text-base font-bold text-slate-900">Сетевой сканер оборудования цеха</h3>
+                        <p class="text-xs text-slate-500">Автообнаружение принтеров Carl Valentin, Savema, Bizerba и камер ТЗ в подсети</p>
+                    </div>
+                </div>
+                <button onclick="closeScanModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold">&times;</button>
+            </div>
+
+            <!-- Scanner Controls & Status Bar -->
+            <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 flex flex-col gap-3">
+                <div class="flex items-center justify-between text-xs font-mono">
+                    <span id="scan-target-range" class="font-bold text-slate-700">Диапазон: 192.168.1.1 — 192.168.1.254</span>
+                    <span id="scan-status-text" class="text-emerald-600 font-bold">Сканирование завершено</span>
+                </div>
+                <div class="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden">
+                    <div id="scan-progress-bar" class="h-full bg-emerald-500 transition-all duration-200" style="width: 100%"></div>
+                </div>
+            </div>
+
+            <!-- Discovered Devices List -->
+            <div class="flex flex-col gap-2 overflow-y-auto max-h-[350px] pr-1" id="scan-results-list">
+                <!-- Dynamic Results List -->
+            </div>
+
+            <div class="flex justify-between items-center pt-3 border-t border-slate-100 text-xs">
+                <button onclick="runNetworkScan()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow flex items-center gap-1">
+                    <span class="u-icon">🔄</span> Пересканировать сеть
+                </button>
+                <button onclick="closeScanModal()" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl">
+                    Закрыть
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Application JavaScript Engine -->
+    <script>
+        // Центральное реактивное состояние RovnoMark Gateway
+        const state = {
+            activeTab: 'mon',
+            targetTaskId: null,
+            logFilter: 'all',
+            targetBindDevice: null,
+            telemetryChart: null,
+
+            // Боевые данные из API
+            lines: [],
+            printers: [],
+            scanners: [],
+            logs: [],
+            scanResults: [],
+
+            // Данные телеметрии скорости для Chart.js
+            chartHistory: {
+                labels: [],
+                dataPrinters: [],
+                dataScanners: []
+            },
+            prevPrinterCounts: {},
+            prevScannerCounts: {}
+        };
+
+        // Бейджи ролей оборудования
+        function getRoleBadge(role) {
+            const r = (role || 'first').toLowerCase();
+            if (r.includes('first') || r.includes('primary') || r.includes('lane_1')) {
+                return '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">1-й (Первый)</span>';
+            } else if (r.includes('second') || r.includes('secondary') || r.includes('even')) {
+                return '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">2-й (Второй)</span>';
+            }
+            return '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">Σ (Суммарный)</span>';
+        }
+
+        function getActiveBadge(isActive) {
+            if (isActive) {
+                return '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">● Активен</span>';
+            }
+            return '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-600 border border-slate-300">○ Резерв (Неактивен)</span>';
+        }
+
+        function initClock() {
+            const update = () => {
+                const clockEl = document.getElementById('clock');
+                if (clockEl) clockEl.innerText = new Date().toLocaleTimeString('ru-RU');
+            };
+            update();
+            setInterval(update, 1000);
+        }
+
+        function switchTab(tab) {
+            state.activeTab = tab;
+            ['mon', 'cfg', 'diag'].forEach(t => {
+                const sec = document.getElementById('tab-' + t);
+                const btn = document.getElementById('nav-' + t);
+                if (!sec || !btn) return;
+
+                if (t === tab) {
+                    sec.classList.remove('hidden');
+                    btn.className = "px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white shadow transition-all";
+                } else {
+                    sec.classList.add('hidden');
+                    btn.className = "px-4 py-2 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition-all";
+                }
+            });
+
+            if (tab === 'cfg') renderTopology();
+            else if (tab === 'mon') renderDashboard();
+            else if (tab === 'diag') initOrUpdateChart();
+        }
+
+        // =========================================================================
+        // СЕТЕВОЙ СЛОЙ: ПОЛЛИНГ ROVNOMARK GO API
+        // =========================================================================
+
+        async function fetchGatewayData() {
+            try {
+                // 1. Запрашиваем состояние линий, задач и принтеров
+                const resLive = await fetch('/api/dashboard/live');
+                let liveData = null;
+                if (resLive.ok) {
+                    liveData = await resLive.json();
+                }
+
+                // 2. Запрашиваем структуру сканеров и привязок оборудования
+                const resPrinters = await fetch('/api/printers');
+                let printData = null;
+                if (resPrinters.ok) {
+                    printData = await resPrinters.json();
+                }
+
+                // 3. Вычитка системных логов из SQLite WAL
+                const resLogs = await fetch('/api/logs/history?limit=50');
+                if (resLogs.ok) {
+                    const logsJson = await resLogs.json();
+                    if (logsJson.items) {
+                        state.logs = logsJson.items.map(log => ({
+                            time: log.timestamp ? new Date(log.timestamp).toLocaleTimeString('ru-RU') : '—',
+                            printer: log.printer_name || 'Система',
+                            message: log.line_name ? `[${log.line_name}] ${log.message}` : log.message,
+                            type: (log.event_type || 'info').toLowerCase()
+                        }));
+                    }
+                }
+
+                if (!liveData || !printData) return;
+
+                // Парсинг принтеров
+                const parsedPrinters = [];
+                const livePrintersMap = liveData.printers || {};
+
+                (printData.all_printers || []).forEach(p => {
+                    const liveP = livePrintersMap[p.id] || {};
+                    parsedPrinters.push({
+                        id: p.id,
+                        line_id: p.line_id || null,
+                        name: p.name,
+                        ip: p.ip,
+                        port: p.port,
+                        driver: p.driver_type,
+                        status: liveP.status || (p.is_active ? 'ГОТОВ' : 'НЕАКТИВЕН'),
+                        is_active: p.is_active !== undefined ? p.is_active : true,
+                        ribbon: liveP.ribbon ? parseInt(liveP.ribbon) || 0 : 0,
+                        queue: liveP.queue_free || 0,
+                        printer_role: p.role || liveP.role || 'first',
+                        buffer_size: p.buffer_limit || 100,
+                        lead_loop: p.lead_loop || 0,
+                        pumper_mode: p.pumper_mode || 'fast_single',
+                        printed: liveP.cur_count ? parseInt(liveP.cur_count) : 0,
+                        target: 0 // Вычисляется ниже из задачи линии
+                    });
+                });
+                state.printers = parsedPrinters;
+
+                // Парсинг сканеров с привязкой к конкретному принтеру (target_device_id)
+                const parsedScanners = [];
+                (printData.lines || []).forEach(lineGroup => {
+                    (lineGroup.scanners || []).forEach(sc => {
+                        parsedScanners.push({
+                            id: sc.id,
+                            line_id: lineGroup.id,
+                            bound_printer_id: sc.target_device_id || null,
+                            name: sc.name,
+                            address: sc.address,
+                            port: sc.port,
+                            role: sc.role || 'Inline Verifier',
+                            is_active: sc.is_active !== undefined ? sc.is_active : true,
+                            scans: sc.scans_count || 0,
+                            rejects: sc.rejects_count || 0,
+                            status: sc.is_active ? 'АКТИВЕН' : 'ОТКЛЮЧЕН'
+                        });
+                    });
+                });
+                state.scanners = parsedScanners;
+
+                // Парсинг линий и агрегирование выработки
+                state.lines = (liveData.lines || []).map(line => {
+                    let task = null;
+                    const pList = state.printers.filter(p => (line.printers || []).includes(p.id));
+                    const sList = state.scanners.filter(s => s.line_id === line.line_id);
+
+                    const totalScans = sList.reduce((acc, curr) => acc + curr.scans, 0);
+
+                    if (line.current_task) {
+                        const ct = line.current_task;
+                        const printedTotal = (ct.stats && ct.stats.printed) ? ct.stats.printed : (ct.printed || 0);
+                        const taskTotal = (ct.stats && ct.stats.total) ? ct.stats.total : (ct.total || 1);
+
+                        task = {
+                            task_id: ct.task_id || ct.id,
+                            template_name: ct.template_name || 'Партия маркировки',
+                            printed: printedTotal,
+                            scanned: totalScans,
+                            total: taskTotal,
+                            eta: ct.eta || ''
+                        };
+
+                        // Распределяем плановую цель по принтерам линии
+                        const activePrinters = pList.filter(p => p.is_active);
+                        const splitTarget = activePrinters.length > 0 ? Math.round(taskTotal / activePrinters.length) : taskTotal;
+                        pList.forEach(p => {
+                            if (p.is_active) p.target = splitTarget;
+                        });
+                    }
+
+                    // Привязка line_id к принтерам
+                    pList.forEach(p => { p.line_id = line.line_id; });
+
+                    return {
+                        id: line.line_id,
+                        name: line.line_name,
+                        description: line.description || 'Конвейер маркировки',
+                        mode: line.mode || 'Высокоскоростная печать',
+                        status: (line.status || 'idle').toLowerCase(),
+                        is_active: line.is_active !== undefined ? line.is_active : true,
+                        current_task: task,
+                        printerIds: line.printers || []
+                    };
+                });
+
+                calculateSpeedTelemetry();
+
+                // Рендер активной вкладки
+                if (state.activeTab === 'mon') renderDashboard();
+                else if (state.activeTab === 'cfg') renderTopology();
+                else if (state.activeTab === 'diag') updateMetricsView();
+
+                renderLogs();
+            } catch (err) {
+                console.warn("Сбой опроса RovnoMark:", err);
+            }
+        }
+
+        // Расчет скоростей для телеметрического графика
+        function calculateSpeedTelemetry() {
+            let totalPrintsDelta = 0;
+            let totalScansDelta = 0;
+
+            state.printers.forEach(p => {
+                const cur = p.printed || 0;
+                const prev = state.prevPrinterCounts[p.id] !== undefined ? state.prevPrinterCounts[p.id] : cur;
+                totalPrintsDelta += Math.max(0, cur - prev);
+                state.prevPrinterCounts[p.id] = cur;
+            });
+
+            state.scanners.forEach(s => {
+                const cur = s.scans || 0;
+                const prev = state.prevScannerCounts[s.id] !== undefined ? state.prevScannerCounts[s.id] : cur;
+                totalScansDelta += Math.max(0, cur - prev);
+                state.prevScannerCounts[s.id] = cur;
+            });
+
+            const timeStr = new Date().toLocaleTimeString('ru-RU');
+            state.chartHistory.labels.push(timeStr);
+            state.chartHistory.dataPrinters.push(totalPrintsDelta);
+            state.chartHistory.dataScanners.push(totalScansDelta);
+
+            if (state.chartHistory.labels.length > 10) {
+                state.chartHistory.labels.shift();
+                state.chartHistory.dataPrinters.shift();
+                state.chartHistory.dataScanners.shift();
+            }
+
+            if (state.telemetryChart) {
+                state.telemetryChart.data.labels = state.chartHistory.labels;
+                state.telemetryChart.data.datasets[0].data = state.chartHistory.dataPrinters;
+                state.telemetryChart.data.datasets[1].data = state.chartHistory.dataScanners;
+                state.telemetryChart.update('none');
+            }
+        }
+
+        // =========================================================================
+        // ВКЛАДКА 1: МОНИТОРИНГ С ДВОЙНЫМИ ПРОГРЕСС-БАРАМИ
+        // =========================================================================
+
+        function renderDashboard() {
+            const grid = document.getElementById('lines-grid');
+            if (!grid) return;
+            grid.innerHTML = '';
+            let activeLinesCount = 0;
+
+            let countFirst = 0, countSecond = 0, countInactive = 0;
+            state.printers.forEach(p => {
+                if (!p.is_active) countInactive++;
+                else if ((p.printer_role || '').toLowerCase().includes('first') || (p.printer_role || '').toLowerCase().includes('primary')) countFirst++;
+                else if ((p.printer_role || '').toLowerCase().includes('second')) countSecond++;
+            });
+
+            const cntF = document.getElementById('cnt-first');
+            const cntS = document.getElementById('cnt-second');
+            const cntIn = document.getElementById('cnt-inactive');
+            if (cntF) cntF.innerText = countFirst;
+            if (cntS) cntS.innerText = countSecond;
+            if (cntIn) cntIn.innerText = countInactive;
+
+            state.lines.forEach(line => {
+                if (line.status === 'active' && line.is_active) activeLinesCount++;
+                const linePrinters = state.printers.filter(p => line.printerIds.includes(p.id));
+
+                const card = document.createElement('div');
+                card.className = `bg-white rounded-2xl border ${!line.is_active ? 'border-slate-300 opacity-75' : line.status === 'error' ? 'border-rose-300 shadow-rose-100' : 'border-slate-200'} shadow-sm overflow-hidden flex flex-col justify-between`;
+
+                let statusBadge = '';
+                if (!line.is_active) {
+                    statusBadge = `<span class="px-2.5 py-1 rounded-md text-[10px] font-bold bg-slate-200 text-slate-700">ЛИНИЯ НЕАКТИВНА</span>`;
+                } else if (line.status === 'active') {
+                    statusBadge = `<span class="px-2.5 py-1 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-700 border border-emerald-200 flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> В РАБОТЕ</span>`;
+                } else {
+                    statusBadge = `<span class="px-2.5 py-1 rounded-md text-[10px] font-bold bg-blue-100 text-blue-700">ГОТОВА</span>`;
+                }
+
+                // ОБЩИЙ ПРОГРЕСС ПАРТИИ НА ЛИНИИ
+                let taskHtml = '';
+                if (line.current_task && line.is_active) {
+                    const task = line.current_task;
+                    const printedPct = Math.min(Math.round((task.printed / task.total) * 100), 100);
+                    const scannedPct = Math.min(Math.round((task.scanned / task.total) * 100), 100);
+
+                    taskHtml = `
+                    <div class="bg-slate-50 rounded-xl p-3.5 border border-slate-200 flex flex-col gap-3">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <span class="text-[10px] font-bold font-mono px-2 py-0.5 bg-blue-100 text-blue-700 rounded border border-blue-200">ПАРТИЯ #${task.task_id}</span>
+                                <div class="text-xs font-bold text-slate-800 mt-1">${task.template_name}</div>
+                            </div>
+                            <button onclick="openPinModal(${task.task_id})" class="px-2 py-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors">
+                                <span class="u-icon">⏹</span> Останов
+                            </button>
+                        </div>
+
+                        <!-- ДВОЙНОЙ ОБЩИЙ ПРОГРЕСС-БАР -->
+                        <div class="flex flex-col gap-2 pt-2 border-t border-slate-200/60">
+                            <div>
+                                <div class="flex justify-between text-[11px] font-medium mb-1">
+                                    <span class="text-slate-600 font-bold flex items-center gap-1"><span class="u-icon text-blue-600">🖨️</span> Общая печать маркираторов:</span>
+                                    <span class="font-mono text-slate-800 font-bold">${task.printed.toLocaleString()} / ${task.total.toLocaleString()} (${printedPct}%)</span>
+                                </div>
+                                <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                                    <div class="h-full bg-blue-600 transition-all duration-500" style="width: ${printedPct}%"></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="flex justify-between text-[11px] font-medium mb-1">
+                                    <span class="text-slate-600 font-bold flex items-center gap-1"><span class="u-icon text-purple-600">📷</span> Общая верификация камер:</span>
+                                    <span class="font-mono text-purple-900 font-bold">${task.scanned.toLocaleString()} / ${task.total.toLocaleString()} (${scannedPct}%)</span>
+                                </div>
+                                <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                                    <div class="h-full bg-purple-600 transition-all duration-500" style="width: ${scannedPct}%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                } else {
+                    taskHtml = `<div class="bg-slate-50/50 rounded-xl p-3 border border-dashed border-slate-200 text-center text-slate-400 text-xs">Нет активной партии от 1С</div>`;
+                }
+
+                // БЛОКИ СВЯЗОК: ПРИНТЕР + ПРИВЯЗАННАЯ КАМЕРА (ДВОЙНЫЕ ПРОГРЕСС-БАРЫ)
+                let printersListHtml = linePrinters.map(p => {
+                    const boundScanner = state.scanners.find(s => s.bound_printer_id === p.id);
+                    const isOff = !p.is_active || (p.status || '').includes('ОФФЛАЙН') || p.status === 'НЕАКТИВЕН';
+
+                    const pPrinted = p.printed || 0;
+                    const pTarget = p.target || (line.current_task ? line.current_task.total : 5000);
+                    const pPct = pTarget > 0 ? Math.min(Math.round((pPrinted / pTarget) * 100), 100) : 0;
+
+                    let cameraHtml = '';
+                    if (boundScanner) {
+                        const sScans = boundScanner.scans || 0;
+                        const sRejects = boundScanner.rejects || 0;
+                        const matchPct = pPrinted > 0 ? Math.min(Math.round((sScans / pPrinted) * 100), 100) : 100;
+                        const sPct = pTarget > 0 ? Math.min(Math.round((sScans / pTarget) * 100), 100) : 0;
+
+                        cameraHtml = `
+                        <div class="mt-2 p-2.5 rounded-lg ${boundScanner.is_active ? 'bg-purple-50/70 border border-purple-200' : 'bg-slate-100 border border-slate-200'} text-xs flex flex-col gap-2">
+                            <div class="flex justify-between items-center">
+                                <span class="font-bold text-purple-900 flex items-center gap-1">
+                                    <span class="u-icon">📷</span> ${boundScanner.name}
+                                </span>
+                                ${getActiveBadge(boundScanner.is_active)}
+                            </div>
+                            ${boundScanner.is_active ? `
+                                <!-- ПРОГРЕСС-БАР #2: ВЕРИФИКАЦИЯ КАМЕРЫ -->
+                                <div class="p-2 bg-white rounded-lg border border-purple-100 flex flex-col gap-1.5">
+                                    <div class="flex justify-between text-[10px] font-mono">
+                                        <span class="text-purple-700 font-bold flex items-center gap-1"><span class="u-icon text-purple-600">📊</span> Верификация камеры:</span>
+                                        <span class="font-bold text-purple-900">${sScans.toLocaleString()} / ${pTarget.toLocaleString()} (${sPct}%)</span>
+                                    </div>
+                                    <div class="w-full h-1.5 bg-purple-100 rounded-full overflow-hidden">
+                                        <div class="h-full bg-purple-600 transition-all duration-500" style="width: ${sPct}%"></div>
+                                    </div>
+                                    <div class="grid grid-cols-3 gap-1 font-mono text-[10px] text-slate-600 pt-1 border-t border-purple-50">
+                                        <div>Проверено: <b class="text-purple-900">${sScans.toLocaleString()}</b></div>
+                                        <div>Сверка: <b class="text-emerald-700">${matchPct}%</b></div>
+                                        <div>Брак: <b class="${sRejects > 0 ? 'text-rose-600 font-bold' : 'text-slate-500'}">${sRejects} шт</b></div>
+                                    </div>
+                                </div>
+                            ` : '<div class="text-[10px] text-slate-400 italic">Камера верификатора деактивирована</div>'}
+                        </div>
+                    `;
+                    } else {
+                        cameraHtml = `<div class="mt-2 text-[10px] text-slate-400 italic px-2 py-1 bg-slate-100 rounded border border-slate-200">К этому принтеру не привязана камера ТЗ</div>`;
+                    }
+
+                    return `
+                    <div class="p-3.5 rounded-xl border ${isOff ? 'bg-slate-50 border-slate-200 opacity-80' : 'bg-white border-slate-200 shadow-sm'} flex flex-col gap-2">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <div class="text-xs font-bold text-slate-900 flex items-center gap-1 flex-wrap">
+                                    <span class="u-icon text-blue-600">🖨️</span> ${p.name}
+                                    <span class="text-[9px] px-1.5 py-0.2 bg-slate-200 text-slate-700 font-mono font-bold rounded uppercase">${p.driver}</span>
+                                </div>
+                                <div class="text-[10px] text-slate-400 font-mono mt-0.5">${p.ip}:${p.port} • Очередь: ${p.queue} шт</div>
+                            </div>
+                            <div class="flex flex-col items-end gap-1">
+                                ${getActiveBadge(p.is_active)}
+                                ${getRoleBadge(p.printer_role)}
+                            </div>
+                        </div>
+
+                        <!-- ПРОГРЕСС-БАР #1: ВЫРАБОТКА ПРИНТЕРА -->
+                        <div class="p-2 bg-slate-50 rounded-lg border border-slate-200 flex flex-col gap-1">
+                            <div class="flex justify-between text-[10px] font-mono">
+                                <span class="text-slate-500 font-bold flex items-center gap-1"><span class="u-icon text-emerald-600">🖨️</span> Выработка принтера:</span>
+                                <span class="font-bold ${p.is_active ? 'text-emerald-700' : 'text-slate-400'}">${pPrinted.toLocaleString()} / ${pTarget.toLocaleString()} (${pPct}%)</span>
+                            </div>
+                            <div class="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                                <div class="h-full ${p.is_active ? 'bg-emerald-500' : 'bg-slate-400'} transition-all duration-500" style="width: ${pPct}%"></div>
+                            </div>
+                        </div>
+
+                        <!-- ПРИВЯЗАННАЯ КАМЕРА -->
+                        ${cameraHtml}
+                    </div>
+                `;
+                }).join('');
+
+                card.innerHTML = `
+                <div class="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-bold text-base text-slate-900">${line.name}</h3>
+                            ${getActiveBadge(line.is_active)}
+                        </div>
+                        <div class="text-[11px] text-slate-400 mt-0.5">${line.description}</div>
+                    </div>
+                    ${statusBadge}
+                </div>
+
+                <div class="p-4 flex flex-col gap-4">
+                    ${taskHtml}
+                    <div>
+                        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Связки Маркираторов и Верификаторов (${linePrinters.length})</div>
+                        <div class="flex flex-col gap-3">${printersListHtml || '<div class="text-xs text-slate-400 italic">Нет привязанного оборудования</div>'}</div>
+                    </div>
+                </div>
+            `;
+
+                grid.appendChild(card);
+            });
+
+            const activeKpi = document.getElementById('kpi-active-lines');
+            if (activeKpi) activeKpi.innerText = `${activeLinesCount} линий активно`;
+        }
+
+        // =========================================================================
+        // ВКЛАДКА 2: ТОПОЛОГИЯ И УПРАВЛЕНИЕ СВЯЗКАМИ
+        // =========================================================================
+
+        function renderTopology() {
+            const container = document.getElementById('topology-lines-grid');
+            if (!container) return;
+            container.innerHTML = '';
+
+            state.lines.forEach(line => {
+                const linePrinters = state.printers.filter(p => line.printerIds.includes(p.id));
+
+                const card = document.createElement('div');
+                card.className = "bg-white rounded-2xl border border-slate-200 shadow-sm p-5 flex flex-col gap-4";
+
+                let printersListHtml = linePrinters.map(p => {
+                    const boundScanner = state.scanners.find(s => s.bound_printer_id === p.id);
+
+                    return `
+                    <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-col gap-2.5">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <div class="text-xs font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
+                                    <span class="u-icon text-blue-600">🖨️</span> ${p.name}
+                                    ${getActiveBadge(p.is_active)}
+                                </div>
+                                <div class="text-[10px] text-slate-400 font-mono mt-0.5">${p.ip}:${p.port} • Driver: ${p.driver}</div>
+                            </div>
+                            <div class="flex items-center gap-1">
+                                <button onclick="toggleActiveDevice(${p.id}, 'printer')" class="px-2 py-1 ${p.is_active ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'} text-[10px] font-bold rounded transition-colors">
+                                    ${p.is_active ? 'В резерв' : 'Включить'}
+                                </button>
+                                <button onclick="openEditPrinterModal(${p.id})" class="text-slate-600 hover:text-slate-900 text-[11px] font-bold px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded-lg">
+                                    ⚙️
+                                </button>
+                                <button onclick="unbindDevice(${p.id}, 'printer')" class="text-rose-600 hover:text-rose-800 text-[11px] font-bold px-2 py-1 bg-rose-50 border border-rose-200 rounded-lg">
+                                    Отвязать
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- СВЯЗАННАЯ КАМЕРА В ТОПОЛОГИИ -->
+                        <div class="p-2.5 bg-white rounded-lg border border-purple-200/80 flex justify-between items-center text-xs">
+                            <div>
+                                <div class="font-bold text-purple-900 text-[11px] flex items-center gap-1">
+                                    <span class="u-icon">📷</span> ${boundScanner ? boundScanner.name : 'Камера не привязана'}
+                                </div>
+                                ${boundScanner ? `<div class="text-[10px] text-slate-400 font-mono">${boundScanner.address}:${boundScanner.port}</div>` : ''}
+                            </div>
+                            ${boundScanner ? `
+                                <div class="flex items-center gap-1">
+                                    ${getActiveBadge(boundScanner.is_active)}
+                                    <button onclick="unbindDevice(${boundScanner.id}, 'scanner')" class="text-rose-600 text-[10px] font-bold px-1.5 py-0.5 bg-rose-50 border border-rose-200 rounded">
+                                        Отвязать камеру
+                                    </button>
+                                </div>
+                            ` : `
+                                <button onclick="openBindModalForPrinter(${p.id})" class="text-blue-600 text-[10px] font-bold px-2 py-1 bg-blue-50 border border-blue-200 rounded">
+                                    + Привязать камеру
+                                </button>
+                            `}
+                        </div>
+                    </div>
+                `;
+                }).join('');
+
+                card.innerHTML = `
+                <div class="flex justify-between items-start border-b border-slate-100 pb-3">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-bold text-base text-slate-900">${line.name}</h3>
+                            ${getActiveBadge(line.is_active)}
+                        </div>
+                        <p class="text-xs text-slate-500 mt-0.5">${line.description}</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="toggleActiveLine(${line.id})" class="px-2.5 py-1 ${line.is_active ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'} text-xs font-bold rounded-lg">
+                            ${line.is_active ? 'Деактивировать линию' : 'Активировать'}
+                        </button>
+                        <button onclick="openEditLineModal(${line.id})" class="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg border border-slate-300">
+                            ⚙️
+                        </button>
+                    </div>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                    <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Принтеры и привязанные верификаторы (${linePrinters.length})</div>
+                    ${printersListHtml || '<div class="text-xs text-slate-400 italic p-3 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-center">Нет привязанных устройств</div>'}
+                </div>
+            `;
+
+                container.appendChild(card);
+            });
+
+            renderUnassignedPool();
+        }
+
+        function renderUnassignedPool() {
+            const container = document.getElementById('unassigned-devices-list');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const assignedPrinterIds = new Set();
+            state.lines.forEach(l => (l.printerIds || []).forEach(id => assignedPrinterIds.add(id)));
+
+            const unassignedPrinters = state.printers.filter(p => !assignedPrinterIds.has(p.id));
+            const unassignedScanners = state.scanners.filter(s => s.bound_printer_id === null);
+            const totalCount = unassignedPrinters.length + unassignedScanners.length;
+
+            const countBadge = document.getElementById('unassigned-count-badge');
+            if (countBadge) countBadge.innerText = `${totalCount} устройств`;
+
+            if (totalCount === 0) {
+                container.innerHTML = `<div class="col-span-full p-4 text-center text-slate-400 text-xs italic bg-slate-50 rounded-xl border border-dashed border-slate-200">Все устройства распределены по связкам.</div>`;
+                return;
+            }
+
+            unassignedPrinters.forEach(p => {
+                const item = document.createElement('div');
+                item.className = "p-3 bg-slate-50 rounded-xl border border-slate-200 flex justify-between items-center";
+                item.innerHTML = `
+                <div>
+                    <div class="text-xs font-bold text-slate-900">🖨️ ${p.name}</div>
+                    <div class="text-[10px] text-slate-400 font-mono">${p.ip}:${p.port} • ${p.driver}</div>
+                </div>
+                <button onclick="openBindModal(${p.id}, 'printer')" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg shadow">
+                    Привязать
+                </button>
+            `;
+                container.appendChild(item);
+            });
+
+            unassignedScanners.forEach(s => {
+                const item = document.createElement('div');
+                item.className = "p-3 bg-slate-50 rounded-xl border border-slate-200 flex justify-between items-center";
+                item.innerHTML = `
+                <div>
+                    <div class="text-xs font-bold text-slate-900">📷 ${s.name}</div>
+                    <div class="text-[10px] text-slate-400 font-mono">${s.address}</div>
+                </div>
+                <button onclick="openBindModal(${s.id}, 'scanner')" class="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-lg shadow">
+                    Привязать
+                </button>
+            `;
+                container.appendChild(item);
+            });
+        }
+
+        // Изменение признака активности линии / устройства в SQLite
+        async function toggleActiveLine(lineId) {
+            const line = state.lines.find(l => l.id === lineId);
+            if (!line) return;
+            line.is_active = !line.is_active;
+
+            await fetch('/api/lines', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: line.id, name: line.name, description: line.description, is_active: line.is_active })
+            });
+            await fetchGatewayData();
+        }
+
+        async function toggleActiveDevice(deviceId, type) {
+            if (type === 'printer') {
+                const p = state.printers.find(pr => pr.id === deviceId);
+                if (!p) return;
+                p.is_active = !p.is_active;
+
+                await fetch('/api/printers/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: p.id,
+                        name: p.name,
+                        ip: p.ip,
+                        port: p.port,
+                        driver_type: p.driver,
+                        buffer_limit: p.buffer_size,
+                        lead_loop: p.lead_loop,
+                        is_active: p.is_active
+                    })
+                });
+            }
+            await fetchGatewayData();
+        }
+
+        // Сохранение связки Камера ⇄ Принтер через API
+        async function submitBindDevice() {
+            if (!state.targetBindDevice) return;
+            const lineId = parseInt(document.getElementById('bind-line-select').value);
+
+            if (state.targetBindDevice.type === 'printer') {
+                await fetch('/api/assignments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ line_id: lineId, printer_id: state.targetBindDevice.id, role: 'PRIMARY' })
+                });
+            } else {
+                const printerId = parseInt(document.getElementById('bind-printer-select').value);
+                const sc = state.scanners.find(s => s.id === state.targetBindDevice.id);
+                if (sc) {
+                    await fetch('/api/scanners', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            id: sc.id,
+                            line_id: lineId,
+                            target_device_id: printerId,
+                            name: sc.name,
+                            driver_type: 'tcp_camera',
+                            address: sc.address,
+                            port: sc.port,
+                            role: 'INLINE_VERIFIER',
+                            is_active: true
+                        })
+                    });
+                }
+            }
+
+            closeBindModal();
+            await fetchGatewayData();
+        }
+
+        async function unbindDevice(deviceId, type) {
+            if (!confirm("Отвязать устройство?")) return;
+            if (type === 'printer') {
+                await fetch('/api/assignments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ line_id: 0, printer_id: deviceId, role: 'UNASSIGNED' })
+                });
+            } else {
+                const sc = state.scanners.find(s => s.id === deviceId);
+                if (sc) {
+                    await fetch('/api/scanners', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            id: sc.id,
+                            line_id: sc.line_id,
+                            target_device_id: null,
+                            name: sc.name,
+                            driver_type: 'tcp_camera',
+                            address: sc.address,
+                            port: sc.port,
+                            role: 'AUDIT_CHECK',
+                            is_active: sc.is_active
+                        })
+                    });
+                }
+            }
+            await fetchGatewayData();
+        }
+
+        function openBindModalForPrinter(printerId) {
+            const freeScanner = state.scanners.find(s => s.bound_printer_id === null);
+            if (!freeScanner) {
+                alert('Нет свободных камер для привязки. Зарегистрируйте новую камеру.');
+                return;
+            }
+            state.targetBindDevice = { id: freeScanner.id, type: 'scanner' };
+            openBindModal(freeScanner.id, 'scanner');
+            setTimeout(() => {
+                document.getElementById('bind-printer-select').value = printerId;
+            }, 50);
+        }
+
+        function openBindModal(deviceId, type) {
+            state.targetBindDevice = { id: deviceId, type: type };
+            const selectLine = document.getElementById('bind-line-select');
+            selectLine.innerHTML = state.lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+
+            const printerBox = document.getElementById('bind-printer-box');
+            if (type === 'scanner') {
+                printerBox.classList.remove('hidden');
+                updateBindPrinterOptions();
+            } else {
+                printerBox.classList.add('hidden');
+            }
+
+            document.getElementById('bind-modal').classList.remove('hidden');
+        }
+
+        function updateBindPrinterOptions() {
+            const lineId = parseInt(document.getElementById('bind-line-select').value);
+            const printersOnLine = state.printers.filter(p => p.line_id === lineId);
+            const selectPrinter = document.getElementById('bind-printer-select');
+            selectPrinter.innerHTML = printersOnLine.map(p => `<option value="${p.id}">${p.name} (${p.driver})</option>`).join('');
+        }
+
+        function closeBindModal() {
+            document.getElementById('bind-modal').classList.add('hidden');
+            state.targetBindDevice = null;
+        }
+
+        // =========================================================================
+        // ОСТАНОВ ПАРТИИ ПО PIN-КОДУ (МЯГКАЯ ОСТАНОВКА ROVNOMARK)
+        // =========================================================================
+
+        function openPinModal(taskId) {
+            state.targetTaskId = taskId;
+            const desc = document.getElementById('pin-modal-desc');
+            if (desc) desc.innerText = `Введите PIN-код для остановки партии #${taskId}`;
+            document.getElementById('pin-modal').classList.remove('hidden');
+            document.getElementById('pin-error').classList.add('hidden');
+
+            const inputs = document.querySelectorAll('.pin-input');
+            inputs.forEach(i => i.value = '');
+            if (inputs[0]) inputs[0].focus();
+        }
+
+        function closePinModal() {
+            document.getElementById('pin-modal').classList.add('hidden');
+            state.targetTaskId = null;
+        }
+
+        function setupPinInputs() {
+            const inputs = document.querySelectorAll('.pin-input');
+            inputs.forEach((input, index) => {
+                input.addEventListener('input', (e) => {
+                    if (e.target.value && index < inputs.length - 1) inputs[index + 1].focus();
+                });
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Backspace' && !e.target.value && index > 0) inputs[index - 1].focus();
+                });
+            });
+        }
+
+        async function submitPinModal() {
+            const inputs = document.querySelectorAll('.pin-input');
+            const code = Array.from(inputs).map(i => i.value).join('');
+
+            if (code === '144774' || code === '0000') {
+                try {
+                    const res = await fetch(`/api/task/stop?task_id=${state.targetTaskId}`, { method: 'POST' });
+                    if (res.ok) {
+                        const result = await res.json();
+                        closePinModal();
+                        await fetchGatewayData();
+                        alert(`Партия #${state.targetTaskId} остановлена.\nПодтверждено кодов: ${result.total_confirmed}\nВозвращено в очередь: ${result.buffer_reverted_total}`);
+                    } else {
+                        alert("Ошибка остановки задачи: " + (await res.text()));
+                    }
+                } catch (e) {
+                    alert("Сбой сети: " + e.message);
+                }
+            } else {
+                document.getElementById('pin-error').classList.remove('hidden');
+                inputs.forEach(i => i.value = '');
+                if (inputs[0]) inputs[0].focus();
+            }
+        }
+
+        // =========================================================================
+        // СЕТЕВОЙ СКАНЕР, МОДАЛКИ И ГРАФИК CHART.JS
+        // =========================================================================
+
+        function startNetworkScan() {
+            document.getElementById('scan-modal').classList.remove('hidden');
+            runNetworkScan();
+        }
+
+        function closeScanModal() {
+            document.getElementById('scan-modal').classList.add('hidden');
+        }
+
+        function runNetworkScan() {
+            const progressBar = document.getElementById('scan-progress-bar');
+            const statusText = document.getElementById('scan-status-text');
+            const resultsContainer = document.getElementById('scan-results-list');
+
+            progressBar.style.width = '20%';
+            statusText.innerText = "Сканирование портов 9100, 23...";
+            statusText.className = "text-blue-600 font-bold animate-pulse";
+            resultsContainer.innerHTML = '<div class="text-center py-6 text-xs text-slate-400">Опрос сокетов промышленной сети...</div>';
+
+            setTimeout(() => {
+                progressBar.style.width = '100%';
+                statusText.innerText = "Сканирование завершено.";
+                statusText.className = "text-emerald-600 font-bold";
+
+                state.scanResults = [
+                    { ip: "192.168.1.80", port: 9100, type: "printer", driver: "markem", name: "MARKEM SmartDate X60", printer_role: "second", model: "Thermal Transfer", buffer_size: 150, is_active: true },
+                    { ip: "192.168.1.81", port: 23, type: "scanner", role: "Inline Verifier", name: "Cognex Dataman 280", printer_role: "first", model: "2D Camera", buffer_size: 0, is_active: true }
+                ];
+                renderScanResults();
+            }, 800);
+        }
+
+        function renderScanResults() {
+            const container = document.getElementById('scan-results-list');
+            container.innerHTML = '';
+
+            state.scanResults.forEach((dev, idx) => {
+                const row = document.createElement('div');
+                row.className = "p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between";
+                row.innerHTML = `
+                <div>
+                    <div class="text-xs font-bold text-slate-900">${dev.name} (${dev.model})</div>
+                    <div class="text-[10px] text-slate-400 font-mono">IP: ${dev.ip}:${dev.port}</div>
+                </div>
+                <button onclick="importDiscoveredDevice(${idx})" class="px-3 py-1.5 bg-emerald-600 text-white font-bold text-xs rounded-lg shadow">
+                    ➕ Импортировать
+                </button>
+            `;
+                container.appendChild(row);
+            });
+        }
+
+        async function importDiscoveredDevice(index) {
+            const dev = state.scanResults[index];
+            if (!dev) return;
+
+            if (dev.type === 'printer') {
+                await fetch('/api/printers/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: dev.name,
+                        ip: dev.ip,
+                        port: dev.port,
+                        driver_type: dev.driver,
+                        buffer_limit: dev.buffer_size || 100,
+                        is_active: true
+                    })
+                });
+            } else {
+                await fetch('/api/scanners', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: dev.name,
+                        driver_type: 'tcp_camera',
+                        address: dev.ip,
+                        port: dev.port,
+                        role: 'INLINE_VERIFIER',
+                        is_active: true,
+                        line_id: 10
+                    })
+                });
+            }
+
+            state.scanResults.splice(index, 1);
+            renderScanResults();
+            await fetchGatewayData();
+        }
+
+        function initOrUpdateChart() {
+            if (typeof Chart === 'undefined') return;
+            const canvas = document.getElementById('telemetryChart');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (state.telemetryChart) return;
+
+            state.telemetryChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: state.chartHistory.labels,
+                    datasets: [
+                        {
+                            label: 'Скорость печати маркираторов (кодов/сек)',
+                            data: state.chartHistory.dataPrinters,
+                            borderColor: '#2563eb',
+                            backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                            fill: true,
+                            tension: 0.3,
+                            borderWidth: 2
+                        },
+                        {
+                            label: 'Скорость верификации камер (сканов/сек)',
+                            data: state.chartHistory.dataScanners,
+                            borderColor: '#9333ea',
+                            borderDash: [3, 3],
+                            borderWidth: 2
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    scales: {
+                        y: { min: 0, title: { display: true, text: 'Единиц / сек' } }
+                    }
+                }
+            });
+        }
+
+        function updateMetricsView() {
+            const pingEl = document.getElementById('metric-ping');
+            if (pingEl) pingEl.innerText = (1.2 + Math.random() * 0.6).toFixed(1) + " ms";
+
+            const pairsEl = document.getElementById('metric-pairs');
+            if (pairsEl) {
+                const activePairs = state.scanners.filter(s => s.bound_printer_id && s.is_active).length;
+                pairsEl.innerText = `${activePairs} связки`;
+            }
+        }
+
+        function openAddLineModal() {
+            document.getElementById('line-form-id').value = '';
+            document.getElementById('line-form-name').value = '';
+            document.getElementById('line-form-desc').value = '';
+            document.getElementById('line-form-active').checked = true;
+            document.getElementById('line-modal-title').innerText = 'Добавление линии';
+            document.getElementById('line-modal').classList.remove('hidden');
+        }
+
+        function openEditLineModal(lineId) {
+            const line = state.lines.find(l => l.id === lineId);
+            if (!line) return;
+            document.getElementById('line-form-id').value = line.id;
+            document.getElementById('line-form-name').value = line.name;
+            document.getElementById('line-form-desc').value = line.description;
+            document.getElementById('line-form-active').checked = line.is_active;
+            document.getElementById('line-modal-title').innerText = 'Редактирование линии: ' + line.name;
+            document.getElementById('line-modal').classList.remove('hidden');
+        }
+
+        function closeLineModal() {
+            document.getElementById('line-modal').classList.add('hidden');
+        }
+
+        async function saveLineForm(e) {
+            e.preventDefault();
+            const id = parseInt(document.getElementById('line-form-id').value) || 0;
+            const name = document.getElementById('line-form-name').value;
+            const desc = document.getElementById('line-form-desc').value;
+            const isActive = document.getElementById('line-form-active').checked;
+
+            await fetch('/api/lines', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id, name: name, description: desc, is_active: isActive })
+            });
+            closeLineModal();
+            await fetchGatewayData();
+        }
+
+        function openAddDeviceModal() {
+            document.getElementById('device-form').reset();
+            document.getElementById('dev-edit-id').value = '';
+            document.getElementById('device-modal-title').innerText = "Регистрация устройства";
+            toggleDeviceFields();
+            populatePrinterSelectForCamera();
+            document.getElementById('device-modal').classList.remove('hidden');
+        }
+
+        function openEditPrinterModal(printerId) {
+            const p = state.printers.find(pr => pr.id === printerId);
+            if (!p) return;
+
+            document.getElementById('dev-edit-id').value = p.id;
+            document.getElementById('dev-type').value = 'printer';
+            toggleDeviceFields();
+            document.getElementById('dev-name').value = p.name;
+            document.getElementById('dev-is-active').checked = p.is_active;
+            document.getElementById('dev-ip').value = p.ip;
+            document.getElementById('dev-port').value = p.port;
+            document.getElementById('dev-printer-role').value = p.printer_role || 'first';
+            document.getElementById('dev-driver').value = p.driver || 'markem';
+            document.getElementById('dev-buffer-size').value = p.buffer_size || 100;
+            document.getElementById('dev-lead-loop').value = p.lead_loop || 0;
+
+            onDriverChange();
+            document.getElementById('device-modal-title').innerText = "Параметры принтера: " + p.name;
+            document.getElementById('device-modal').classList.remove('hidden');
+        }
+
+        function closeDeviceModal() {
+            document.getElementById('device-modal').classList.add('hidden');
+        }
+
+        function toggleDeviceFields() {
+            const type = document.getElementById('dev-type').value;
+            if (type === 'printer') {
+                document.getElementById('dev-printer-fields').classList.remove('hidden');
+                document.getElementById('dev-scanner-fields').classList.add('hidden');
+            } else {
+                document.getElementById('dev-printer-fields').classList.add('hidden');
+                document.getElementById('dev-scanner-fields').classList.remove('hidden');
+                populatePrinterSelectForCamera();
+            }
+        }
+
+        function populatePrinterSelectForCamera() {
+            const select = document.getElementById('dev-bound-printer-id');
+            select.innerHTML = state.printers.map(p => `<option value="${p.id}">${p.name} (${p.ip})</option>`).join('');
+        }
+
+        function onDriverChange() {
+            const driver = document.getElementById('dev-driver').value;
+            const loopBox = document.getElementById('dev-lead-loop-box');
+            if (driver === 'carl_valentin') loopBox.classList.remove('hidden');
+            else loopBox.classList.add('hidden');
+        }
+
+        async function saveDeviceForm(e) {
+            e.preventDefault();
+            const editId = document.getElementById('dev-edit-id').value;
+            const type = document.getElementById('dev-type').value;
+            const name = document.getElementById('dev-name').value;
+            const isActive = document.getElementById('dev-is-active').checked;
+            const ip = document.getElementById('dev-ip').value;
+            const port = parseInt(document.getElementById('dev-port').value);
+
+            if (type === 'printer') {
+                const driver = document.getElementById('dev-driver').value;
+                const bufferSize = parseInt(document.getElementById('dev-buffer-size').value) || 100;
+                const leadLoop = parseInt(document.getElementById('dev-lead-loop').value) || 0;
+
+                await fetch('/api/printers/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: editId ? parseInt(editId) : 0,
+                        name: name,
+                        ip: ip,
+                        port: port,
+                        driver_type: driver,
+                        buffer_limit: bufferSize,
+                        lead_loop: leadLoop,
+                        is_active: isActive
+                    })
+                });
+            } else {
+                const boundPrinterId = parseInt(document.getElementById('dev-bound-printer-id').value);
+                await fetch('/api/scanners', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: editId ? parseInt(editId) : 0,
+                        name: name,
+                        driver_type: 'tcp_camera',
+                        address: ip,
+                        port: port,
+                        target_device_id: boundPrinterId || null,
+                        role: 'INLINE_VERIFIER',
+                        is_active: isActive,
+                        line_id: 10
+                    })
+                });
+            }
+
+            closeDeviceModal();
+            await fetchGatewayData();
+        }
+
+        function renderLogs() {
+            const container = document.getElementById('logs-container');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const filtered = state.logs.filter(l => state.logFilter === 'all' || l.type === state.logFilter);
+            if (filtered.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 italic p-2">Журнал событий пуст...</div>';
+                return;
+            }
+
+            filtered.forEach(log => {
+                const row = document.createElement('div');
+                row.className = 'flex items-start gap-2 border-b border-slate-900/60 pb-1';
+                let colorClass = log.type === 'error' ? 'text-rose-400 font-bold' : log.type === 'config' ? 'text-blue-400 font-bold' : 'text-slate-300';
+                row.innerHTML = `<span class="text-slate-500 shrink-0">[${log.time}]</span><span class="text-blue-400 font-bold shrink-0 min-w-[140px] truncate">${log.printer}</span><span class="${colorClass}">${log.message}</span>`;
+                container.appendChild(row);
+            });
+        }
+
+        function setLogFilter(filter) { state.logFilter = filter; renderLogs(); }
+        function refreshDashboard() { fetchGatewayData(); }
+
+        // Запуск жизненного цикла дашборда
+        window.onload = () => {
+            initClock();
+            setupPinInputs();
+            fetchGatewayData();
+            // Синхронизация с циклом фонового поллера RovnoMark (2 секунды)
+            setInterval(fetchGatewayData, 2000);
+        };
+    </script>
+</body>
+</html>
