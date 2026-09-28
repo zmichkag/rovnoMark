@@ -208,7 +208,8 @@ func (s *Server) handleTaskAppend(w http.ResponseWriter, r *http.Request) {
 			}
 			item.Code = parsedMark.ToDBFormat()
 		} else {
-			item.Code = strings.TrimSpace(item.Code)
+			// Если валидация выключена — ВСЕ РАВНО нормализуем под единый канонический формат!
+			item.Code = marking.NormalizeToCanonical(item.Code)
 		}
 
 		inboundItems = append(inboundItems, item)
