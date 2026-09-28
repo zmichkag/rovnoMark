@@ -42,31 +42,64 @@ type ShortDataMatrix struct {
 	HasStartFNC1 bool
 }
 
-func ParseAndValidateShortGS1(raw string) (*ShortDataMatrix, error) {
+// NormalizeToCanonical преобразует любые внешние диалекты и экранирования (1C, JSON, Videojet, TSC)
+// в единый канонический формат хранения БД с маркером <GS>.
+// Безопасен для длинных кодов (AI 91, 92), не ломает структуру данных при отключенной валидации.
+func NormalizeToCanonical(raw string) string {
 	work := strings.TrimSpace(raw)
+	if len(work) == 0 {
+		return ""
+	}
+
+	// 1. Срезаем стартовые FNC1 / служебные префиксы (в БД код должен начинаться строго с 01)
+	prefixesToTrim := []string{
+		"<fcn>", "<FCN>",
+		"<GS>", "<gs>",
+		ASCII_FNC1,
+		ASCII_GS,
+		"~1",
+		"~d029",
+		"{FNC1}",
+	}
+	for _, p := range prefixesToTrim {
+		if strings.HasPrefix(work, p) {
+			work = strings.TrimPrefix(work, p)
+			break
+		}
+	}
+
+	// 2. Унифицируем все возможные варианты разделителя групп в канонический <GS>
+	// Порядок важен: сначала длинные текстовые токены, затем сырые байты
+	replacer := strings.NewReplacer(
+		"\\u001d", "<GS>",
+		"\\u001D", "<GS>",
+		"\u001d", "<GS>",
+		"\u001D", "<GS>",
+		ASCII_GS, "<GS>",
+		"~d029", "<GS>",
+		"\\029", "<GS>",
+		"{FNC1}", "<GS>",
+	)
+	work = replacer.Replace(work)
+
+	// 3. Если где-то внутри остался одиночный ~1 перед AI (например ~193 или ~191) — меняем на <GS>
+	work = strings.ReplaceAll(work, "~191", "<GS>91")
+	work = strings.ReplaceAll(work, "~192", "<GS>92")
+	work = strings.ReplaceAll(work, "~193", "<GS>93")
+
+	return work
+}
+
+func ParseAndValidateShortGS1(raw string) (*ShortDataMatrix, error) {
+	// Сначала пропускаем через нормализатор: чистим стартовый мусор и приводим разделители к <GS>
+	work := NormalizeToCanonical(raw)
 	if len(work) == 0 {
 		return nil, ErrEmptyCode
 	}
 
-	hasStartFNC1 := false
+	hasStartFNC1 := true // Для валидного GS1 DataMatrix наличие подразумевается стандартом
 
-	// 1. Проверка и отсечение стартового FNC1 (<fcn>, \xe8, \x1d, <GS>)
-	if strings.HasPrefix(strings.ToLower(work), "<fcn>") {
-		hasStartFNC1 = true
-		work = work[5:]
-	} else if strings.HasPrefix(work, ASCII_FNC1) || (len(work) > 0 && work[0] == 232) {
-		hasStartFNC1 = true
-		work = work[1:]
-	} else if strings.HasPrefix(work, ASCII_GS) || strings.HasPrefix(work, "<GS>") {
-		hasStartFNC1 = true
-		if strings.HasPrefix(work, "<GS>") {
-			work = work[4:]
-		} else {
-			work = work[1:]
-		}
-	}
-
-	// 2. Группа 1: AI '01' + 14 цифр GTIN
+	// 1. Группа 1: AI '01' + 14 цифр GTIN
 	if !strings.HasPrefix(work, "01") {
 		return nil, ErrMissingAI01
 	}
@@ -93,7 +126,7 @@ func ParseAndValidateShortGS1(raw string) (*ShortDataMatrix, error) {
 	// Отрезаем валидный 14-значный GTIN
 	work = work[14:]
 
-	// 3. Группа 2: AI '21' + 6 символов
+	// 2. Группа 2: AI '21' + 6 символов
 	if !strings.HasPrefix(work, "21") {
 		return nil, ErrMissingAI21
 	}
@@ -115,18 +148,16 @@ func ParseAndValidateShortGS1(raw string) (*ShortDataMatrix, error) {
 	}
 	work = work[6:]
 
-	// 4. Символ-разделитель GS / FNC1 (\x1d, <GS>, или "29")
+	// 3. Проверка символа-разделителя GS / FNC1 (после NormalizeToCanonical здесь всегда <GS>)
 	if strings.HasPrefix(work, "<GS>") {
 		work = work[4:]
-	} else if strings.HasPrefix(work, "29") {
+	} else if strings.HasPrefix(work, "29") { // Бывает в кривых выгрузках 1С как чистый текст
 		work = work[2:]
-	} else if len(work) > 0 && (work[0] == 29 || work[:1] == ASCII_GS) {
-		work = work[1:]
 	} else {
 		return nil, ErrMissingGS
 	}
 
-	// 5. Группа 3: AI '93' + 4 символа
+	// 4. Группа 3: AI '93' + 4 символа
 	if !strings.HasPrefix(work, "93") {
 		return nil, ErrMissingAI93
 	}
@@ -146,10 +177,17 @@ func ParseAndValidateShortGS1(raw string) (*ShortDataMatrix, error) {
 	}, nil
 }
 
+// ToDBFormat возвращает канонический формат для записи в SQLite: 01...21...<GS>93...
 func (m *ShortDataMatrix) ToDBFormat() string {
 	return fmt.Sprintf("01%s21%s%s<GS>93%s", m.GTIN, m.CountryCode, m.Serial, m.CryptoTail)
 }
 
+// ToVideojetFormat возвращает готовую строку под Videojet CLARiTY (разделитель ~d029, стартовый ~1)
+func (m *ShortDataMatrix) ToVideojetFormat() string {
+	return fmt.Sprintf("~101%s21%s%s~d02993%s", m.GTIN, m.CountryCode, m.Serial, m.CryptoTail)
+}
+
+// ToRawGS1Format возвращает классическую бинарную строку с байтами 0x1D для Carl Valentin / принтеров с прямым сокетом
 func (m *ShortDataMatrix) ToRawGS1Format(includeStartFNC1 bool) string {
 	var sb strings.Builder
 	if includeStartFNC1 {
