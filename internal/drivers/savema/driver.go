@@ -237,7 +237,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		clean = strings.ReplaceAll(clean, "^", "")
 		rows = append(rows, clean)
 	}
-	csvPayload := strings.Join(rows, "\n")
+	csvPayload := strings.Join(rows, "\r\n")
 
 	// 2. Очистка старых следов базы перед заливкой
 	_, _ = d.sendRaw(fmt.Sprintf("SPLDDF{%s}", dataCsvName))

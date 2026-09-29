@@ -322,7 +322,7 @@ func (tp *TaskProcessor) runSavemaBatchPumper(ctx context.Context, lineID, taskI
 	defer tp.stopTaskTracking(taskID)
 
 	// 1. Извлекаем ВСЮ пачку задания из SQLite
-	codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 10000)
+	codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 1000)
 	if err != nil || len(codes) == 0 {
 		slog.Warn("SAVEMA-PUMPER: Нет кодов для отправки", "task_id", taskID, "err", err)
 		return
