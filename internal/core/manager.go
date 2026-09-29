@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"rovnoMark/internal/drivers/bizerba"
+	"rovnoMark/internal/drivers/savema"
 	"rovnoMark/internal/drivers/valentine"
 	"rovnoMark/internal/models"
 	"rovnoMark/internal/storage"
@@ -84,6 +85,14 @@ func (tp *TaskProcessor) StartPumping(lineID int, taskID int) {
 			if bDriver, ok := pPrinter.(*bizerba.Driver); ok {
 				slog.Info("Pumper: Запуск Bizerba Fast Loop", "printer", pCfg.Name, "printer_id", pCfg.ID)
 				go tp.RunBizerbaFastPumper(ctx, lineID, taskID, pCfg.ID, bDriver)
+			}
+
+		case "savema":
+			hasSpecializedDriver = true
+			pPrinter := tp.Manager.GetPrinter(pCfg.ID)
+			if sDriver, ok := pPrinter.(*savema.Driver); ok {
+				slog.Info("Pumper: Запуск пакетного цикла Savema (CSV)", "printer", pCfg.Name, "printer_id", pCfg.ID)
+				go tp.runSavemaBatchPumper(ctx, lineID, taskID, pCfg.ID, sDriver)
 			}
 
 		case "valentine_nice", "valentin", "valentine":
@@ -307,6 +316,64 @@ func (tp *TaskProcessor) pushSingleValentinCode(
 
 	_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.PrinterIndex)
 	return nil
+}
+
+func (tp *TaskProcessor) runSavemaBatchPumper(ctx context.Context, lineID, taskID, printerID int, sDriver *savema.Driver) {
+	defer tp.stopTaskTracking(taskID)
+
+	// 1. Извлекаем ВСЮ пачку задания из SQLite
+	codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 10000)
+	if err != nil || len(codes) == 0 {
+		slog.Warn("SAVEMA-PUMPER: Нет кодов для отправки", "task_id", taskID, "err", err)
+		return
+	}
+
+	var payload []string
+	for _, c := range codes {
+		payload = append(payload, c.Code)
+	}
+
+	dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
+	if dynamicField == "" {
+		dynamicField = "DataMatrix"
+	}
+
+	// 2. Заливаем CSV, устанавливаем SPPSLQ ровно на len(codes) и запускаем печать
+	loaded, err := sDriver.PrintBatchIndexed(dynamicField, codes[0].PrinterIndex, payload)
+	if err != nil || loaded == 0 {
+		slog.Error("SAVEMA-PUMPER: Ошибка заливки CSV в Savema", "task_id", taskID, "err", err)
+		return
+	}
+
+	// 3. Мониторинг прогресса через опрос счетчика SPGGCP
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = sDriver.ClearQueue()
+			return
+		case <-ticker.C:
+			status, err := tp.Store.GetTaskStatus(taskID)
+			if err != nil || status == "stopped" || status == "completed" {
+				_ = sDriver.ClearQueue()
+				return
+			}
+
+			printedCount, err := sDriver.GetLastPrintedIndex()
+			if err == nil && printedCount > 0 {
+				// Синхронизируем базу кодов с SQLite
+				_, _ = tp.Store.MarkAsPrinted(taskID, printerID, printedCount)
+			}
+
+			// Партия отпечатана — завершаем насос
+			if printedCount >= len(codes) {
+				slog.Info("SAVEMA-PUMPER: Партия полностью завершена", "task_id", taskID, "printed", printedCount)
+				return
+			}
+		}
+	}
 }
 
 func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID int) {
