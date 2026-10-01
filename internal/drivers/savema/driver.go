@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultTimeout = 3 * time.Second
+	defaultTimeout = 5 * time.Second
 	dataCsvName    = "mark_code.csv"
 )
 
@@ -155,7 +155,7 @@ func CleanResponse(raw string) string {
 func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	slog.Info("SAVEMA: Инициализация сессии печати", "ip", d.Address, "field", fieldName)
 
-	// 1. Остановка печати предыдущей смены
+	// 1. Остановка печати
 	_, _ = d.sendRaw("SPPSTP")
 
 	// 2. Сброс лимита печати в 0
@@ -167,20 +167,23 @@ func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[st
 	// 4. Удаление старого файла партии
 	_, _ = d.sendRaw(fmt.Sprintf("SPLDDF{%s}", dataCsvName))
 
-	// 5. Запись статических параметров (если переданы)
-	if len(staticFields) > 0 {
-		_ = d.UpdateStaticFields(staticFields)
-	}
-
+	// 5. Сохранение и проливка статических параметров
 	d.stateMu.Lock()
+	for k, v := range staticFields {
+		d.staticFields[k] = v
+	}
 	d.lastCount = 0
 	d.batchSize = 0
 	d.stateMu.Unlock()
 
+	if len(staticFields) > 0 {
+		_ = d.UpdateStaticFields(staticFields)
+	}
+
 	return nil
 }
 
-// SelectTemplate выбирает шаблон в контроллере и обновляет статические поля.
+// SelectTemplate выбирает шаблон в контроллере и сохраняет его имя и статические поля.
 func (d *Driver) SelectTemplate(template string, fields map[string]string) error {
 	template = strings.TrimSpace(template)
 	if template == "" {
@@ -218,28 +221,31 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 	return nil
 }
 
-// PrintBatchIndexed реализует загрузку кодов Честного Знака через CSV с защитой от циклов:
-// 1. Формирование строк CSV с GS1-разделителем.
-// 2. Удаление старого файла и сброс кэша базы (SPLDDF + SPLCDB).
+// PrintBatchIndexed реализует конвейер загрузки и запуска:
+// 1. Формирование строк CSV с \r\n и GS1-разделителем (\x1d).
+// 2. Остановка печати, удаление старого CSV и сброс кэша базы (SPLDDF + SPLCDB).
 // 3. Загрузка CSV через SPLCDF.
-// 4. Фиксация лимита печати РОВНО на N строк через SPPSLQ{N} и запуск автомата SPPSAP.
+// 4. ПЕРЕВЫБОР ШАБЛОНА (SPLLTF): принуждает контроллер перечитать CSV и построить индекс строк.
+// 5. Восстановление статических полей (SPMCTV), сброшенных командой SPLLTF.
+// 6. Установка лимита партии SPPSLQ{N} и запуск автомата SPPSAP.
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
 	}
 
-	// 1. Нормализация кодов (замена текстового <GS> на байт ASCII 29 для DataMatrix)
+	// 1. Нормализация кодов (подготовка GS1 DataMatrix и очистка спецсимволов протокола)
 	var rows []string
 	for _, c := range codes {
 		clean := strings.TrimSpace(c)
 		clean = strings.ReplaceAll(clean, "<GS>", "\x1d")
-		clean = strings.ReplaceAll(clean, "~", "") // Защита от разрушения пакета SPPL
+		clean = strings.ReplaceAll(clean, "~", "")
 		clean = strings.ReplaceAll(clean, "^", "")
 		rows = append(rows, clean)
 	}
 	csvPayload := strings.Join(rows, "\r\n")
 
-	// 2. Очистка старых следов базы перед заливкой
+	// 2. Стоп и очистка старого состояния БД
+	_, _ = d.sendRaw("SPPSTP")
 	_, _ = d.sendRaw(fmt.Sprintf("SPLDDF{%s}", dataCsvName))
 	_, _ = d.sendRaw("SPLCDB")
 
@@ -250,11 +256,40 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 		return 0, fmt.Errorf("SAVEMA: сбой заливки CSV-файла: %v (ответ: %s)", err, respUpload)
 	}
 
+	// 4. ПЕРЕВЫБОР ШАБЛОНА: связывает новый CSV с полями макета
+	d.stateMu.RLock()
+	templateName := d.curTemplate
+	staticCopy := make(map[string]string, len(d.staticFields))
+	for k, v := range d.staticFields {
+		staticCopy[k] = v
+	}
+	d.stateMu.RUnlock()
+
+	// Если имя шаблона не сохранено в драйвере, опрашиваем активный макет с принтера
+	if templateName == "" {
+		active, _ := d.GetCurrentTemplate()
+		templateName = strings.TrimSpace(active)
+	}
+
+	if templateName != "" {
+		respTpl, err := d.sendRaw(fmt.Sprintf("SPLLTF{%s}", templateName))
+		if err != nil || strings.Contains(respTpl, "FAIL") {
+			return 0, fmt.Errorf("SAVEMA: сбой перевыбора шаблона %s после заливки CSV: %v (ответ: %s)", templateName, err, respTpl)
+		}
+	} else {
+		slog.Warn("SAVEMA: имя шаблона не определено, пропуск автоматического SPLLTF", "ip", d.Address)
+	}
+
+	// 5. Восстановление статических полей (SPLLTF сбрасывает их в дефолтные значения из файла .rox)
+	if len(staticCopy) > 0 {
+		if err := d.UpdateStaticFields(staticCopy); err != nil {
+			slog.Warn("SAVEMA: предупреждение при восстановлении статики после перевыбора макета", "err", err)
+		}
+	}
+
 	totalItems := len(codes)
 
-	// 4. ЗАЩИТА ОТ ЦИКЛИЧЕСКОЙ ПЕЧАТИ:
-	// Лимит тиража устанавливается строго равным количеству кодов в файле.
-	// Контроллер отпечатает ровно totalItems раз и перейдет в режим WAITING (стоп по датчику).
+	// 6. Защита от закольцовки: ставим жесткий лимит ровно на N строк и пускаем печать
 	guardCmd := fmt.Sprintf("SPPSLQ{%d}|SPPSAP", totalItems)
 	respGuard, err := d.sendRaw(guardCmd)
 	if err != nil || strings.Contains(respGuard, "FAIL") {
@@ -266,8 +301,9 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	d.lastCount = 0
 	d.stateMu.Unlock()
 
-	slog.Info("SAVEMA: Партия кодов загружена в CSV, лимит зафиксирован",
+	slog.Info("SAVEMA: Файл CSV загружен, макет переинициализирован, лимит зафиксирован",
 		"ip", d.Address,
+		"template", templateName,
 		"records", totalItems,
 		"start_index", startIndex,
 	)
@@ -275,8 +311,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	return totalItems, nil
 }
 
-// GetLastPrintedIndex возвращает порядковый номер последнего отпечатанного кода
-// на основе аппаратного счетчика текущего макета/тиража (SPGGCP).
+// GetLastPrintedIndex возвращает порядковый номер последнего отпечатанного кода (SPGGCP).
 func (d *Driver) GetLastPrintedIndex() (int, error) {
 	raw, err := d.sendRaw("SPGGCP")
 	if err != nil {
