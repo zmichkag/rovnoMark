@@ -210,6 +210,7 @@ func (s *Server) handleTaskAppend(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Если валидация выключена — ВСЕ РАВНО нормализуем под единый канонический формат!
 			item.Code = marking.NormalizeToCanonical(item.Code)
+			slog.Debug("Append: Коды нормализованы")
 		}
 
 		inboundItems = append(inboundItems, item)
