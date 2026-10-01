@@ -225,6 +225,7 @@ func (s *Server) handleTaskAppend(w http.ResponseWriter, r *http.Request) {
 
 	lineID, err := s.store.GetLineIDByTask(taskID)
 	if err == nil {
+		//		s.driver.SelectTemplate(lineID) //Сергеев
 		s.taskProcessor.StartPumping(lineID, taskID)
 	}
 

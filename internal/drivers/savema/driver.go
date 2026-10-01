@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultTimeout = 3 * time.Second
-	dataCsvName    = "batch_data.csv"
+	dataCsvName    = "mark_code.csv"
 )
 
 // Driver реализует промышленный драйвер Savema SPPL Rev.12 для ядра RovnoMark.
