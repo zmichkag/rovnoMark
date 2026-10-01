@@ -413,7 +413,7 @@ func (d *Driver) PrintBatchIndexed(compositeFields string, startIndex int, codes
 	successCount := 0
 	for i, payload := range codes {
 		// Подготовка GS1-разделителя (замена <GS> или \x1d на ASCII 29)
-		cleanPayload := strings.ReplaceAll(payload, "\u001d", "~d029")
+		cleanPayload := strings.ReplaceAll(payload, "<GS>", "~d029")
 		if !strings.HasPrefix(cleanPayload, "~1") {
 			cleanPayload = "~1" + cleanPayload
 		}
