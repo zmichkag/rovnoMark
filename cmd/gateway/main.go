@@ -157,6 +157,8 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
 	// 4. Восстановление активных заданий конвейера (Pumper Recovery)
+	time.Sleep(500 * time.Millisecond)
+
 	activeTasks, err := store.GetActiveTasks(0, 0)
 	if err == nil && len(activeTasks) > 0 {
 		slog.Info("Обнаружены активные задачи в БД. Восстановление фоновых насосов...", "count", len(activeTasks))
