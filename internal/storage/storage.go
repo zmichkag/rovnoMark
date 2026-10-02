@@ -1190,9 +1190,13 @@ func (s *Store) RecordPrinterCounterSnapshot(taskID, lineID, printerID int, even
 
 func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{}, error) {
 	query := `
-		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), t.template_name, COALESCE(t.dynamic_field_name, ''), t.status, t.created_at, COALESCE(t.rnd_text, '')
+		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), 
+		       t.template_name, COALESCE(t.dynamic_field_name, ''), 
+		       t.status, t.created_at, COALESCE(t.rnd_text, ''),
+		       COUNT(DISTINCT sr.code) AS scanned_count
 		FROM tasks t
 		LEFT JOIN lines l ON t.line_id = l.id
+		LEFT JOIN scanner_reads sr ON sr.task_id = t.id AND sr.match_status <> 'no_read'
 		WHERE t.status IN ('active', 'ready')`
 
 	var args []interface{}
@@ -1204,7 +1208,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 		query += " AND t.line_id IN (SELECT line_id FROM line_printers WHERE printer_id = ?)"
 		args = append(args, printerID)
 	}
-	query += " ORDER BY t.id DESC"
+	query += " GROUP BY t.id ORDER BY t.id DESC"
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -1218,20 +1222,15 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 	for rows.Next() {
 		var id, lID int
 		var lName, template, dynamic, status, created, rndText string
-		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText); err == nil {
+		var scanned int
+		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText, &scanned); err == nil {
 			var total, printed, buffered int
+			// Это запрос во второй файл БД (codes_YYYY_MM.db), тут дедлока нет:
 			codesDB.QueryRow(`
-            SELECT COUNT(*), 
-                   COUNT(CASE WHEN status = 'printed' THEN 1 END), 
-                   COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
-            FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
-
-			// Подсчет уникальных валидных считываний камерами именно для этой задачи
-			var scanned int
-			_ = s.db.QueryRow(`
-            SELECT COUNT(DISTINCT code) 
-            FROM scanner_reads 
-            WHERE task_id = ? AND match_status <> 'no_read'`, id).Scan(&scanned)
+				SELECT COUNT(*), 
+				       COUNT(CASE WHEN status = 'printed' THEN 1 END), 
+				       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
+				FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
 
 			result = append(result, map[string]interface{}{
 				"task_id":            id,
@@ -1246,7 +1245,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 					"total":    total,
 					"printed":  printed,
 					"buffered": buffered,
-					"scanned":  scanned, // <-- передаем количество сканов задания
+					"scanned":  scanned,
 				},
 			})
 		}
