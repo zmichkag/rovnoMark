@@ -646,35 +646,57 @@
             }
 
             container.innerHTML = tasks.map(t => {
-                const printed = t.stats?.printed || 0;
                 const total = t.stats?.total || 1;
-                const progress = Math.min(Math.round((printed / total) * 100), 100);
-                const barColor = t.status === 'error' ? 'var(--danger)' : 'var(--success)';
+                const printed = t.stats?.printed || 0;
+                const scanned = t.stats?.scanned || 0;
+
+                const printPct = Math.min(Math.round((printed / total) * 100), 100);
+                const scanPct = Math.min(Math.round((scanned / total) * 100), 100);
 
                 return `
                 <div class="task-card" data-task-id="${t.task_id}">
-                    <div style="display: flex; justify-content: space-between; align-items: start;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
                         <div>
-                            <b style="color: var(--primary);">#${t.task_id}</b>
-                            <span style="margin-left: 10px;">Линия: <b>${t.line_name}</b></span>
+                            <b style="font-size:1.1rem; color: var(--primary);">#${t.task_id}</b>
+                            <span style="color:var(--text-muted); margin-left:8px;">Линия: <b>${t.line_name}</b></span>
                         </div>
-                        <span class="status-badge" style="font-size: 0.7rem;">${t.template_name}</span>
+                        <button class="btn" style="border-color: var(--danger); color: var(--danger); padding:4px 10px;" onclick="stopTask(${t.task_id}, ${t.line_id})">
+                            ОСТАНОВИТЬ
+                        </button>
                     </div>
 
-                    <div style="margin: 10px 0;">
-                        <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 5px;">
-                            <span>Прогресс: ${printed} / ${total}</span>
-                            <span>${progress}%</span>
+                    <div style="font-size:0.9rem; color:#aaa; margin-top: 4px;">
+                        Шаблон: <b>${t.template_name || '-'}</b>
+                    </div>
+
+                    <!-- Сводные цифры -->
+                    <div style="background:#111; padding:8px 12px; border-radius:6px; font-family:monospace; display:flex; justify-content:space-between; margin:8px 0; font-size:0.85rem;">
+                        <span style="color:var(--success);">Печать: ${printed} шт (${printPct}%)</span>
+                        <span style="color:#a78bfa;">Сканов: ${scanned} шт (${scanPct}%)</span>
+                        <span style="color:#888;">План: ${total} шт</span>
+                    </div>
+
+                    <!-- Ползунок 1: Печать -->
+                    <div style="margin-bottom:6px;">
+                        <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#888; margin-bottom:2px;">
+                            <span>Прогресс печати</span>
+                            <span>${printed} / ${total}</span>
                         </div>
-                        <div class="progress-container">
-                            <div class="progress-bar" style="width: ${progress}%; background: ${barColor};"></div>
+                        <div class="progress-container" style="height:8px; margin:0;">
+                            <div class="progress-bar" style="width: ${printPct}%; background: var(--success);"></div>
                         </div>
                     </div>
 
-                    <button class="btn" style="border-color: var(--danger); color: var(--danger);"
-                            onclick="stopTask(${t.task_id}, ${t.line_id})">
-                        ОСТАНОВИТЬ
-                    </button>
+                    <!-- Ползунок 2: Сканирование партии -->
+                    <div>
+                        <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#888; margin-bottom:2px;">
+                            <span>Контроль считывания</span>
+                            <span>${scanned} / ${total}</span>
+                        </div>
+                        <div class="progress-container" style="height:8px; margin:0;">
+                            <div class="progress-bar" style="width: ${scanPct}%; background: #8b5cf6;"></div>
+                        </div>
+                    </div>
                 </div>`;
             }).join('');
         } catch (err) {
