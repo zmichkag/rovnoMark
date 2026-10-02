@@ -1221,10 +1221,17 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText); err == nil {
 			var total, printed, buffered int
 			codesDB.QueryRow(`
-				SELECT COUNT(*), 
-				       COUNT(CASE WHEN status = 'printed' THEN 1 END), 
-				       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
-				FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
+            SELECT COUNT(*), 
+                   COUNT(CASE WHEN status = 'printed' THEN 1 END), 
+                   COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
+            FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
+
+			// Подсчет уникальных валидных считываний камерами именно для этой задачи
+			var scanned int
+			_ = s.db.QueryRow(`
+            SELECT COUNT(DISTINCT code) 
+            FROM scanner_reads 
+            WHERE task_id = ? AND match_status <> 'no_read'`, id).Scan(&scanned)
 
 			result = append(result, map[string]interface{}{
 				"task_id":            id,
@@ -1239,6 +1246,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 					"total":    total,
 					"printed":  printed,
 					"buffered": buffered,
+					"scanned":  scanned, // <-- передаем количество сканов задания
 				},
 			})
 		}
@@ -1334,6 +1342,12 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 		       COUNT(CASE WHEN status = 'pending' THEN 1 END)
 		FROM task_codes WHERE task_id = ?`, taskID).Scan(&lastPrintedAt, &totalCodes, &printedCount, &inBufferCount, &pendingCount)
 
+	var scannedCount int
+	_ = s.db.QueryRowContext(ctx, `
+    SELECT COUNT(DISTINCT code)
+    FROM scanner_reads
+    WHERE task_id = ? AND match_status <> 'no_read'`, taskID).Scan(&scannedCount)
+
 	return map[string]interface{}{
 		"task_id":              tID,
 		"line_id":              lineID,
@@ -1347,6 +1361,7 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 		"printed_count":        printedCount,
 		"in_buffer_count":      inBufferCount,
 		"pending_count":        pendingCount,
+		"scanned_count":        scannedCount,
 	}, nil
 }
 
