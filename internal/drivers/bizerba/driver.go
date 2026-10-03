@@ -252,6 +252,9 @@ func (d *Driver) SelectTemplate(plu string, fields map[string]string) error {
 	if plu == "" {
 		return fmt.Errorf("не задан код PLU Bizerba")
 	}
+	if _, err := bizerbaDesign(fields); err != nil {
+		return err
+	}
 	err := d.runCommand(func(conn bcsConnection) error {
 		if loadErr := sendWrite(conn, "A!XV00|GL19|LX02", plu, d.timeout); loadErr != nil {
 			// Some GLPMax versions apply GL19 but report "Datensatz nicht vorhanden"
@@ -293,8 +296,18 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	return nil
 }
 
-// updateStaticFieldsOn записывает дату в GL06 и бригаду в GL15 через готовое соединение.
+// updateStaticFieldsOn выбирает пользовательский дизайн через GW17,
+// записывает дату в GL06 и бригаду в GL15 через готовое соединение.
 func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]string) error {
+	formattedDesign, err := bizerbaDesign(fields)
+	if err != nil {
+		return err
+	}
+	if formattedDesign != "" {
+		if err := sendWrite(conn, "A!GW17", formattedDesign, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки дизайна Bizerba %q: %w", formattedDesign, err)
+		}
+	}
 	if date := firstField(fields, "date", "production_date", "GL06", "дата"); date != "" {
 		formatted, err := normalizeBizerbaDate(date)
 		if err != nil {
@@ -498,11 +511,11 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 	// clearMarkFields удаляет данные последней марки, чтобы при пустой очереди
 	// устройство не могло повторно напечатать уже использованный DataMatrix.
 	clearMarkFields := func() error {
-		if err := sendWrite(conn, "A!GT03", "", d.timeout); err != nil {
-			return fmt.Errorf("ошибка очистки поля Bizerba GT03: %w", err)
+		if err := sendWrite(conn, "A!"+d.equipment.serialField, "", d.timeout); err != nil {
+			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", d.equipment.serialField, err)
 		}
-		if err := sendWrite(conn, "A!GT04", "", d.timeout); err != nil {
-			return fmt.Errorf("ошибка очистки поля Bizerba GT04: %w", err)
+		if err := sendWrite(conn, "A!"+d.equipment.cryptoField, "", d.timeout); err != nil {
+			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", d.equipment.cryptoField, err)
 		}
 		return nil
 	}
@@ -512,14 +525,12 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		}
 		next := pending[0]
 		pending = pending[1:]
-		// В выбранном PLU-шаблоне текст DataMatrix собирается из полей GT03 и GT04:
-		// GT03 содержит шестисимвольный блок AI 21 (код страны и серийный номер),
-		// а GT04 — разделитель GS в виде @1D, идентификатор AI 93 и криптохвост.
-		if err := sendWrite(conn, "A!GT03", next.serial, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba GT03: %w", err)
+		// Первое выбранное поле содержит блок AI 21, второе — AI 93 и криптохвост.
+		if err := sendWrite(conn, "A!"+d.equipment.serialField, next.serial, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.serialField, err)
 		}
-		if err := sendWrite(conn, "A!GT04", next.crypto, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba GT04: %w", err)
+		if err := sendWrite(conn, "A!"+d.equipment.cryptoField, next.crypto, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.cryptoField, err)
 		}
 		active = &next
 		return nil
@@ -703,13 +714,17 @@ func formatScaledInteger(value string, exponent int) (string, error) {
 // PrintBatchIndexed разбирает GS1-коды и добавляет их в очередь активной сессии.
 func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (int, error) {
 	marks := make([]queuedMark, 0, len(codes))
+	cryptoPrefix := "93"
+	if d.equipment.explicitGSSeparator {
+		cryptoPrefix = "@1D93"
+	}
 	for i, code := range codes {
 		parsed, err := marking.ParseAndValidateShortGS1(strings.TrimSpace(code))
 		if err != nil {
 			return 0, fmt.Errorf("некорректная марка с индексом %d в пакете: %w", i, err)
 		}
 		marks = append(marks, queuedMark{index: startIndex + i, code: parsed.ToDBFormat(), serial: parsed.CountryCode + parsed.Serial,
-			crypto: "@1D93" + parsed.CryptoTail})
+			crypto: cryptoPrefix + parsed.CryptoTail})
 	}
 	if err := d.startPreparedSession(); err != nil {
 		return 0, err
@@ -821,7 +836,7 @@ func (d *Driver) GetTemplates() ([]string, error) {
 
 // GetTemplateFields возвращает поля, поддерживаемые драйвером Bizerba.
 func (d *Driver) GetTemplateFields(string) ([]string, error) {
-	return []string{"date", "brigade", "DATAMATRIX"}, nil
+	return []string{"design", "date", "brigade", "DATAMATRIX"}, nil
 }
 
 // GetRemainingRibbon возвращает заглушку: BCS-драйвер пока не читает остаток ленты.
@@ -846,6 +861,25 @@ func firstField(fields map[string]string, names ...string) string {
 		}
 	}
 	return ""
+}
+
+// normalizeBizerbaDesign проверяет номер пользовательского дизайна этикетки.
+// Нумерация пользовательских дизайнов Bizerba начинается с 8192.
+func normalizeBizerbaDesign(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	design, err := strconv.Atoi(value)
+	if err != nil || design < 8192 {
+		return "", fmt.Errorf("некорректный дизайн Bizerba %q; ожидается целое число не меньше 8192", value)
+	}
+	return strconv.Itoa(design), nil
+}
+
+func bizerbaDesign(fields map[string]string) (string, error) {
+	value := firstField(fields, "design", "label_design", "GW17", "дизайн")
+	if value == "" {
+		return "", nil
+	}
+	return normalizeBizerbaDesign(value)
 }
 
 // normalizeBizerbaDate преобразует поддерживаемые представления даты в формат ddMMyy.

@@ -212,9 +212,11 @@
                     <label>Режим марок:</label>
                     <select id="p_bizerba_mode">
                         <option value="stream">Поток GT03/GT04</option>
+                        <option value="stream_gt06_gt07">Поток GT06/GT07</option>
                         <option value="unique">Unique (файловая выгрузка)</option>
                     </select>
                 </div>
+                <div class="field"><label><input type="checkbox" id="p_bizerba_explicit_gs" checked style="width:auto;"> Передавать разделитель явно как @1D</label></div>
                 <div class="field"><label><input type="checkbox" id="p_capture_weight" style="width:auto;"> Фиксация фактического веса</label></div>
                 <div class="field"><label><input type="checkbox" id="p_bizerba_conveyor" style="width:auto;"> Управляемый конвейер</label></div>
                 <div class="field"><label><input type="checkbox" id="p_record_gxnet" style="width:auto;"> Запись сетевых дампов GXNET</label></div>
@@ -1197,6 +1199,7 @@
             body.settings = {
                 bcs_device: document.getElementById('p_bcs_device').value || 'GLPMax',
                 mode: document.getElementById('p_bizerba_mode').value || 'stream',
+                explicit_gs_separator: document.getElementById('p_bizerba_explicit_gs').checked,
                 capture_weight: document.getElementById('p_capture_weight').checked,
                 conveyor: document.getElementById('p_bizerba_conveyor').checked,
                 record_gxnet: document.getElementById('p_record_gxnet').checked
@@ -1242,6 +1245,7 @@
         const s = p.settings || {};
         document.getElementById('p_bcs_device').value = s.bcs_device || p.bcs_device || '';
         document.getElementById('p_bizerba_mode').value = s.mode || p.bizerba_mode || 'stream';
+        document.getElementById('p_bizerba_explicit_gs').checked = s.explicit_gs_separator !== false;
         document.getElementById('p_capture_weight').checked = !!(s.capture_weight || p.capture_weight);
         document.getElementById('p_bizerba_conveyor').checked = !!(s.conveyor || p.bizerba_conveyor);
         document.getElementById('p_record_gxnet').checked = !!(s.record_gxnet || p.record_gxnet);
@@ -1261,6 +1265,7 @@
 
         document.getElementById('p_bcs_device').value = '';
         document.getElementById('p_bizerba_mode').value = 'stream';
+        document.getElementById('p_bizerba_explicit_gs').checked = true;
         document.getElementById('p_bizerba_conveyor').checked = false;
         document.getElementById('p_capture_weight').checked = false;
         document.getElementById('p_record_gxnet').checked = false;

@@ -8,29 +8,35 @@ type MarkingMode string
 const (
 	// MarkingModeStream передаёт очередную марку через GT03/GT04.
 	MarkingModeStream MarkingMode = "stream"
+	// MarkingModeStreamGT0607 передаёт очередную марку через GT06/GT07.
+	MarkingModeStreamGT0607 MarkingMode = "stream_gt06_gt07"
 	// MarkingModeUnique резервирует файловую загрузку через BCS UploadFileFTP.
 	MarkingModeUnique MarkingMode = "unique"
 )
 
 // Profile содержит настройки, относящиеся только к оборудованию Bizerba.
 type Profile struct {
-	RecordGXNET    bool
-	RecordResponse func(Response) error
-	Mode           MarkingMode
-	Conveyor       bool
-	CaptureWeight  bool
-	RecordWeight   func(printerIndex int, mark, weight string) error
+	RecordGXNET         bool
+	RecordResponse      func(Response) error
+	Mode                MarkingMode
+	Conveyor            bool
+	CaptureWeight       bool
+	RecordWeight        func(printerIndex int, mark, weight string) error
+	ExplicitGSSeparator *bool
 }
 
 // bizerbaEquipment объединяет необязательные возможности конкретной машины.
 // Они принадлежат только драйверу Bizerba и не меняют общий интерфейс принтера.
 type bizerbaEquipment struct {
-	mode            MarkingMode
-	conveyorEnabled bool
-	conveyor        conveyorController
-	unique          uniqueDataController
-	captureWeight   bool
-	recordWeight    func(printerIndex int, mark, weight string) error
+	mode                MarkingMode
+	conveyorEnabled     bool
+	conveyor            conveyorController
+	unique              uniqueDataController
+	captureWeight       bool
+	recordWeight        func(printerIndex int, mark, weight string) error
+	serialField         string
+	cryptoField         string
+	explicitGSSeparator bool
 }
 
 // conveyorController управляет конвейером ездовой Bizerba.
@@ -63,17 +69,28 @@ func defaultBizerbaEquipment() bizerbaEquipment {
 // Пока контроллеры являются заглушками и не отправляют аппаратных команд.
 func configuredBizerbaEquipment(profile Profile) bizerbaEquipment {
 	profile = normalizeProfile(profile)
+	serialField, cryptoField := "GT03", "GT04"
+	if profile.Mode == MarkingModeStreamGT0607 {
+		serialField, cryptoField = "GT06", "GT07"
+	}
+	explicitGSSeparator := true
+	if profile.ExplicitGSSeparator != nil {
+		explicitGSSeparator = *profile.ExplicitGSSeparator
+	}
 	unique := uniqueDataController(disabledUniqueDataController{})
 	if profile.Mode == MarkingModeUnique {
 		unique = stubUniqueDataController{}
 	}
 	return bizerbaEquipment{
-		mode:            profile.Mode,
-		conveyorEnabled: profile.Conveyor,
-		conveyor:        noopConveyorController{},
-		unique:          unique,
-		captureWeight:   profile.CaptureWeight,
-		recordWeight:    profile.RecordWeight,
+		mode:                profile.Mode,
+		conveyorEnabled:     profile.Conveyor,
+		conveyor:            noopConveyorController{},
+		unique:              unique,
+		captureWeight:       profile.CaptureWeight,
+		recordWeight:        profile.RecordWeight,
+		serialField:         serialField,
+		cryptoField:         cryptoField,
+		explicitGSSeparator: explicitGSSeparator,
 	}
 }
 
@@ -82,6 +99,8 @@ func normalizeProfile(profile Profile) Profile {
 	switch MarkingMode(strings.ToLower(strings.TrimSpace(string(profile.Mode)))) {
 	case MarkingModeUnique:
 		profile.Mode = MarkingModeUnique
+	case MarkingModeStreamGT0607:
+		profile.Mode = MarkingModeStreamGT0607
 	default:
 		profile.Mode = MarkingModeStream
 	}

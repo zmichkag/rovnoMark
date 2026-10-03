@@ -141,6 +141,56 @@ func TestSelectTemplateAcceptsGLPMaxRefreshErrorAfterPLUReadback(t *testing.T) {
 	}
 }
 
+func TestSelectTemplateSetsOptionalUserDesign(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriver("GLPMax", func() (bcsConnection, error) { return fake, nil })
+
+	if err := driver.SelectTemplate("2644", map[string]string{
+		"design": "8192",
+		"date":   "20.08.2026",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, sends, _ := fake.snapshot()
+	want := []fakeSend{
+		{"A!XV00|GL19|LX02", "2644"},
+		{"A!GW17", "8192"},
+		{"A!GL06", "200826"},
+	}
+	if !reflect.DeepEqual(sends, want) {
+		t.Fatalf("sends = %#v, want %#v", sends, want)
+	}
+}
+
+func TestSelectTemplateOmitsMissingUserDesign(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriver("GLPMax", func() (bcsConnection, error) { return fake, nil })
+
+	if err := driver.SelectTemplate("2644", map[string]string{"date": "20.08.2026"}); err != nil {
+		t.Fatal(err)
+	}
+	_, sends, _ := fake.snapshot()
+	for _, send := range sends {
+		if send.header == "A!GW17" {
+			t.Fatalf("optional design command was sent: %#v", sends)
+		}
+	}
+}
+
+func TestSelectTemplateRejectsInvalidUserDesign(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriver("GLPMax", func() (bcsConnection, error) { return fake, nil })
+
+	err := driver.SelectTemplate("2644", map[string]string{"design": "1"})
+	if err == nil {
+		t.Fatal("SelectTemplate() accepted a user design below 8192")
+	}
+	_, sends, _ := fake.snapshot()
+	if len(sends) != 0 {
+		t.Fatalf("commands were sent for invalid design: %#v", sends)
+	}
+}
+
 func TestMarkSessionOpensEAdvancesOnPV01AndClosesE(t *testing.T) {
 	fake := newFakeConnection()
 	recorded := make(chan struct{ mark, weight string }, 2)
@@ -210,6 +260,33 @@ func TestMarkSessionOpensEAdvancesOnPV01AndClosesE(t *testing.T) {
 	}
 	if closed != 1 {
 		t.Fatalf("Close count = %d, want 1", closed)
+	}
+}
+
+func TestMarkSessionUsesGT0607WithoutExplicitGSSeparator(t *testing.T) {
+	fake := newFakeConnection()
+	explicitGS := false
+	driver := newDriverWithProfile("GLPMax", func() (bcsConnection, error) { return fake, nil }, Profile{
+		Mode:                MarkingModeStreamGT0607,
+		ExplicitGSSeparator: &explicitGS,
+	})
+	if err := driver.InitSession("DATAMATRIX", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := driver.PrintBatchIndexed("DATAMATRIX", 0, []string{
+		"0104620031245728215?NFCZ<GS>93SwuV",
+	})
+	if err != nil || loaded != 1 {
+		t.Fatalf("PrintBatchIndexed() = %d, %v", loaded, err)
+	}
+	waitForSend(t, fake, fakeSend{"A!GT06", "5?NFCZ"})
+	waitForSend(t, fake, fakeSend{"A!GT07", "93SwuV"})
+
+	fake.spontaneous <- "A!PV01|PW02|6|PW00|0|GW09|2|GL16|0|PD00|KG;-3;200|LX02"
+	waitForSend(t, fake, fakeSend{"A!GT06", ""})
+	waitForSend(t, fake, fakeSend{"A!GT07", ""})
+	if err := driver.ClearQueue(); err != nil {
+		t.Fatal(err)
 	}
 }
 
