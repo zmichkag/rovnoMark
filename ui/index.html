@@ -719,59 +719,65 @@
                 }
 
                 // Блок принтера
-                let printerInfoHtml = '<div style="color: #666;">Принтер не привязан</div>';
-                if (printer) {
-                    const isOnline = !(printer.status || '').includes('ОФФЛАЙН');
-                    const badgeColor = isOnline ? 'var(--success)' : 'var(--danger)';
-                    const webLink = printer.ip ? `http://${printer.ip}` : '#';
+                // 1. Формируем список ВСЕХ принтеров линии
+                let printersHtml = '<div style="color: #666; font-size:0.75rem;">Принтеры не привязаны</div>';
+                if (printers.length > 0) {
+                    printersHtml = printers.map((printer, idx) => {
+                        const isOnline = !(printer.status || '').includes('ОФФЛАЙН');
+                        const badgeColor = isOnline ? 'var(--success)' : 'var(--danger)';
+                        const webLink = printer.ip ? `http://${printer.ip}` : '#';
+                        const lastPrinted = printer.cur_code || (idx === 0 ? (t.last_printed_code || t.last_code) : null) || '-';
 
-                    printerInfoHtml = `
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                        <b style="font-size:0.9rem;">🖨️ ${printer.name}</b>
-                        <div style="display:flex; align-items:center; gap:8px;">
-                            <span style="font-size:0.75rem; color:${badgeColor}; font-weight:bold;">${printer.status || 'OK'}</span>
-                            ${printer.ip ? `<a href="${webLink}" target="_blank" class="btn" style="padding:2px 8px; font-size:0.75rem; text-decoration:none; background:#2a2a2a; border-color:#555;">ВЕБ-ИНТЕРФЕЙС</a>` : ''}
-                        </div>
-                    </div>
-                    <div>Сеть: <b>${printer.ip}:${printer.port}</b> (${printer.driver_type || '-'})</div>
-                    <div>Риббон: <b>${printer.ribbon || '-'}</b> | В очереди: <b>${printer.queue || 0}</b> | Всего: <b>${printer.cur_count || 0}</b></div>
-                    <div style="margin-top:6px;">
-                        <span style="color:var(--text-muted); font-size:0.75rem;">Посл. напечатанный код:</span>
-                        <div style="font-family:monospace; font-size:0.8rem; color:#8fd14f; background:#111; padding:4px 6px; border-radius:4px; overflow-wrap:anywhere; border:1px solid #2a2a2a;">
-                            ${lastPrintedCode}
-                        </div>
-                    </div>
-                `;
+                        return `
+        <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+                <b style="font-size:0.85rem; color:#fff;">🖨️ ${printer.name}</b>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span style="font-size:0.7rem; color:${badgeColor}; font-weight:bold;">${printer.status || 'OK'}</span>
+                    ${printer.ip ? `<a href="${webLink}" target="_blank" class="btn" style="padding:1px 6px; font-size:0.7rem; text-decoration:none; background:#222; border-color:#444;">ВЕБ-ИНТЕРФЕЙС</a>` : ''}
+                </div>
+            </div>
+            <div style="font-size:0.75rem; color:#aaa;">Сеть: <b>${printer.ip}:${printer.port}</b> (${printer.driver_type || '-'})</div>
+            <div style="font-size:0.75rem; color:#aaa;">Риббон: <b>${printer.ribbon || '-'}</b> | В очереди: <b>${printer.queue || 0}</b> | Всего: <b>${printer.cur_count || 0}</b></div>
+            <div style="margin-top:3px;">
+                <div style="font-family:monospace; font-size:0.72rem; color:#8fd14f; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний напечатанный код">
+                    ${lastPrinted}
+                </div>
+            </div>
+        </div>`;
+                    }).join('');
                 }
 
+// 2. Формируем список ВСЕХ сканеров линии
+                let scannersHtml = '<div style="color: #666; font-size:0.75rem;">Сканеры не привязаны</div>';
+                if (scanners.length > 0) {
+                    scannersHtml = scanners.map((scanner, idx) => {
+                        const scOnline = !!scanner.online;
+                        const scannerNameEscaped = String(scanner.name || '').replace(/'/g, "\\'");
+                        const lastScanned = scanner.last_code || (idx === 0 ? t.last_scanned_code : null) || '-';
 
-                // Блок сканера
-                let scannerInfoHtml = '<div style="color: #666;">Сканер не привязан</div>';
-                if (scanner) {
-                    const scOnline = !!scanner.online;
-                    const scannerNameEscaped = String(scanner.name || '').replace(/'/g, "\\'");
-
-                    scannerInfoHtml = `
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-            <b style="font-size:0.9rem;">📷 ${scanner.name}</b>
-            <div style="display:flex; align-items:center; gap:8px;">
-                <span style="font-size:0.75rem; color:${scOnline ? '#a78bfa' : 'var(--danger)'}; font-weight:bold;">
-                    ${scOnline ? 'ONLINE' : 'OFFLINE'}
-                </span>
-                <button class="btn" style="padding:2px 8px; font-size:0.75rem; background:#2a2a2a; border-color:#555;" onclick="showScannerReads(${scanner.id}, '${scannerNameEscaped}')">
-                    ИСТОРИЯ
-                </button>
+                        return `
+        <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+                <b style="font-size:0.85rem; color:#fff;">📷 ${scanner.name}</b>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span style="font-size:0.7rem; color:${scOnline ? '#a78bfa' : 'var(--danger)'}; font-weight:bold;">
+                        ${scOnline ? 'ONLINE' : 'OFFLINE'}
+                    </span>
+                    <button class="btn" style="padding:1px 6px; font-size:0.7rem; background:#222; border-color:#444;" onclick="showScannerReads(${scanner.id}, '${scannerNameEscaped}')">
+                        ИСТОРИЯ
+                    </button>
+                </div>
             </div>
-        </div>
-        <div>Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
-        <div>В задании: <b style="color:var(--success);">${scanned}</b> | Время: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
-        <div style="margin-top:6px;">
-            <span style="color:var(--text-muted); font-size:0.75rem;">Посл. считанный код:</span>
-            <div style="font-family:monospace; font-size:0.8rem; color:#c4b5fd; background:#111; padding:4px 6px; border-radius:4px; overflow-wrap:anywhere; border:1px solid #2a2a2a;">
-                ${lastScannedCode}
+            <div style="font-size:0.75rem; color:#aaa;">Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
+            <div style="font-size:0.75rem; color:#aaa;">Успешно: <b style="color:var(--success);">${scanner.good_scans || 0}</b> | Время: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
+            <div style="margin-top:3px;">
+                <div style="font-family:monospace; font-size:0.72rem; color:#c4b5fd; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний считанный код">
+                    ${lastScanned}
+                </div>
             </div>
-        </div>
-    `;
+        </div>`;
+                    }).join('');
                 }
 
                 return `
@@ -805,16 +811,21 @@
         </div>
     </div>
 
-    <!-- Блок оборудования (принтер и сканер компактно) -->
-    <div style="background: #181818; padding: 10px; border-radius: 6px; font-size: 0.8rem; border: 1px solid #2d2d2d; display: flex; flex-direction: column; gap: 8px;">
-        <!-- Принтер -->
-        <div>
-            ${printerInfoHtml}
-        </div>
-        <div style="border-top: 1px solid #282828; padding-top: 8px;">
-            ${scannerInfoHtml}
-        </div>
+
+    <!-- Блок оборудования линии -->
+<div style="background: #181818; padding: 8px; border-radius: 6px; border: 1px solid #2d2d2d; display: flex; flex-direction: column; gap: 8px;">
+    <!-- Секция принтеров -->
+    <div>
+        <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Принтеры маркировки (${printers.length})</div>
+        ${printersHtml}
     </div>
+
+    <!-- Секция сканеров -->
+    <div style="border-top: 1px solid #282828; padding-top: 6px;">
+        <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Камеры верификации (${scanners.length})</div>
+        ${scannersHtml}
+    </div>
+</div>
 
     <!-- Метрики считываемости и прогресса (2x2 сетка) -->
     <div style="background:#111; padding:8px; border-radius:6px; font-family:monospace; display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size: 0.78rem;">
