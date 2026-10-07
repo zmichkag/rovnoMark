@@ -148,9 +148,9 @@
         <h3>🚀 Текущие задания (в работе)</h3>
         <div id="tasks-list"><div style="color: var(--text-muted);">Загрузка...</div></div>
     </div>
-    <hr style="border: 1px solid #333; margin: 20px 0;">
+<!--    <hr style="border: 1px solid #333; margin: 20px 0;">-->
 
-    <div class="columns-wrapper" id="printers-grid"></div>
+<!--    <div class="columns-wrapper" id="printers-grid"></div>-->
 
     <hr style="border: 1px solid #333; margin: 30px 0;">
     <h3>Журнал событий</h3>
@@ -191,118 +191,145 @@
 </div>
 
 <div id="settings" class="tab-content">
-    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
-        <div style="flex: 1; min-width: 320px; background: var(--surface); padding: 20px; border-radius: 8px;">
-            <h3>Принтер</h3>
-            <input type="number" id="p_id" readonly placeholder="ID (Авто)" style="background: #333; margin-bottom: 10px;">
-            <div class="field"><label>Имя:</label><input type="text" id="p_name"></div>
-            <div class="field"><label>IP:</label><input type="text" id="p_ip"></div>
-            <div class="field"><label>Порт:</label><input type="number" id="p_port" value="9100"></div>
-            <div class="field">
-                <label>Драйвер:</label>
-                <select id="p_driver" onchange="toggleDriverExtraFields()">
-                    <option value="savema">Savema</option>
-                    <option value="videojet">Videojet</option>
-                    <option value="markem">Markem-Imaje (DCP)</option>
-                    <option value="valentine_nice">Carl Valentin (NiceLabel)</option>
-                    <option value="bizerba">Bizerba (Brain2 ConnectService)</option>
-                    <option value="carlvalentine">Carl Valentin (CVPL Native)</option>
-                    <option value="tsc">TSC (TSPL)</option>
-                    <option value="ext_server">Внешний Print Engine (XML/HTTP)</option>
-                </select>
-            </div>
-
-            <!-- Блок настроек подкачки (Pumper Mode) -->
-            <div id="pumper_settings_block" style="background: #181818; border: 1px solid #333; border-radius: 6px; padding: 10px; margin-bottom: 10px;">
-                <h4 style="margin: 0 0 10px 0; font-size: 0.9rem; color: var(--primary);">Режим подачи и буферизации</h4>
-                <div class="field">
-                    <label>Режим пампера:</label>
-                    <select id="p_pumper_mode" onchange="togglePumperFields()">
-                        <option value="fast_single">Fast Single (По 1 шт под датчик)</option>
-                        <option value="ribbon_buffer">Ribbon Buffer (Петля на ленте)</option>
-                    </select>
-                </div>
-                <div class="field" id="field_lead_loop" style="display: none;">
-                    <label>Петля опережения (Lead Loop, шт):</label>
-                    <input type="number" id="p_lead_loop" value="5" min="1" max="50">
-                </div>
-                <div class="field">
-                    <label>Лимит буфера (Buffer Limit, шт):</label>
-                    <input type="number" id="p_buffer_limit" value="30" min="1" max="200">
-                </div>
-            </div>
-
-            <!-- Блок настроек Bizerba (отображается при выборе драйвера) -->
-            <div id="bizerba_extra_settings" class="bizerba-panel" style="display: none;">
-                <h4 style="margin: 0 0 10px 0; font-size: 0.9rem; color: var(--warning);">Параметры весового комплекса</h4>
-                <div class="field"><label>BCS Device ID:</label><input type="text" id="p_bcs_device" placeholder="GLPMax"></div>
-                <div class="field">
-                    <label>Режим марок:</label>
-                    <select id="p_bizerba_mode">
-                        <option value="stream">Поток GT03/GT04</option>
-                        <option value="unique">Unique (файловая выгрузка)</option>
-                    </select>
-                </div>
-                <div class="field"><label><input type="checkbox" id="p_capture_weight" style="width:auto;"> Фиксация фактического веса</label></div>
-                <div class="field"><label><input type="checkbox" id="p_bizerba_conveyor" style="width:auto;"> Управляемый конвейер</label></div>
-                <div class="field"><label><input type="checkbox" id="p_record_gxnet" style="width:auto;"> Запись сетевых дампов GXNET</label></div>
-            </div>
-
-            <div class="field"><label><input type="checkbox" id="p_active" checked style="width:auto;"> Активен</label></div>
-            <button class="btn" style="background: var(--success); width: 100%;" onclick="addPrinter()">СОХРАНИТЬ</button>
-            <button class="btn" style="width: 100%; margin-top: 5px;" onclick="clearPrinterForm()">ОЧИСТИТЬ</button>
+    <!-- Верхняя панель действий -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+        <div>
+            <h2 style="margin: 0;">Конфигурация производственных линий</h2>
+            <div style="color: var(--text-muted); font-size: 0.85rem;">Управление линиями, маркираторами и камерами технического зрения</div>
         </div>
-        <div style="flex: 1; min-width: 300px; display: flex; flex-direction: column; gap: 20px;">
-            <div style="background: var(--surface); padding: 20px; border-radius: 8px;">
-                <h3 id="line_form_title">Создать линию</h3>
-                <input type="hidden" id="l_id" value="">
-                <div class="field"><input type="text" id="l_name" placeholder="Имя"></div>
-                <div class="field"><input type="text" id="l_desc" placeholder="Описание"></div>
-                <button class="btn" id="l_submit_btn" style="background: var(--primary); width: 100%;" onclick="saveLine()">СОЗДАТЬ</button>
-                <button class="btn" id="l_clear_btn" style="width: 100%; margin-top: 5px; display: none;" onclick="clearLineForm()">ОТМЕНИТЬ РЕДАКТИРОВАНИЕ</button>
-            </div>
-            <div style="background: var(--surface); padding: 20px; border-radius: 8px;">
-                <h3 id="assign_form_title">Привязать к линии</h3>
-                <input type="hidden" id="assign_is_edit" value="0">
-                <div class="field"><select id="assign_line"></select></div>
-                <div class="field"><select id="assign_printer"></select></div>
-                <div class="field"><select id="assign_role"><option value="PRIMARY">Основной</option><option value="SECONDARY">Дублирующий</option></select></div>
-                <button class="btn" id="assign_submit_btn" style="background: var(--warning); color: black; width: 100%;" onclick="assignPrinter()">ПРИВЯЗАТЬ</button>
-                <button class="btn" id="assign_clear_btn" style="width: 100%; margin-top: 5px; display: none;" onclick="clearAssignForm()">ОТМЕНИТЬ РЕДАКТИРОВАНИЕ</button>
-            </div>
-        </div>
-        <div style="flex: 1; min-width: 320px; background: var(--surface); padding: 20px; border-radius: 8px;">
-            <h3 id="scanner_form_title">Добавить сканер</h3>
-            <input type="hidden" id="s_id" value="">
-            <div class="field"><label>Линия:</label><select id="s_line"></select></div>
-            <div class="field"><label>Имя:</label><input type="text" id="s_name" placeholder="Камера контроля"></div>
-            <div class="field"><label>Адрес:</label><input type="text" id="s_address" placeholder="192.168.1.20"></div>
-            <div class="field"><label>Порт:</label><input type="number" id="s_port" value="23" min="1" max="65535"></div>
-            <div class="field"><label>Драйвер:</label><select id="s_driver"><option value="tcp_camera">TCP-камера</option></select></div>
-            <div class="field">
-                <label>Роль:</label>
-                <select id="s_role" onchange="toggleScannerTarget()">
-                    <option value="INLINE_VERIFIER">Проверка после печати</option>
-                    <option value="AUDIT_CHECK">Контрольная проверка</option>
-                    <option value="AGGREGATOR">Агрегация</option>
-                </select>
-            </div>
-            <div class="field" id="s_target_field"><label>Целевой принтер:</label><select id="s_target_device"></select></div>
-            <div class="field"><label>Настройки JSON:</label><textarea id="s_settings" rows="3">{}</textarea></div>
-            <div class="field"><label><input type="checkbox" id="s_active" checked style="width:auto;"> Активен</label></div>
-            <button class="btn" id="s_submit_btn" style="background: var(--success); width: 100%;" onclick="saveScanner()">СОХРАНИТЬ</button>
-            <button class="btn" id="s_clear_btn" style="width: 100%; margin-top: 5px;" onclick="clearScannerForm()">ОЧИСТИТЬ</button>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn" style="background: var(--primary);" onclick="openLineModal()">+ Новая линия</button>
+            <button class="btn" style="background: #333; border-color: #555;" onclick="openPrinterModal()">+ Добавить принтер</button>
+            <button class="btn" style="background: #333; border-color: #555;" onclick="openScannerModal()">+ Добавить сканер</button>
         </div>
     </div>
-    <h4 style="margin-top:30px;">Привязки</h4>
-    <table><thead><tr><th>Линия</th><th>Принтер</th><th>Роль</th><th>Действие</th></tr></thead><tbody id="assignments-table"></tbody></table>
-    <h4>Линии</h4>
-    <table><thead><tr><th>ID</th><th>Имя</th><th>Описание</th><th>Действие</th></tr></thead><tbody id="lines-list-table"></tbody></table>
-    <h4>Принтеры</h4>
-    <table><thead><tr><th>ID</th><th>Имя</th><th>IP:Порт</th><th>Драйвер</th><th>Режим</th><th>Вес</th><th>Действие</th></tr></thead><tbody id="printers-list-table"></tbody></table>
-    <h4>Сканеры</h4>
-    <table><thead><tr><th>ID</th><th>Линия</th><th>Имя</th><th>Адрес</th><th>Роль</th><th>Состояние</th><th>Действие</th></tr></thead><tbody id="scanners-list-table"></tbody></table>
+
+    <!-- Список линий с закрепленным оборудованием -->
+    <div id="settings-lines-tree" style="display: flex; flex-direction: column; gap: 15px;">
+        <div style="color: var(--text-muted);">Загрузка конфигурации...</div>
+    </div>
+
+    <!-- Блок непривязанного оборудования -->
+    <div id="settings-unassigned-box" style="margin-top: 25px; display: none;">
+        <h4 style="color: var(--warning); margin-bottom: 10px;">⚠️ Свободное оборудование (не привязано к линиям)</h4>
+        <div id="settings-unassigned-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;"></div>
+    </div>
 </div>
+
+<!-- ================= ДИАЛОГ 1: ЛИНИЯ ================= -->
+<dialog id="line_modal">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+        <h3 id="line_modal_title" style="margin:0;">Линия</h3>
+        <button class="btn" onclick="document.getElementById('line_modal').close()">✕</button>
+    </div>
+    <input type="hidden" id="l_id">
+    <div class="field"><label>Название линии:</label><input type="text" id="l_name" placeholder="например, Линия нарезки 1"></div>
+    <div class="field"><label>Описание / Участок:</label><input type="text" id="l_desc" placeholder="Цех фасовки"></div>
+    <div style="display: flex; gap: 10px; margin-top: 15px;">
+        <button class="btn" style="flex:1; background: var(--success);" onclick="saveLine()">СОХРАНИТЬ</button>
+        <button class="btn" style="flex:1;" onclick="document.getElementById('line_modal').close()">ОТМЕНА</button>
+    </div>
+</dialog>
+
+<!-- ================= ДИАЛОГ 2: ПРИНТЕР ================= -->
+<dialog id="printer_modal">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+        <h3 id="printer_modal_title" style="margin:0;">Принтер</h3>
+        <button class="btn" onclick="document.getElementById('printer_modal').close()">✕</button>
+    </div>
+    <input type="hidden" id="p_id">
+    <div class="field"><label>Привязка к линии:</label><select id="p_line_assign"></select></div>
+    <div class="field"><label>Роль на линии:</label>
+        <select id="p_role_assign">
+            <option value="PRIMARY">PRIMARY (Основной / Дорожка 1)</option>
+            <option value="SECONDARY">SECONDARY (Дублер / Дорожка 2)</option>
+            <option value="SINGLE">SINGLE (Одиночный)</option>
+        </select>
+    </div>
+    <div style="display:grid; grid-template-columns: 2fr 1fr; gap:10px;">
+        <div class="field"><label>Название:</label><input type="text" id="p_name" placeholder="Markem_1"></div>
+        <div class="field"><label>Драйвер:</label>
+            <select id="p_driver" onchange="toggleDriverExtraFields()">
+                <option value="savema">Savema</option>
+                <option value="videojet">Videojet</option>
+                <option value="markem">Markem-Imaje (DCP)</option>
+                <option value="markem_async">Markem-Imaje (Async)</option>
+                <option value="valentine_nice">Carl Valentin (NiceLabel)</option>
+                <option value="bizerba">Bizerba (BCS)</option>
+                <option value="tsc">TSC / TSPL</option>
+                <option value="ext_server">Внешний Print Engine</option>
+            </select>
+        </div>
+    </div>
+    <div style="display:grid; grid-template-columns: 2fr 1fr; gap:10px;">
+        <div class="field"><label>IP-адрес / Хост:</label><input type="text" id="p_ip" placeholder="192.168.1.50"></div>
+        <div class="field"><label>Порт:</label><input type="number" id="p_port" value="9100"></div>
+    </div>
+
+    <!-- Режим буфера -->
+    <div id="pumper_settings_block" style="background:#141414; padding:10px; border-radius:6px; border:1px solid #333; margin: 10px 0;">
+        <div style="font-weight:bold; font-size:0.8rem; color:var(--primary); margin-bottom:5px;">Подача и буфер</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+            <div class="field" style="margin:0;"><label>Режим:</label>
+                <select id="p_pumper_mode" onchange="togglePumperFields()">
+                    <option value="fast_single">Fast Single (По 1 шт под датчик)</option>
+                    <option value="ribbon_buffer">Ribbon Buffer (Петля на ленте)</option>
+                </select>
+            </div>
+            <div class="field" style="margin:0;"><label>Лимит буфера:</label><input type="number" id="p_buffer_limit" value="30"></div>
+        </div>
+        <div class="field" id="field_lead_loop" style="display:none; margin-top:8px;">
+            <label>Петля опережения (Lead Loop, шт):</label><input type="number" id="p_lead_loop" value="5">
+        </div>
+    </div>
+
+    <!-- Bizerba спец-поля -->
+    <div id="bizerba_extra_settings" class="bizerba-panel" style="display:none;">
+        <div class="field"><label>BCS Device ID:</label><input type="text" id="p_bcs_device" placeholder="GLPMax"></div>
+        <div style="display:flex; gap:15px;">
+            <label><input type="checkbox" id="p_capture_weight" style="width:auto;"> Фиксация веса</label>
+            <label><input type="checkbox" id="p_bizerba_conveyor" style="width:auto;"> Конвейер</label>
+            <label><input type="checkbox" id="p_record_gxnet" style="width:auto;"> GXNET дампы</label>
+        </div>
+    </div>
+
+    <div class="field" style="margin-top:10px;"><label><input type="checkbox" id="p_active" checked style="width:auto;"> Активен в опросе</label></div>
+
+    <div style="display: flex; gap: 10px; margin-top: 15px;">
+        <button class="btn" style="flex:1; background: var(--success);" onclick="submitPrinterModal()">СОХРАНИТЬ</button>
+        <button class="btn" style="flex:1;" onclick="document.getElementById('printer_modal').close()">ОТМЕНА</button>
+    </div>
+</dialog>
+
+<!-- ================= ДИАЛОГ 3: СКАНЕР ================= -->
+<dialog id="scanner_modal">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+        <h3 id="scanner_modal_title" style="margin:0;">Сканер / Камера</h3>
+        <button class="btn" onclick="document.getElementById('scanner_modal').close()">✕</button>
+    </div>
+    <input type="hidden" id="s_id">
+    <div class="field"><label>Линия:</label><select id="s_line"></select></div>
+    <div style="display:grid; grid-template-columns: 2fr 1fr; gap:10px;">
+        <div class="field"><label>Название камеры:</label><input type="text" id="s_name" placeholder="Камера контроля 1"></div>
+        <div class="field"><label>Роль:</label>
+            <select id="s_role" onchange="toggleScannerTarget()">
+                <option value="INLINE_VERIFIER">Проверка печати</option>
+                <option value="AUDIT_CHECK">Контроль брака</option>
+                <option value="AGGREGATOR">Агрегация</option>
+            </select>
+        </div>
+    </div>
+    <div style="display:grid; grid-template-columns: 3fr 1fr; gap:10px;">
+        <div class="field"><label>IP-адрес / Хост:</label><input type="text" id="s_address" placeholder="192.168.1.186"></div>
+        <div class="field"><label>Порт:</label><input type="number" id="s_port" value="3000"></div>
+    </div>
+    <div class="field" id="s_target_field"><label>Целевой принтер (для привязки брака):</label><select id="s_target_device"></select></div>
+    <div class="field"><label><input type="checkbox" id="s_active" checked style="width:auto;"> Активен</label></div>
+    <div style="display: flex; gap: 10px; margin-top: 15px;">
+        <button class="btn" style="flex:1; background: var(--success);" onclick="submitScannerModal()">СОХРАНИТЬ</button>
+        <button class="btn" style="flex:1;" onclick="document.getElementById('scanner_modal').close()">ОТМЕНА</button>
+    </div>
+</dialog>
 
 <div id="templatesTab" class="tab-content">
     <div style="display: flex; gap: 20px; flex-wrap: wrap;">
@@ -1013,55 +1040,67 @@
     }
 
     function renderPrintersGrid(data) {
-        const grid = document.getElementById('printers-grid');
-        grid.innerHTML = '';
-        const assignedIds = new Set();
-        const printersById = {};
-        (data.all_printers || []).forEach(p => printersById[p.id] = p);
-
-        // СОХРАНЯЕМ ЛИНИИ В КЭШ ДЛЯ КАРТОЧЕК ЗАДАЧ
+        // 1. Обновляем кэш линий и привязанного оборудования для карточек задач
         (data.lines || []).forEach(l => {
             window.linesMap[l.id] = l;
         });
 
-        (data.lines || []).forEach(l => {
-            const linePrinters = l.printers || [];
-            const lineScanners = l.scanners || [];
-            if (linePrinters.length === 0 && lineScanners.length === 0) return;
-
-            let printersHtml = '';
-            linePrinters.forEach(p => {
-                assignedIds.add(p.id);
-                printersHtml += createPrinterCard(p);
-            });
-            let scannersHtml = '';
-            lineScanners.forEach(scanner => {
-                scannersHtml += createScannerCard(scanner, printersById);
-            });
-
-            grid.innerHTML += `
-                <div class="line-column">
-                    <h2 class="line-column-title">Линия: ${l.name}</h2>
-                    ${linePrinters.length ? `<div><div class="equipment-label">Принтеры</div><div class="line-printers-list">${printersHtml}</div></div>` : ''}
-                    ${lineScanners.length ? `<div><div class="equipment-label">Сканеры и камеры</div><div class="line-printers-list">${scannersHtml}</div></div>` : ''}
-                </div>`;
+        // 2. Кэшируем принтеры для быстрого поиска
+        (data.all_printers || []).forEach(p => {
+            window.printersMap[p.id] = p;
         });
 
-        const unassigned = (data.all_printers || []).filter(p => !assignedIds.has(p.id));
-        if (unassigned.length > 0) {
-            let unassignedHtml = '';
-            unassigned.forEach(p => {
-                unassignedHtml += createPrinterCard(p);
-            });
-
-            grid.innerHTML += `
-                <div class="line-column unassigned-column">
-                    <h2 class="line-column-title" style="color:var(--warning);">Свободные устройства</h2>
-                    <div class="line-printers-list">
-                        ${unassignedHtml}
-                    </div>
-                </div>`;
-        }
+        // Отрисовку DOM-дерева в #printers-grid пропускаем, так как блок скрыт
+        //
+        // const grid = document.getElementById('printers-grid');
+        // grid.innerHTML = '';
+        // const assignedIds = new Set();
+        // const printersById = {};
+        // (data.all_printers || []).forEach(p => printersById[p.id] = p);
+        //
+        // // СОХРАНЯЕМ ЛИНИИ В КЭШ ДЛЯ КАРТОЧЕК ЗАДАЧ
+        // (data.lines || []).forEach(l => {
+        //     window.linesMap[l.id] = l;
+        // });
+        //
+        // (data.lines || []).forEach(l => {
+        //     const linePrinters = l.printers || [];
+        //     const lineScanners = l.scanners || [];
+        //     if (linePrinters.length === 0 && lineScanners.length === 0) return;
+        //
+        //     let printersHtml = '';
+        //     linePrinters.forEach(p => {
+        //         assignedIds.add(p.id);
+        //         printersHtml += createPrinterCard(p);
+        //     });
+        //     let scannersHtml = '';
+        //     lineScanners.forEach(scanner => {
+        //         scannersHtml += createScannerCard(scanner, printersById);
+        //     });
+        //
+        //     grid.innerHTML += `
+        //         <div class="line-column">
+        //             <h2 class="line-column-title">Линия: ${l.name}</h2>
+        //             ${linePrinters.length ? `<div><div class="equipment-label">Принтеры</div><div class="line-printers-list">${printersHtml}</div></div>` : ''}
+        //             ${lineScanners.length ? `<div><div class="equipment-label">Сканеры и камеры</div><div class="line-printers-list">${scannersHtml}</div></div>` : ''}
+        //         </div>`;
+        // });
+        //
+        // const unassigned = (data.all_printers || []).filter(p => !assignedIds.has(p.id));
+        // if (unassigned.length > 0) {
+        //     let unassignedHtml = '';
+        //     unassigned.forEach(p => {
+        //         unassignedHtml += createPrinterCard(p);
+        //     });
+        //
+        //     grid.innerHTML += `
+        //         <div class="line-column unassigned-column">
+        //             <h2 class="line-column-title" style="color:var(--warning);">Свободные устройства</h2>
+        //             <div class="line-printers-list">
+        //                 ${unassignedHtml}
+        //             </div>
+        //         </div>`;
+        // }
     }
 
     function renderLogs(logs) {
@@ -1217,88 +1256,316 @@
         }
     }
 
+    // Загрузка и рендер иерархического дерева
     async function loadSettingsData() {
-        try {
-            const lRes = await fetch('/api/lines');
-            if (!lRes.ok) throw new Error(`Сбой на бэкенде (/api/lines), код ${lRes.status}`);
-            const lines = await lRes.json() || [];
+        const container = document.getElementById('settings-lines-tree');
+        container.innerHTML = '<div style="color: var(--text-muted);">Обновление данных...</div>';
 
+        try {
+            const [linesRes, printRes, scanRes, assignRes] = await Promise.all([
+                fetch('/api/lines'),
+                fetch('/api/printers'),
+                fetch('/api/scanners'),
+                fetch('/api/assignments')
+            ]);
+
+            const lines = await linesRes.json() || [];
+            const printData = await printRes.json() || {};
+            const allPrinters = printData.all_printers || [];
+            const allScanners = await scanRes.json() || [];
+            const assignments = await assignRes.json() || [];
+
+            // Кэшируем для форм
             window.linesMap = {};
             lines.forEach(l => window.linesMap[l.id] = l);
-
-            document.getElementById('assign_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
-            document.getElementById('s_line').innerHTML = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
-            document.getElementById('lines-list-table').innerHTML = lines.map(l => `
-                <tr>
-                    <td>${l.id}</td>
-                    <td>${l.name}</td>
-                    <td>${l.description || '-'}</td>
-                    <td><button class="btn" onclick="editLine(${l.id})">Редактировать</button></td>
-                </tr>`).join('');
-
-            const pRes = await fetch('/api/printers');
-            if (!pRes.ok) throw new Error(`Сбой на бэкенде (/api/printers), код ${pRes.status}`);
-            const pData = await pRes.json() || {};
-            const printers = pData.all_printers || [];
-
             window.printersMap = {};
-            printers.forEach(p => window.printersMap[p.id] = p);
-
-            document.getElementById('assign_printer').innerHTML = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-            document.getElementById('s_target_device').innerHTML = '<option value="">Не выбран</option>' + printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-            document.getElementById('printers-list-table').innerHTML = printers.map(p => {
-                let hasWeight = "Нет";
-                if (p.capture_weight) hasWeight = "Да";
-                else if (p.settings && p.settings.capture_weight) hasWeight = "Да";
-
-                const pumperLabel = p.pumper_mode === 'ribbon_buffer'
-                    ? `<span style="color: var(--warning)">Ribbon (${p.lead_loop || 5})</span>`
-                    : `<span style="color: var(--success)">Single (1)</span>`;
-
-                return `<tr>
-            <td>${p.id}</td>
-            <td>${p.name}</td>
-            <td>${p.ip}:${p.port}</td>
-            <td>${p.driver_type}</td>
-            <td>${pumperLabel}</td>
-            <td>${hasWeight}</td>
-            <td><button class="btn" onclick="editPrinter(${p.id})">Редактировать</button></td>
-        </tr>`;
-            }).join('');
-
-            const sRes = await fetch('/api/scanners');
-            if (!sRes.ok) throw new Error(`Сбой на бэкенде (/api/scanners), код ${sRes.status}`);
-            const scanners = await sRes.json() || [];
+            allPrinters.forEach(p => window.printersMap[p.id] = p);
             window.scannersMap = {};
-            scanners.forEach(s => window.scannersMap[s.id] = s);
-            document.getElementById('scanners-list-table').innerHTML = scanners.map(s => {
-                const line = window.linesMap[s.line_id];
-                return `<tr>
-                    <td>${s.id}</td>
-                    <td>${line ? line.name : s.line_id}</td>
-                    <td>${s.name}</td>
-                    <td>${s.address}:${s.port || '-'}</td>
-                    <td>${s.role}</td>
-                    <td>${s.is_active ? 'Активен' : 'Выключен'}</td>
-                    <td><button class="btn" onclick="editScanner(${s.id})">Редактировать</button></td>
-                </tr>`;
+            allScanners.forEach(s => window.scannersMap[s.id] = s);
+
+            // Индексируем принадлежность принтеров линиям через assignments
+            const printerLineMap = {};
+            const printerRoleMap = {};
+            assignments.forEach(a => {
+                printerLineMap[a.printer_id] = a.line_id;
+                printerRoleMap[a.printer_id] = a.role;
+            });
+
+            // Заполняем селекты в диалогах
+            const lineOptions = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+            document.getElementById('p_line_assign').innerHTML = '<option value="">-- Без привязки --</option>' + lineOptions;
+            document.getElementById('s_line').innerHTML = lineOptions;
+            document.getElementById('s_target_device').innerHTML = '<option value="">-- Не выбран --</option>' +
+                allPrinters.map(p => `<option value="${p.id}">${p.name} (${p.ip})</option>`).join('');
+
+            // Рендерим карточки линий
+            container.innerHTML = lines.map(line => {
+                // Оборудование этой линии
+                const linePrinters = allPrinters.filter(p => printerLineMap[p.id] === line.id);
+                const lineScanners = allScanners.filter(s => s.line_id === line.id);
+
+                const printersHtml = linePrinters.length ? linePrinters.map(p => `
+                <div style="background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <b>🖨️ ${p.name}</b>
+                        <span style="font-size:0.75rem; background:#2a2a2a; padding:2px 6px; border-radius:4px; margin-left:6px; color:var(--primary);">${printerRoleMap[p.id] || 'PRIMARY'}</span>
+                        <div style="font-size:0.8rem; color:#aaa; margin-top:2px;">${p.ip}:${p.port} (${p.driver_type})</div>
+                    </div>
+                    <button class="btn" style="padding:4px 8px; font-size:0.8rem;" onclick="openPrinterModal(${p.id})">ИЗМЕНИТЬ</button>
+                </div>
+            `).join('') : '<div style="color:#666; font-size:0.85rem; padding:5px;">Нет привязанных принтеров</div>';
+
+                const scannersHtml = lineScanners.length ? lineScanners.map(s => `
+                <div style="background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <b>📷 ${s.name}</b>
+                        <span style="font-size:0.75rem; background:#2a2a2a; padding:2px 6px; border-radius:4px; margin-left:6px; color:#a78bfa;">${scannerRoleLabel(s.role)}</span>
+                        <div style="font-size:0.8rem; color:#aaa; margin-top:2px;">${s.address}:${s.port || '-'}</div>
+                    </div>
+                    <button class="btn" style="padding:4px 8px; font-size:0.8rem;" onclick="openScannerModal(${s.id})">ИЗМЕНИТЬ</button>
+                </div>
+            `).join('') : '<div style="color:#666; font-size:0.85rem; padding:5px;">Нет привязанных камер</div>';
+
+                return `
+            <div style="background:var(--surface); border:1px solid #2d2d2d; border-radius:8px; padding:15px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:12px;">
+                    <div>
+                        <span style="font-size:1.15rem; font-weight:bold; color:#fff;">Линия: ${line.name}</span>
+                        ${line.description ? `<span style="color:var(--text-muted); font-size:0.85rem; margin-left:10px;">(${line.description})</span>` : ''}
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn" style="font-size:0.8rem; background:#292929;" onclick="openPrinterModal(null, ${line.id})">+ Принтер</button>
+                        <button class="btn" style="font-size:0.8rem; background:#292929;" onclick="openScannerModal(null, ${line.id})">+ Сканер</button>
+                        <button class="btn" style="font-size:0.8rem;" onclick="openLineModal(${line.id})">Параметры линии</button>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                    <div>
+                        <div style="font-size:0.75rem; text-transform:uppercase; color:#777; font-weight:bold; margin-bottom:6px;">Принтеры маркировки</div>
+                        <div style="display:flex; flex-direction:column; gap:8px;">${printersHtml}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.75rem; text-transform:uppercase; color:#777; font-weight:bold; margin-bottom:6px;">Камеры верификации</div>
+                        <div style="display:flex; flex-direction:column; gap:8px;">${scannersHtml}</div>
+                    </div>
+                </div>
+            </div>`;
             }).join('');
 
-            const aRes = await fetch('/api/assignments');
-            if (!aRes.ok) throw new Error(`Сбой на бэкенде (/api/assignments), код ${aRes.status}`);
-            const as = await aRes.json() || [];
-            window.assignmentsList = as;
+            // Свободные принтеры без линии
+            const unassignedPrinters = allPrinters.filter(p => !printerLineMap[p.id]);
+            const unassignedBox = document.getElementById('settings-unassigned-box');
+            const unassignedList = document.getElementById('settings-unassigned-list');
 
-            document.getElementById('assignments-table').innerHTML = as.map((a, idx) => `
-                <tr>
-                    <td>${a.line_name}</td>
-                    <td>${a.printer_name}</td>
-                    <td>${a.role}</td>
-                    <td><button class="btn" onclick="editAssignment(${idx})">Редактировать</button></td>
-                </tr>`).join('');
+            if (unassignedPrinters.length > 0) {
+                unassignedBox.style.display = 'block';
+                unassignedList.innerHTML = unassignedPrinters.map(p => `
+                <div style="background:#1a1a1a; border:1px solid #333; border-radius:6px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <b>${p.name}</b> (${p.ip})
+                        <div style="font-size:0.75rem; color:#888;">${p.driver_type}</div>
+                    </div>
+                    <button class="btn" style="font-size:0.75rem;" onclick="openPrinterModal(${p.id})">Привязать</button>
+                </div>
+            `).join('');
+            } else {
+                unassignedBox.style.display = 'none';
+            }
+
         } catch (e) {
-            console.error("Критический сбой:", e);
-            alert("⚠️ ОШИБКА СЕРВЕРА ⚠️\n\n" + e.message);
+            container.innerHTML = `<div style="color:var(--danger);">Ошибка загрузки: ${e.message}</div>`;
+        }
+    }
+
+    // ----------------- МОДАЛКА: ЛИНИЯ -----------------
+    function openLineModal(id = null) {
+        const modal = document.getElementById('line_modal');
+        document.getElementById('l_id').value = id || '';
+        if (id && window.linesMap[id]) {
+            const l = window.linesMap[id];
+            document.getElementById('l_name').value = l.name;
+            document.getElementById('l_desc').value = l.description || '';
+            document.getElementById('line_modal_title').innerText = 'Редактировать линию';
+        } else {
+            document.getElementById('l_name').value = '';
+            document.getElementById('l_desc').value = '';
+            document.getElementById('line_modal_title').innerText = 'Новая линия';
+        }
+        modal.showModal();
+    }
+
+    async function saveLine() {
+        const idStr = document.getElementById('l_id').value;
+        const body = {
+            name: document.getElementById('l_name').value.trim(),
+            description: document.getElementById('l_desc').value.trim(),
+            is_active: true
+        };
+        if (idStr) body.id = parseInt(idStr);
+        if (!body.name) return alert('Введите имя линии!');
+
+        const res = await fetch('/api/lines', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (res.ok) {
+            document.getElementById('line_modal').close();
+            loadSettingsData();
+        } else {
+            alert('Ошибка: ' + await res.text());
+        }
+    }
+
+    // ----------------- МОДАЛКА: ПРИНТЕР -----------------
+    function openPrinterModal(id = null, defaultLineId = null) {
+        const modal = document.getElementById('printer_modal');
+        document.getElementById('p_id').value = id || '';
+
+        if (id && window.printersMap[id]) {
+            const p = window.printersMap[id];
+            document.getElementById('p_name').value = p.name;
+            document.getElementById('p_ip').value = p.ip;
+            document.getElementById('p_port').value = p.port || 9100;
+            document.getElementById('p_driver').value = p.driver_type;
+            document.getElementById('p_active').checked = p.is_active;
+
+            document.getElementById('p_pumper_mode').value = p.pumper_mode || 'fast_single';
+            document.getElementById('p_buffer_limit').value = p.buffer_limit || 30;
+            document.getElementById('p_lead_loop').value = p.lead_loop || 5;
+
+            // Линия и роль
+            document.getElementById('p_line_assign').value = p.line_id || '';
+            document.getElementById('p_role_assign').value = p.role || 'PRIMARY';
+
+            const s = p.settings || {};
+            document.getElementById('p_bcs_device').value = s.bcs_device || '';
+            document.getElementById('p_capture_weight').checked = !!s.capture_weight;
+            document.getElementById('p_bizerba_conveyor').checked = !!s.conveyor;
+            document.getElementById('p_record_gxnet').checked = !!s.record_gxnet;
+
+            document.getElementById('printer_modal_title').innerText = 'Редактировать принтер';
+        } else {
+            document.getElementById('p_name').value = '';
+            document.getElementById('p_ip').value = '';
+            document.getElementById('p_port').value = '9100';
+            document.getElementById('p_driver').value = 'videojet';
+            document.getElementById('p_active').checked = true;
+            document.getElementById('p_line_assign').value = defaultLineId || '';
+            document.getElementById('p_role_assign').value = 'PRIMARY';
+            document.getElementById('printer_modal_title').innerText = 'Добавить принтер';
+        }
+
+        togglePumperFields();
+        toggleDriverExtraFields();
+        modal.showModal();
+    }
+
+    async function submitPrinterModal() {
+        const id = parseInt(document.getElementById('p_id').value) || 0;
+        const lineId = parseInt(document.getElementById('p_line_assign').value) || 0;
+        const role = document.getElementById('p_role_assign').value;
+        const driverType = document.getElementById('p_driver').value;
+
+        const body = {
+            id: id,
+            name: document.getElementById('p_name').value.trim(),
+            ip: document.getElementById('p_ip').value.trim(),
+            port: parseInt(document.getElementById('p_port').value) || 9100,
+            driver_type: driverType,
+            pumper_mode: document.getElementById('p_pumper_mode').value,
+            buffer_limit: parseInt(document.getElementById('p_buffer_limit').value) || 30,
+            lead_loop: parseInt(document.getElementById('p_lead_loop').value) || 5,
+            is_active: document.getElementById('p_active').checked
+        };
+
+        if (driverType === 'bizerba') {
+            body.settings = {
+                bcs_device: document.getElementById('p_bcs_device').value.trim() || 'GLPMax',
+                capture_weight: document.getElementById('p_capture_weight').checked,
+                conveyor: document.getElementById('p_bizerba_conveyor').checked,
+                record_gxnet: document.getElementById('p_record_gxnet').checked
+            };
+        }
+
+        const saveRes = await fetch('/api/printers/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!saveRes.ok) return alert('Ошибка сохранения принтера: ' + await saveRes.text());
+        const savedPrinter = await saveRes.json();
+        const targetPrinterId = id || savedPrinter.printer_id;
+
+        // Атомарно привязываем к линии, если она выбрана
+        if (lineId && targetPrinterId) {
+            await fetch('/api/assignments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ line_id: lineId, printer_id: targetPrinterId, role: role })
+            });
+        }
+
+        document.getElementById('printer_modal').close();
+        loadSettingsData();
+    }
+
+    // ----------------- МОДАЛКА: СКАНЕР -----------------
+    function openScannerModal(id = null, defaultLineId = null) {
+        const modal = document.getElementById('scanner_modal');
+        document.getElementById('s_id').value = id || '';
+
+        if (id && window.scannersMap[id]) {
+            const s = window.scannersMap[id];
+            document.getElementById('s_line').value = s.line_id;
+            document.getElementById('s_name').value = s.name;
+            document.getElementById('s_address').value = s.address;
+            document.getElementById('s_port').value = s.port || 3000;
+            document.getElementById('s_role').value = s.role || 'INLINE_VERIFIER';
+            document.getElementById('s_target_device').value = s.target_device_id || '';
+            document.getElementById('s_active').checked = !!s.is_active;
+            document.getElementById('scanner_modal_title').innerText = 'Редактировать сканер';
+        } else {
+            document.getElementById('s_line').value = defaultLineId || document.getElementById('s_line').value;
+            document.getElementById('s_name').value = '';
+            document.getElementById('s_address').value = '';
+            document.getElementById('s_port').value = '3000';
+            document.getElementById('s_role').value = 'INLINE_VERIFIER';
+            document.getElementById('s_target_device').value = '';
+            document.getElementById('s_active').checked = true;
+            document.getElementById('scanner_modal_title').innerText = 'Добавить сканер';
+        }
+
+        toggleScannerTarget();
+        modal.showModal();
+    }
+
+    async function submitScannerModal() {
+        const body = {
+            id: parseInt(document.getElementById('s_id').value) || 0,
+            line_id: parseInt(document.getElementById('s_line').value),
+            name: document.getElementById('s_name').value.trim(),
+            driver_type: 'tcp_camera',
+            address: document.getElementById('s_address').value.trim(),
+            port: parseInt(document.getElementById('s_port').value) || 0,
+            role: document.getElementById('s_role').value,
+            target_device_id: parseInt(document.getElementById('s_target_device').value) || null,
+            is_active: document.getElementById('s_active').checked
+        };
+
+        const res = await fetch('/api/scanners', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (res.ok) {
+            document.getElementById('scanner_modal').close();
+            loadSettingsData();
+        } else {
+            alert('Ошибка: ' + await res.text());
         }
     }
 
