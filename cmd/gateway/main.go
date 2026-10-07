@@ -33,7 +33,7 @@ import (
 	ui_okk "rovnoMark/ui_okk"
 )
 
-const serviceName = "RovnoMarkGateway"
+const serviceName = "OpenMarkGateway"
 
 func main() {
 	debugMode := flag.Bool("debug", false, "включить расширенный дебаг-режим")
