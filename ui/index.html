@@ -674,14 +674,40 @@
             }
 
             container.innerHTML = tasks.map(t => {
+                // 1. План и печать из задания (бэкенд уже агрегирует оба принтера)
                 const total = t.stats?.total || 1;
                 const printed = t.stats?.printed || 0;
-                const scanned = t.stats?.scanned || 0;
 
-                const startTime = formatTaskTime(t.started_at || t.created_at || t.start_time);
+// 2. Сканы: суммируем данные ПО ВСЕМ сканерам линии
+// (если бэкенд отдает только одну камеру в t.stats.scanned)
+                const lineScanners = (window.linesMap[t.line_id] || {}).scanners || [];
+                let totalScanned = 0;
 
+                if (lineScanners.length > 0) {
+                    // Суммируем чтения по всем камерам линии (или берем t.stats.scanned, если бэкенд починен)
+                    totalScanned = lineScanners.reduce((sum, s) => sum + (s.good_scans_task || s.good_scans || 0), 0);
+                } else {
+                    totalScanned = t.stats?.scanned || 0;
+                }
+
+// 3. Пересчет процентов и считываемости по сумме всех устройств
                 const printPct = Math.min(Math.round((printed / total) * 100), 100);
-                const scanPct = Math.min(Math.round((scanned / total) * 100), 100);
+                const scanPct = Math.min(Math.round((totalScanned / total) * 100), 100);
+
+                let ratioText = '—';
+                let ratioColor = 'var(--text-muted)';
+                const diff = printed - totalScanned;
+
+                if (printed > 0) {
+                    const ratioVal = ((totalScanned / printed) * 100).toFixed(1);
+                    ratioText = `${ratioVal}%`;
+                    const rNum = parseFloat(ratioVal);
+
+                    if (rNum >= 98.0 && rNum <= 100.0) ratioColor = 'var(--success)';
+                    else if (rNum >= 90.0 && rNum < 98.0) ratioColor = 'var(--warning)';
+                    else if (rNum > 100.0) ratioColor = '#38bdf8';
+                    else ratioColor = 'var(--danger)';
+                }
 
                 // Получаем линию и устройства из локального кэша
                 const line = window.linesMap[t.line_id] || {};
@@ -696,27 +722,6 @@
 
                 // Последний отсканированный код (пробуем взять из сканера или из задачи)
                 const lastScannedCode = (scanner && scanner.last_code) || t.last_scanned_code || '-';
-
-                // --- 2. Расчет соотношения "Сканы / Печать" (Read Rate) ---
-                let ratioText = '—';
-                let ratioColor = 'var(--text-muted)';
-                const diff = printed - scanned;
-
-                if (printed > 0) {
-                    const ratioVal = ((scanned / printed) * 100).toFixed(1);
-                    ratioText = `${ratioVal}%`;
-
-                    const ratioNum = parseFloat(ratioVal);
-                    if (ratioNum >= 98.0 && ratioNum <= 100.0) {
-                        ratioColor = 'var(--success)';       // Отличная верификация
-                    } else if (ratioNum >= 90.0 && ratioNum < 98.0) {
-                        ratioColor = 'var(--warning)';       // Допустимый брак/пропуски
-                    } else if (ratioNum > 100.0) {
-                        ratioColor = '#38bdf8';              // Повторные считывания (дабл-триггер)
-                    } else {
-                        ratioColor = 'var(--danger)';        // Критический процент нечитки (<90%)
-                    }
-                }
 
                 // Блок принтера
                 // 1. Формируем список ВСЕХ принтеров линии
