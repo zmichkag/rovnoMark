@@ -17,6 +17,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type StorageMode string
+
+const (
+	StorageModeSharded  StorageMode = "sharded"
+	StorageModeMonolith StorageMode = "monolith"
+
+	TargetMasterSchemaVersion = 6
+	TargetCodesSchemaVersion  = 3 // Поднято до v3 (перенос scanner_reads в шард)
+)
+
 type weightEvent struct {
 	taskID       int
 	printerID    int
@@ -26,12 +36,15 @@ type weightEvent struct {
 }
 
 type Store struct {
-	db          *sql.DB
-	codesMu     sync.RWMutex
-	codesDB     *sql.DB
+	mode        StorageMode
+	db          *sql.DB      // Master DB в sharded-режиме ИЛИ единая база в monolith
+	codesMu     sync.RWMutex // Мьютекс активного шарда кодов
+	codesDB     *sql.DB      // Активный дескриптор шарда кодов (в monolith указывает на s.db)
 	curMonth    string
 	dataDir     string
-	weightQueue chan weightEvent // Буфер отвесов
+	weightQueue chan weightEvent
+	closed      bool
+	closeMu     sync.Mutex
 }
 
 type ReconcileResult struct {
@@ -39,46 +52,81 @@ type ReconcileResult struct {
 	ReturnedCodes int `json:"returned_codes"`
 }
 
-const (
-	// v6:
-	TargetMasterSchemaVersion = 6
-	// v2: добавляем колонку weight в codes_YYYY_MM.db
-	TargetCodesSchemaVersion = 2
-)
-
-func New(baseDir string) *Store {
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		log.Fatalf("Не удалось создать каталог БД %s: %v", baseDir, err)
-	}
-
-	masterPath := filepath.Join(baseDir, "rovnoMark_master.db")
-	db, err := sql.Open("sqlite", masterPath)
+func openSQLite(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		log.Fatal("Ошибка открытия Master БД:", err)
+		return nil, err
 	}
-
 	db.SetMaxOpenConns(1)
 	db.Exec("PRAGMA journal_mode = WAL;")
 	db.Exec("PRAGMA busy_timeout = 5000;")
 	db.Exec("PRAGMA synchronous = NORMAL;")
 	db.Exec("PRAGMA foreign_keys = ON;")
+	return db, nil
+}
+
+func New(baseDir string, mode ...StorageMode) *Store {
+	selectedMode := StorageModeSharded
+	if len(mode) > 0 && mode[0] != "" {
+		selectedMode = mode[0]
+	}
+
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		log.Fatalf("Не удалось создать каталог БД %s: %v", baseDir, err)
+	}
+
+	store := &Store{
+		mode:        selectedMode,
+		dataDir:     baseDir,
+		weightQueue: make(chan weightEvent, 2000),
+	}
+
+	if selectedMode == StorageModeMonolith {
+		monoPath := filepath.Join(baseDir, "rovnoMark.db")
+		db, err := openSQLite(monoPath)
+		if err != nil {
+			log.Fatalf("Ошибка открытия Monolith БД: %v", err)
+		}
+		store.db = db
+		store.codesDB = db
+
+		if err := MigrateMaster(db); err != nil {
+			log.Fatalf("Критическая ошибка миграции Master схемы в Monolith БД: %v", err)
+		}
+		if err := MigrateCodesShard(db); err != nil {
+			log.Fatalf("Критическая ошибка миграции Codes схемы в Monolith БД: %v", err)
+		}
+
+		go store.runWeightBatchWriter()
+		return store
+	}
+
+	// Sharded Mode
+	masterPath := filepath.Join(baseDir, "rovnoMark_master.db")
+	db, err := openSQLite(masterPath)
+	if err != nil {
+		log.Fatal("Ошибка открытия Master БД:", err)
+	}
+	store.db = db
 
 	if err := MigrateMaster(db); err != nil {
 		log.Fatalf("Критическая ошибка миграции Master БД: %v", err)
 	}
 
-	store := &Store{
-		db:          db,
-		dataDir:     baseDir,
-		weightQueue: make(chan weightEvent, 2000), // Буфер на 2000 событий
-	}
-
 	store.rotateCodesDBIfNeeded()
-
-	// Запускаем пакетный накопитель отвесов
 	go store.runWeightBatchWriter()
 
 	return store
+}
+
+func (s *Store) getCodesDB() *sql.DB {
+	if s.mode == StorageModeMonolith {
+		return s.db
+	}
+	s.rotateCodesDBIfNeeded()
+	s.codesMu.RLock()
+	defer s.codesMu.RUnlock()
+	return s.codesDB
 }
 
 func (s *Store) runWeightBatchWriter() {
@@ -139,14 +187,11 @@ func (s *Store) flushWeightsToDB(events []weightEvent) {
 	}
 }
 
-func (s *Store) getCodesDB() *sql.DB {
-	s.rotateCodesDBIfNeeded()
-	s.codesMu.RLock()
-	defer s.codesMu.RUnlock()
-	return s.codesDB
-}
-
 func (s *Store) rotateCodesDBIfNeeded() {
+	if s.mode == StorageModeMonolith {
+		return
+	}
+
 	monthKey := time.Now().Format("2006_01")
 
 	s.codesMu.RLock()
@@ -331,30 +376,7 @@ func MigrateMaster(db *sql.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (line_id) REFERENCES lines(id),
 			FOREIGN KEY (target_device_id) REFERENCES printers(id)
-		);
-
-		CREATE TABLE IF NOT EXISTS scanner_reads (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			scanner_id INTEGER NOT NULL,
-			line_id INTEGER NOT NULL,
-			task_id INTEGER,
-			task_code_id INTEGER,
-			code TEXT NOT NULL,
-			raw_data BLOB,
-			match_status TEXT DEFAULT 'unmatched',
-			read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (scanner_id) REFERENCES line_scanners(id),
-			FOREIGN KEY (line_id) REFERENCES lines(id),
-			FOREIGN KEY (task_id) REFERENCES tasks(id)
-		);
-
-		CREATE INDEX IF NOT EXISTS idx_line_scanners_line
-			ON line_scanners(line_id, is_active);
-		CREATE INDEX IF NOT EXISTS idx_scanner_reads_scanner
-			ON scanner_reads(scanner_id, id DESC);
-		CREATE INDEX IF NOT EXISTS idx_scanner_reads_task_code
-			ON scanner_reads(task_id, code);
-		`,
+		);`,
 	}
 	// В ранее выпущенных сборках встречался user_version=4 без соответствующего
 	// набора DDL. Оставляем v4 совместимой, а v5 повторно применяет идемпотентную
@@ -472,6 +494,25 @@ func MigrateCodesShard(db *sql.DB) error {
 		2: `
 		ALTER TABLE task_codes ADD COLUMN weight TEXT DEFAULT '';
 		`,
+		3: `
+		CREATE TABLE IF NOT EXISTS scanner_reads (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scanner_id INTEGER NOT NULL,
+			line_id INTEGER NOT NULL,
+			task_id INTEGER,
+			task_code_id INTEGER,
+			code TEXT NOT NULL,
+			raw_data BLOB,
+			match_status TEXT DEFAULT 'unmatched',
+			read_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_scanner 
+			ON scanner_reads(scanner_id, id DESC);
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_task_code 
+			ON scanner_reads(task_id, code);
+		CREATE INDEX IF NOT EXISTS idx_scanner_reads_task_id 
+			ON scanner_reads(task_id);
+		`,
 	}
 
 	for v := currentVersion + 1; v <= TargetCodesSchemaVersion; v++ {
@@ -505,21 +546,47 @@ func MigrateCodesShard(db *sql.DB) error {
 }
 
 func (s *Store) Close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+
+	var lastErr error
+
+	if s.mode == StorageModeMonolith {
+		if s.db != nil {
+			_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+			if err := s.db.Close(); err != nil {
+				lastErr = err
+			}
+			s.db = nil
+			s.codesDB = nil
+		}
+		return lastErr
+	}
+
 	s.codesMu.Lock()
 	if s.codesDB != nil {
 		_, _ = s.codesDB.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-		_ = s.codesDB.Close()
+		if err := s.codesDB.Close(); err != nil {
+			lastErr = err
+		}
 		s.codesDB = nil
 	}
 	s.codesMu.Unlock()
 
 	if s.db != nil {
 		_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-		err := s.db.Close()
+		if err := s.db.Close(); err != nil {
+			lastErr = err
+		}
 		s.db = nil
-		return err
 	}
-	return nil
+
+	return lastErr
 }
 
 func (s *Store) AppendTaskCodes(taskID int, items []models.InboundCodeItem) error {
@@ -544,6 +611,11 @@ func (s *Store) AppendTaskCodes(taskID int, items []models.InboundCodeItem) erro
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`, lineID, printerID, role)
+	return err
 }
 
 func (s *Store) FetchAndAssignCodesAlternating(taskID int, printerID int, role string, limit int) ([]models.TaskCode, error) {
@@ -692,64 +764,6 @@ func (s *Store) GetPendingCodes(taskID int, limit int) ([]models.TaskCode, error
 		codes = append(codes, c)
 	}
 	return codes, nil
-}
-
-func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastIndex int) (*ReconcileResult, error) {
-	db := s.getCodesDB()
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("ошибка открытия транзакции сверки: %w", err)
-	}
-	defer tx.Rollback()
-
-	if lastIndex > 0 {
-		_, err = tx.Exec(`
-			UPDATE task_codes 
-			SET status = 'printed', 
-			    printed_at = CURRENT_TIMESTAMP 
-			WHERE task_id = ? 
-			  AND printer_id = ? 
-			  AND printer_index <= ? 
-			  AND status = 'in_buffer'`,
-			taskID, printerID, lastIndex)
-		if err != nil {
-			return nil, fmt.Errorf("ошибка фиксации printed кодов: %w", err)
-		}
-	}
-
-	resReverted, err := tx.Exec(`
-		UPDATE task_codes 
-		SET status = 'pending', 
-		    printer_id = NULL, 
-		    printer_index = NULL 
-		WHERE task_id = ? 
-		  AND printer_id = ? 
-		  AND status = 'in_buffer'`,
-		taskID, printerID)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка возврата неотпечатанного буфера в pending: %w", err)
-	}
-
-	returnedCount, _ := resReverted.RowsAffected()
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("ошибка фиксации транзакции сверки: %w", err)
-	}
-
-	var totalPrinted int
-	err = db.QueryRow(`
-		SELECT COUNT(id) 
-		FROM task_codes 
-		WHERE task_id = ? AND status = 'printed'`,
-		taskID).Scan(&totalPrinted)
-	if err != nil {
-		return nil, fmt.Errorf("ошибка подсчета итоговых printed: %w", err)
-	}
-
-	return &ReconcileResult{
-		TotalPrinted:  totalPrinted,
-		ReturnedCodes: int(returnedCount),
-	}, nil
 }
 
 func (s *Store) MarkAsPrinted(taskID int, printerID int, lastIndex int) (int64, error) {
@@ -950,11 +964,6 @@ func (s *Store) SaveLine(l models.LineConfig) error {
 	return err
 }
 
-func (s *Store) AssignPrinterToLine(lineID, printerID int, role string) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO line_printers (line_id, printer_id, role) VALUES (?, ?, ?)`, lineID, printerID, role)
-	return err
-}
-
 func (s *Store) GetPrintersByLine(lineID int) ([]models.PrinterConfig, error) {
 	query := `SELECT p.id, p.name, p.ip, p.port, p.driver_type, 
 	                 COALESCE(lp.role, 'PRIMARY'),
@@ -996,6 +1005,10 @@ func (s *Store) GetPrinterLineMap() (map[int]int, error) {
 		return nil, err
 	}
 	defer rows.Close()
+
+	if s.db == nil {
+		return nil, fmt.Errorf("store closed")
+	}
 
 	m := make(map[int]int)
 	for rows.Next() {
@@ -1070,19 +1083,6 @@ func (s *Store) GetRndTextByTask(taskID int) (string, error) {
 	return rndText, err
 }
 
-func (s *Store) SaveEventLog(lineID *int, printerID *int, eventType string, message string) error {
-	query := `INSERT INTO event_log (line_id, printer_id, event_type, message) VALUES (?, ?, ?, ?)`
-	var lID, pID interface{}
-	if lineID != nil && *lineID > 0 {
-		lID = *lineID
-	}
-	if printerID != nil && *printerID > 0 {
-		pID = *printerID
-	}
-	_, err := s.db.Exec(query, lID, pID, eventType, message)
-	return err
-}
-
 func (s *Store) GetEventLogsHistory(filter models.LogFilter) ([]models.EventLogItem, error) {
 	query := `
 		SELECT e.id, e.timestamp, e.line_id, COALESCE(l.name, ''), e.printer_id, COALESCE(p.name, 'Система'), e.event_type, e.message
@@ -1153,12 +1153,6 @@ func (s *Store) GetEventLogsHistory(filter models.LogFilter) ([]models.EventLogI
 	return logs, nil
 }
 
-func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status string, template string) error {
-	_, err := s.db.Exec(`INSERT INTO printer_telemetry (printer_id, cur_count, ribbon, status, template) VALUES (?, ?, ?, ?, ?)`,
-		printerID, count, ribbon, status, template)
-	return err
-}
-
 func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}, error) {
 	query := `SELECT timestamp, cur_count, ribbon, status, template FROM printer_telemetry WHERE printer_id = ? ORDER BY timestamp DESC LIMIT ?`
 	rows, err := s.db.Query(query, printerID, limit)
@@ -1182,21 +1176,14 @@ func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}
 	return result, nil
 }
 
-func (s *Store) RecordPrinterCounterSnapshot(taskID, lineID, printerID int, eventType string, counterValue int64) error {
-	query := `INSERT INTO task_printer_counters (task_id, line_id, printer_id, event_type, counter_value, recorded_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-	_, err := s.db.Exec(query, taskID, lineID, printerID, eventType, counterValue)
-	return err
-}
-
+// GetActiveTasks с вычислением COUNT(DISTINCT code) из шарда кодов
 func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{}, error) {
 	query := `
 		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), 
 		       t.template_name, COALESCE(t.dynamic_field_name, ''), 
-		       t.status, t.created_at, COALESCE(t.rnd_text, ''),
-		       COUNT(DISTINCT sr.code) AS scanned_count
+		       t.status, t.created_at, COALESCE(t.rnd_text, '')
 		FROM tasks t
 		LEFT JOIN lines l ON t.line_id = l.id
-		LEFT JOIN scanner_reads sr ON sr.task_id = t.id AND sr.match_status <> 'no_read'
 		WHERE t.status IN ('active', 'ready')`
 
 	var args []interface{}
@@ -1208,7 +1195,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 		query += " AND t.line_id IN (SELECT line_id FROM line_printers WHERE printer_id = ?)"
 		args = append(args, printerID)
 	}
-	query += " GROUP BY t.id ORDER BY t.id DESC"
+	query += " ORDER BY t.id DESC"
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -1222,15 +1209,19 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 	for rows.Next() {
 		var id, lID int
 		var lName, template, dynamic, status, created, rndText string
-		var scanned int
-		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText, &scanned); err == nil {
+		if err := rows.Scan(&id, &lID, &lName, &template, &dynamic, &status, &created, &rndText); err == nil {
 			var total, printed, buffered int
-			// Это запрос во второй файл БД (codes_YYYY_MM.db), тут дедлока нет:
-			codesDB.QueryRow(`
+			_ = codesDB.QueryRow(`
 				SELECT COUNT(*), 
 				       COUNT(CASE WHEN status = 'printed' THEN 1 END), 
 				       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
 				FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
+
+			var scanned int
+			_ = codesDB.QueryRow(`
+				SELECT COUNT(DISTINCT code) 
+				FROM scanner_reads 
+				WHERE task_id = ? AND match_status <> 'no_read'`, id).Scan(&scanned)
 
 			result = append(result, map[string]interface{}{
 				"task_id":            id,
@@ -1254,6 +1245,59 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 		result = make([]map[string]interface{}, 0)
 	}
 	return result, nil
+}
+
+// GetTaskInfo с вычислением COUNT(DISTINCT code) из шарда кодов
+func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interface{}, error) {
+	queryMaster := `
+		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), t.template_name, t.status, t.created_at,
+		(SELECT e.timestamp FROM event_log e WHERE e.line_id = t.line_id AND e.message LIKE '%' || CAST(t.id AS TEXT) || '%' AND (e.message LIKE '%stopped%' OR e.message LIKE '%остановк%') ORDER BY e.id DESC LIMIT 1)
+		FROM tasks t
+		LEFT JOIN lines l ON t.line_id = l.id
+		WHERE t.id = ?`
+
+	var tID, lineID int
+	var lineName, templateName, taskStatus, startedAt string
+	var stopEventAt sql.NullString
+
+	err := s.db.QueryRowContext(ctx, queryMaster, taskID).Scan(&tID, &lineID, &lineName, &templateName, &taskStatus, &startedAt, &stopEventAt)
+	if err != nil {
+		return nil, err
+	}
+
+	codesDB := s.getCodesDB()
+	var lastPrintedAt sql.NullString
+	var totalCodes, printedCount, inBufferCount, pendingCount int
+
+	_ = codesDB.QueryRowContext(ctx, `
+		SELECT MAX(printed_at),
+		       COUNT(id),
+		       COUNT(CASE WHEN status = 'printed' THEN 1 END),
+		       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END),
+		       COUNT(CASE WHEN status = 'pending' THEN 1 END)
+		FROM task_codes WHERE task_id = ?`, taskID).Scan(&lastPrintedAt, &totalCodes, &printedCount, &inBufferCount, &pendingCount)
+
+	var scannedCount int
+	_ = codesDB.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT code)
+		FROM scanner_reads
+		WHERE task_id = ? AND match_status <> 'no_read'`, taskID).Scan(&scannedCount)
+
+	return map[string]interface{}{
+		"task_id":              tID,
+		"line_id":              lineID,
+		"line_name":            lineName,
+		"template_name":        templateName,
+		"task_status":          taskStatus,
+		"started_at":           startedAt,
+		"last_code_printed_at": lastPrintedAt.String,
+		"stop_event_at":        stopEventAt.String,
+		"total_codes":          totalCodes,
+		"printed_count":        printedCount,
+		"in_buffer_count":      inBufferCount,
+		"pending_count":        pendingCount,
+		"scanned_count":        scannedCount,
+	}, nil
 }
 
 func (s *Store) GetLiveDashboardData() (map[string]interface{}, error) {
@@ -1312,56 +1356,81 @@ func (s *Store) GetLiveDashboardData() (map[string]interface{}, error) {
 	}, nil
 }
 
-func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interface{}, error) {
-	queryMaster := `
-		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), t.template_name, t.status, t.created_at,
-		(SELECT e.timestamp FROM event_log e WHERE e.line_id = t.line_id AND e.message LIKE '%' || CAST(t.id AS TEXT) || '%' AND (e.message LIKE '%stopped%' OR e.message LIKE '%остановк%') ORDER BY e.id DESC LIMIT 1)
-		FROM tasks t
-		LEFT JOIN lines l ON t.line_id = l.id
-		WHERE t.id = ?`
-
-	var tID, lineID int
-	var lineName, templateName, taskStatus, startedAt string
-	var stopEventAt sql.NullString
-
-	err := s.db.QueryRowContext(ctx, queryMaster, taskID).Scan(&tID, &lineID, &lineName, &templateName, &taskStatus, &startedAt, &stopEventAt)
+func (s *Store) ReconcileAndFinalizeTaskCodes(taskID int, printerID int, lastIndex int) (*ReconcileResult, error) {
+	db := s.getCodesDB()
+	tx, err := db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка открытия транзакции сверки: %w", err)
+	}
+	defer tx.Rollback()
+
+	if lastIndex > 0 {
+		_, err = tx.Exec(`
+			UPDATE task_codes 
+			SET status = 'printed', 
+			    printed_at = CURRENT_TIMESTAMP 
+			WHERE task_id = ? 
+			  AND printer_id = ? 
+			  AND printer_index <= ? 
+			  AND status = 'in_buffer'`,
+			taskID, printerID, lastIndex)
+		if err != nil {
+			return nil, fmt.Errorf("ошибка фиксации printed кодов: %w", err)
+		}
 	}
 
-	codesDB := s.getCodesDB()
-	var lastPrintedAt sql.NullString
-	var totalCodes, printedCount, inBufferCount, pendingCount int
+	resReverted, err := tx.Exec(`
+		UPDATE task_codes 
+		SET status = 'pending', 
+		    printer_id = NULL, 
+		    printer_index = NULL 
+		WHERE task_id = ? 
+		  AND printer_id = ? 
+		  AND status = 'in_buffer'`,
+		taskID, printerID)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка возврата неотпечатанного буфера в pending: %w", err)
+	}
 
-	_ = codesDB.QueryRowContext(ctx, `
-		SELECT MAX(printed_at),
-		       COUNT(id),
-		       COUNT(CASE WHEN status = 'printed' THEN 1 END),
-		       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END),
-		       COUNT(CASE WHEN status = 'pending' THEN 1 END)
-		FROM task_codes WHERE task_id = ?`, taskID).Scan(&lastPrintedAt, &totalCodes, &printedCount, &inBufferCount, &pendingCount)
+	returnedCount, _ := resReverted.RowsAffected()
 
-	var scannedCount int
-	_ = s.db.QueryRowContext(ctx, `
-    SELECT COUNT(DISTINCT code)
-    FROM scanner_reads
-    WHERE task_id = ? AND match_status <> 'no_read'`, taskID).Scan(&scannedCount)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("ошибка фиксации транзакции сверки: %w", err)
+	}
 
-	return map[string]interface{}{
-		"task_id":              tID,
-		"line_id":              lineID,
-		"line_name":            lineName,
-		"template_name":        templateName,
-		"task_status":          taskStatus,
-		"started_at":           startedAt,
-		"last_code_printed_at": lastPrintedAt.String,
-		"stop_event_at":        stopEventAt.String,
-		"total_codes":          totalCodes,
-		"printed_count":        printedCount,
-		"in_buffer_count":      inBufferCount,
-		"pending_count":        pendingCount,
-		"scanned_count":        scannedCount,
+	var totalPrinted int
+	err = db.QueryRow(`
+		SELECT COUNT(id) 
+		FROM task_codes 
+		WHERE task_id = ? AND status = 'printed'`,
+		taskID).Scan(&totalPrinted)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка подсчета итоговых printed: %w", err)
+	}
+
+	return &ReconcileResult{
+		TotalPrinted:  totalPrinted,
+		ReturnedCodes: int(returnedCount),
 	}, nil
+}
+
+func (s *Store) RecordPrinterCounterSnapshot(taskID, lineID, printerID int, eventType string, counterValue int64) error {
+	query := `INSERT INTO task_printer_counters (task_id, line_id, printer_id, event_type, counter_value, recorded_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+	_, err := s.db.Exec(query, taskID, lineID, printerID, eventType, counterValue)
+	return err
+}
+
+func (s *Store) SaveEventLog(lineID *int, printerID *int, eventType string, message string) error {
+	query := `INSERT INTO event_log (line_id, printer_id, event_type, message) VALUES (?, ?, ?, ?)`
+	var lID, pID interface{}
+	if lineID != nil && *lineID > 0 {
+		lID = *lineID
+	}
+	if printerID != nil && *printerID > 0 {
+		pID = *printerID
+	}
+	_, err := s.db.Exec(query, lID, pID, eventType, message)
+	return err
 }
 
 // SaveWeightAndMarkPrinted атомарно фиксирует вес и переводит код в статус 'printed'
@@ -1425,4 +1494,10 @@ func (s *Store) saveMarkWeightDirect(taskID, printerID, printerIndex int, mark, 
 		return fmt.Errorf("ошибка прямой фиксации веса в шарде: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status string, template string) error {
+	_, err := s.db.Exec(`INSERT INTO printer_telemetry (printer_id, cur_count, ribbon, status, template) VALUES (?, ?, ?, ?, ?)`,
+		printerID, count, ribbon, status, template)
+	return err
 }

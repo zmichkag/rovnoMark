@@ -560,9 +560,19 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 	}()
 }
 
-func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
+func (pm *PrinterManager) BackgroundPoller(ctx context.Context, store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
 	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("ПОЛЛЕР ОСТАНОВЛЕН")
+			return
+		case <-ticker.C:
+		}
+
 		pm.mu.RLock()
 		var ids []int
 		for id := range pm.printers {
@@ -570,7 +580,10 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 		}
 		pm.mu.RUnlock()
 
-		lineMap, _ := store.GetPrinterLineMap()
+		lineMap, err := store.GetPrinterLineMap()
+		if err != nil {
+			continue
+		}
 
 		for _, id := range ids {
 			pm.mu.RLock()

@@ -40,7 +40,23 @@ func main() {
 	port := flag.Int("port", 8080, "порт для HTTP сервера")
 	validateGS1 := flag.Bool("validate-gs1", false, "включить жесткую валидацию структуры GS1 DataMatrix кодов от 1С")
 	dataDir := flag.String("data-dir", "./data", "путь к директории с базами данных SQLite")
+	storageModeFlag := flag.String("storage-mode", "", "режим хранилища: 'sharded' или 'monolith'")
 	flag.Parse()
+
+	// Приоритет: CLI-флаг -> ENV -> default ("sharded")
+	modeStr := string(storage.StorageModeSharded)
+	if envMode := os.Getenv("STORAGE_MODE"); envMode != "" {
+		modeStr = envMode
+	}
+	if *storageModeFlag != "" {
+		modeStr = *storageModeFlag
+	}
+
+	mode := storage.StorageMode(modeStr)
+	if mode != storage.StorageModeSharded && mode != storage.StorageModeMonolith {
+		slog.Warn("Некорректный режим хранилища, откат на sharded", "provided", modeStr)
+		mode = storage.StorageModeSharded
+	}
 
 	logLevel := new(slog.LevelVar)
 	if *debugMode {
@@ -49,8 +65,14 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
 
+	slog.Info("Инициализация сервиса",
+		"storage_mode", mode,
+		"data_dir", *dataDir,
+	)
+
+	// Передаем mode в runner/runApp
 	runner := func(ctx context.Context) error {
-		return runApp(ctx, *port, *dataDir, *validateGS1, *debugMode)
+		return runApp(ctx, *port, *dataDir, mode, *validateGS1, *debugMode)
 	}
 
 	// 1. Проверка среды выполнения: запуск под управлением Windows SCM
@@ -72,7 +94,7 @@ func main() {
 	}
 }
 
-func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, debugMode bool) error {
+func runApp(ctx context.Context, port int, dataDir string, mode storage.StorageMode, validateGS1, debugMode bool) error {
 	slog.Info(fmt.Sprintf("Запуск шлюза маркировки [%s]", brand.GetName()),
 		"version", version.Version,
 		"commit", version.GitCommit,
@@ -82,11 +104,13 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 		"validate_gs1", validateGS1,
 	)
 
-	store := storage.New(dataDir)
+	store := storage.New(dataDir, mode)
 	defer func() {
-		slog.Info("Сброс WAL и освобождение хранилища SQLite...")
+		slog.Info("Завершение работы шлюза, закрытие соединений...")
 		if err := store.Close(); err != nil {
-			slog.Error("Ошибка закрытия БД", "err", err)
+			slog.Error("Ошибка при закрытии хранилища", "err", err)
+		} else {
+			slog.Info("Хранилище успешно остановлено")
 		}
 	}()
 
@@ -153,7 +177,7 @@ func runApp(ctx context.Context, port int, dataDir string, validateGS1 bool, deb
 	go scannerMgr.StartPoller(ctx)
 
 	// 3. Запуск фоновых процессов опроса и сбора телеметрии
-	go manager.BackgroundPoller(store)
+	go manager.BackgroundPoller(ctx, store)
 	manager.StartTelemetryCollector(store, 5*time.Minute)
 
 	// 4. Восстановление активных заданий конвейера (Pumper Recovery)

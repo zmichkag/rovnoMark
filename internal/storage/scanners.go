@@ -235,15 +235,16 @@ func (s *Store) GetTaskCodesDump(taskID int) ([]models.TaskCode, error) {
 	return list, nil
 }
 
-// GetTaskScanReadsDump возвращает все сканы по конкретному заданию
+// GetTaskScanReadsDump возвращает все сканы по заданию из шарда кодов
 func (s *Store) GetTaskScanReadsDump(taskID int) ([]models.ScannerRead, error) {
+	db := s.getCodesDB()
 	query := `
 		SELECT id, scanner_id, line_id, task_id, task_code_id, code, match_status, read_at
 		FROM scanner_reads
 		WHERE task_id = ?
 		ORDER BY id ASC`
 
-	rows, err := s.db.Query(query, taskID)
+	rows, err := db.Query(query, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка выгрузки scanner_reads: %w", err)
 	}
@@ -263,7 +264,7 @@ func (s *Store) GetTaskScanReadsDump(taskID int) ([]models.ScannerRead, error) {
 	return list, nil
 }
 
-// GetRecentScannerReads возвращает последние успешные чтения сканера.
+// GetRecentScannerReads возвращает последние успешные чтения сканера из активного шарда
 func (s *Store) GetRecentScannerReads(scannerID, limit int) ([]models.ScannerRead, error) {
 	if scannerID <= 0 {
 		return nil, fmt.Errorf("scanner_id должен быть положительным")
@@ -271,7 +272,9 @@ func (s *Store) GetRecentScannerReads(scannerID, limit int) ([]models.ScannerRea
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
+
+	db := s.getCodesDB()
+	rows, err := db.Query(`
 		SELECT id, scanner_id, line_id, task_id, task_code_id, code, match_status, read_at
 		FROM scanner_reads
 		WHERE scanner_id = ? AND match_status <> 'no_read'
