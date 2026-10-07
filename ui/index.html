@@ -674,23 +674,34 @@
             }
 
             container.innerHTML = tasks.map(t => {
-                // 1. План и печать из задания (бэкенд уже агрегирует оба принтера)
+                // 1. Форматирование времени старта задачи
+                const rawTime = t.started_at || t.created_at || t.start_time;
+                let startTime = '-';
+                if (rawTime && !rawTime.startsWith('0001-')) {
+                    const d = new Date(rawTime);
+                    if (!Number.isNaN(d.getTime())) {
+                        startTime = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+                    }
+                }
+
+                // 2. Получаем линию и устройства из глобального кэша
+                const line = window.linesMap[t.line_id] || {};
+                const printers = line.printers || [];
+                const scanners = line.scanners || [];
+
+                // 3. План и печать
                 const total = t.stats?.total || 1;
                 const printed = t.stats?.printed || 0;
 
-// 2. Сканы: суммируем данные ПО ВСЕМ сканерам линии
-// (если бэкенд отдает только одну камеру в t.stats.scanned)
-                const lineScanners = (window.linesMap[t.line_id] || {}).scanners || [];
+                // 4. Суммирование сканов по всем камерам линии
                 let totalScanned = 0;
-
-                if (lineScanners.length > 0) {
-                    // Суммируем чтения по всем камерам линии (или берем t.stats.scanned, если бэкенд починен)
-                    totalScanned = lineScanners.reduce((sum, s) => sum + (s.good_scans_task || s.good_scans || 0), 0);
+                if (scanners.length > 0) {
+                    totalScanned = scanners.reduce((sum, s) => sum + (s.good_scans_task || s.good_scans || 0), 0);
                 } else {
                     totalScanned = t.stats?.scanned || 0;
                 }
 
-// 3. Пересчет процентов и считываемости по сумме всех устройств
+                // 5. Проценты и считываемость (Read Rate)
                 const printPct = Math.min(Math.round((printed / total) * 100), 100);
                 const scanPct = Math.min(Math.round((totalScanned / total) * 100), 100);
 
@@ -709,22 +720,7 @@
                     else ratioColor = 'var(--danger)';
                 }
 
-                // Получаем линию и устройства из локального кэша
-                const line = window.linesMap[t.line_id] || {};
-                const printers = line.printers || [];
-                const scanners = line.scanners || [];
-
-                const printer = printers[0] || null;
-                const scanner = scanners[0] || null;
-
-                // Последний напечатанный код (пробуем взять из задачи или из состояния принтера)
-                const lastPrintedCode = t.last_printed_code || t.last_code || (printer && printer.cur_code) || '-';
-
-                // Последний отсканированный код (пробуем взять из сканера или из задачи)
-                const lastScannedCode = (scanner && scanner.last_code) || t.last_scanned_code || '-';
-
-                // Блок принтера
-                // 1. Формируем список ВСЕХ принтеров линии
+                // 6. Формируем список ВСЕХ принтеров линии
                 let printersHtml = '<div style="color: #666; font-size:0.75rem;">Принтеры не привязаны</div>';
                 if (printers.length > 0) {
                     printersHtml = printers.map((printer, idx) => {
@@ -734,26 +730,26 @@
                         const lastPrinted = printer.cur_code || (idx === 0 ? (t.last_printed_code || t.last_code) : null) || '-';
 
                         return `
-        <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
-                <b style="font-size:0.85rem; color:#fff;">🖨️ ${printer.name}</b>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    <span style="font-size:0.7rem; color:${badgeColor}; font-weight:bold;">${printer.status || 'OK'}</span>
-                    ${printer.ip ? `<a href="${webLink}" target="_blank" class="btn" style="padding:1px 6px; font-size:0.7rem; text-decoration:none; background:#222; border-color:#444;">ВЕБ-ИНТЕРФЕЙС</a>` : ''}
-                </div>
-            </div>
-            <div style="font-size:0.75rem; color:#aaa;">Сеть: <b>${printer.ip}:${printer.port}</b> (${printer.driver_type || '-'})</div>
-            <div style="font-size:0.75rem; color:#aaa;">Риббон: <b>${printer.ribbon || '-'}</b> | В очереди: <b>${printer.queue || 0}</b> | Всего: <b>${printer.cur_count || 0}</b></div>
-            <div style="margin-top:3px;">
-                <div style="font-family:monospace; font-size:0.72rem; color:#8fd14f; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний напечатанный код">
-                    ${lastPrinted}
-                </div>
-            </div>
-        </div>`;
+                    <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+                            <b style="font-size:0.85rem; color:#fff;">🖨️ ${printer.name}</b>
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span style="font-size:0.7rem; color:${badgeColor}; font-weight:bold;">${printer.status || 'OK'}</span>
+                                ${printer.ip ? `<a href="${webLink}" target="_blank" class="btn" style="padding:1px 6px; font-size:0.7rem; text-decoration:none; background:#222; border-color:#444;">ВЕБ-ИНТЕРФЕЙС</a>` : ''}
+                            </div>
+                        </div>
+                        <div style="font-size:0.75rem; color:#aaa;">Сеть: <b>${printer.ip}:${printer.port}</b> (${printer.driver_type || '-'})</div>
+                        <div style="font-size:0.75rem; color:#aaa;">Риббон: <b>${printer.ribbon || '-'}</b> | В очереди: <b>${printer.queue || 0}</b> | Всего: <b>${printer.cur_count || 0}</b></div>
+                        <div style="margin-top:3px;">
+                            <div style="font-family:monospace; font-size:0.72rem; color:#8fd14f; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний напечатанный код">
+                                ${lastPrinted}
+                            </div>
+                        </div>
+                    </div>`;
                     }).join('');
                 }
 
-// 2. Формируем список ВСЕХ сканеров линии
+                // 7. Формируем список ВСЕХ сканеров линии
                 let scannersHtml = '<div style="color: #666; font-size:0.75rem;">Сканеры не привязаны</div>';
                 if (scanners.length > 0) {
                     scannersHtml = scanners.map((scanner, idx) => {
@@ -762,95 +758,91 @@
                         const lastScanned = scanner.last_code || (idx === 0 ? t.last_scanned_code : null) || '-';
 
                         return `
-        <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
-                <b style="font-size:0.85rem; color:#fff;">📷 ${scanner.name}</b>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    <span style="font-size:0.7rem; color:${scOnline ? '#a78bfa' : 'var(--danger)'}; font-weight:bold;">
-                        ${scOnline ? 'ONLINE' : 'OFFLINE'}
-                    </span>
-                    <button class="btn" style="padding:1px 6px; font-size:0.7rem; background:#222; border-color:#444;" onclick="showScannerReads(${scanner.id}, '${scannerNameEscaped}')">
-                        ИСТОРИЯ
-                    </button>
-                </div>
-            </div>
-            <div style="font-size:0.75rem; color:#aaa;">Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
-            <div style="font-size:0.75rem; color:#aaa;">Успешно: <b style="color:var(--success);">${scanner.good_scans || 0}</b> | Время: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
-            <div style="margin-top:3px;">
-                <div style="font-family:monospace; font-size:0.72rem; color:#c4b5fd; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний считанный код">
-                    ${lastScanned}
-                </div>
-            </div>
-        </div>`;
+                    <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+                            <b style="font-size:0.85rem; color:#fff;">📷 ${scanner.name}</b>
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span style="font-size:0.7rem; color:${scOnline ? '#a78bfa' : 'var(--danger)'}; font-weight:bold;">
+                                    ${scOnline ? 'ONLINE' : 'OFFLINE'}
+                                </span>
+                                <button class="btn" style="padding:1px 6px; font-size:0.7rem; background:#222; border-color:#444;" onclick="showScannerReads(${scanner.id}, '${scannerNameEscaped}')">
+                                    ИСТОРИЯ
+                                </button>
+                            </div>
+                        </div>
+                        <div style="font-size:0.75rem; color:#aaa;">Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
+                        <div style="font-size:0.75rem; color:#aaa;">Успешно: <b style="color:var(--success);">${scanner.good_scans || 0}</b> | Время: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
+                        <div style="margin-top:3px;">
+                            <div style="font-family:monospace; font-size:0.72rem; color:#c4b5fd; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний считанный код">
+                                ${lastScanned}
+                            </div>
+                        </div>
+                    </div>`;
                     }).join('');
                 }
 
                 return `
-<div class="task-card" data-task-id="${t.task_id}">
-    <!-- Шапка карточки -->
-    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
-        <div style="line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-            <b style="font-size:1.05rem; color: var(--primary);">#${t.task_id}</b>
-            <span style="color:#fff; font-weight:bold; margin-left:6px;">${t.line_name}</span>
-            <span style="color:#555; margin: 0 4px;">|</span>
-            <span style="font-size:0.75rem; color:var(--text-muted);" title="Старт задачи">
-                🕒 <b style="color:#ccc;">${startTime}</b>
-            </span>
-            <span style="color:#555; margin: 0 4px;">|</span>
-            <span style="font-size:0.75rem; color:var(--text-muted);">
-                Шаблон: <b style="color:var(--warning);">${t.template_name || '-'}</b>
-            </span>
-        </div>
-        <button class="btn" style="border-color: var(--danger); color: var(--danger); padding:3px 8px; font-size:0.75rem; font-weight:bold; white-space:nowrap;" onclick="stopTask(${t.task_id}, ${t.line_id})">
-            СТОП
-        </button>
-    </div>
+            <div class="task-card" data-task-id="${t.task_id}">
+                <!-- Шапка карточки -->
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+                    <div style="line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        <b style="font-size:1.05rem; color: var(--primary);">#${t.task_id}</b>
+                        <span style="color:#fff; font-weight:bold; margin-left:6px;">${t.line_name}</span>
+                        <span style="color:#555; margin: 0 4px;">|</span>
+                        <span style="font-size:0.75rem; color:var(--text-muted);" title="Старт задачи">
+                            🕒 <b style="color:#ccc;">${startTime}</b>
+                        </span>
+                        <span style="color:#555; margin: 0 4px;">|</span>
+                        <span style="font-size:0.75rem; color:var(--text-muted);">
+                            Шаблон: <b style="color:var(--warning);">${t.template_name || '-'}</b>
+                        </span>
+                    </div>
+                    <button class="btn" style="border-color: var(--danger); color: var(--danger); padding:3px 8px; font-size:0.75rem; font-weight:bold; white-space:nowrap;" onclick="stopTask(${t.task_id}, ${t.line_id})">
+                        СТОП
+                    </button>
+                </div>
 
-        <!-- Прогресс-бары -->
-    <div style="display:flex; flex-direction:column; gap:4px;">
-        <div class="progress-container" style="height:6px; margin:0;" title="Печать: ${printPct}%">
-            <div class="progress-bar" style="width: ${printPct}%; background: var(--success);"></div>
-        </div>
-        <div class="progress-container" style="height:6px; margin:0;" title="Сканирование: ${scanPct}%">
-            <div class="progress-bar" style="width: ${scanPct}%; background: #8b5cf6;"></div>
-        </div>
-    </div>
+                <!-- Прогресс-бары -->
+                <div style="display:flex; flex-direction:column; gap:4px;">
+                    <div class="progress-container" style="height:6px; margin:0;" title="Печать: ${printPct}%">
+                        <div class="progress-bar" style="width: ${printPct}%; background: var(--success);"></div>
+                    </div>
+                    <div class="progress-container" style="height:6px; margin:0;" title="Сканирование: ${scanPct}%">
+                        <div class="progress-bar" style="width: ${scanPct}%; background: #8b5cf6;"></div>
+                    </div>
+                </div>
 
+                <!-- Блок оборудования линии -->
+                <div style="background: #181818; padding: 8px; border-radius: 6px; border: 1px solid #2d2d2d; display: flex; flex-direction: column; gap: 8px;">
+                    <div>
+                        <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Принтеры (${printers.length})</div>
+                        ${printersHtml}
+                    </div>
+                    <div style="border-top: 1px solid #282828; padding-top: 6px;">
+                        <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Сканеры (${scanners.length})</div>
+                        ${scannersHtml}
+                    </div>
+                </div>
 
-    <!-- Блок оборудования линии -->
-<div style="background: #181818; padding: 8px; border-radius: 6px; border: 1px solid #2d2d2d; display: flex; flex-direction: column; gap: 8px;">
-    <!-- Секция принтеров -->
-    <div>
-        <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Принтеры маркировки (${printers.length})</div>
-        ${printersHtml}
-    </div>
-
-    <!-- Секция сканеров -->
-    <div style="border-top: 1px solid #282828; padding-top: 6px;">
-        <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Камеры верификации (${scanners.length})</div>
-        ${scannersHtml}
-    </div>
-</div>
-
-    <!-- Метрики считываемости и прогресса (2x2 сетка) -->
-    <div style="background:#111; padding:8px; border-radius:6px; font-family:monospace; display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size: 0.78rem;">
-        <div>
-            <span style="color:#777; display:block;">Печать</span>
-            <span style="color:var(--success); font-weight:bold;">${printed} / ${total} (${printPct}%)</span>
-        </div>
-        <div>
-            <span style="color:#777; display:block;">Сканы</span>
-            <span style="color:#a78bfa; font-weight:bold;">${scanned} шт (${scanPct}%)</span>
-        </div>
-        <div style="grid-column: span 2; background: rgba(255,255,255,0.03); padding: 4px 6px; border-radius: 4px; border: 1px solid #222; display:flex; justify-content:space-between; align-items:center;">
-            <span style="color:#aaa;">Считываемость:</span>
-            <span style="color:${ratioColor}; font-weight:bold;">
-                ${ratioText}
-                ${printed > 0 ? `<small style="font-size:0.75rem; color:${diff > 0 ? 'var(--danger)' : '#888'};"> (${diff >= 0 ? '-' + diff : '+' + Math.abs(diff)})</small>` : ''}
-            </span>
-        </div>
-    </div>
-</div>`;
+                <!-- Метрики считываемости и прогресса (2x2 сетка) -->
+                <div style="background:#111; padding:8px; border-radius:6px; font-family:monospace; display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size: 0.78rem;">
+                    <div>
+                        <span style="color:#777; display:block;">Печать</span>
+                        <span style="color:var(--success); font-weight:bold;">${printed} / ${total} (${printPct}%)</span>
+                    </div>
+                    <div>
+                        <span style="color:#777; display:block;">Сканы</span>
+                        <span style="color:#a78bfa; font-weight:bold;">${totalScanned} шт (${scanPct}%)</span>
+                    </div>
+                    <div style="grid-column: span 2; background: rgba(255,255,255,0.03); padding: 4px 6px; border-radius: 4px; border: 1px solid #222; display:flex; justify-content:space-between; align-items:center;">
+                        <span style="color:#aaa;">Считываемость:</span>
+                        <span style="color:${ratioColor}; font-weight:bold;">
+                            ${ratioText}
+                            ${printed > 0 ? `<small style="font-size:0.75rem; color:${diff > 0 ? 'var(--danger)' : '#888'};"> (${diff >= 0 ? '-' + diff : '+' + Math.abs(diff)})</small>` : ''}
+                        </span>
+                    </div>
+                </div>
+            </div>`;
             }).join('');
         } catch (err) {
             container.innerHTML = `<div style="color: var(--danger); padding: 10px;">⚠️ Ошибка связи: ${err.message}</div>`;
