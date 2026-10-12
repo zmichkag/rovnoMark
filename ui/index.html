@@ -727,20 +727,7 @@
                 const printed = t.stats?.printed || 0;
 
                 // 4. Определение сканов для текущей задачи
-                let totalScanned = 0;
-
-                //Бэкенд посчитал точное число валидированных кодов задачи
-                if (t.stats && typeof t.stats.scanned === 'number') {
-                    totalScanned = t.stats.scanned;
-                }
-                //Партионные счётчики сканеров на линии
-                else if (scanners.length > 0) {
-                    totalScanned = scanners.reduce((sum, s) => {
-                        // Берем именно task-счетчик, если он есть
-                        const taskScans = (s.good_scans_task !== undefined) ? s.good_scans_task : 0;
-                        return sum + taskScans;
-                    }, 0);
-                }
+                const totalScanned = Number(t.stats?.scanned ?? 0);
 
                 // 5. Проценты и считываемость (Read Rate)
                 const printPct = Math.min(Math.round((printed / total) * 100), 100);
@@ -797,8 +784,14 @@
                         const scOnline = !!scanner.online;
                         const scannerNameEscaped = String(scanner.name || '').replace(/'/g, "\\'");
                         const lastScanned = scanner.last_code || (idx === 0 ? t.last_scanned_code : null) || '-';
-                        const scanInTask = scanner.good_scans_task ?? (t.stats?.scanned || 0);
-                        const scanLifetime = scanner.good_scans || 0;
+
+// Партионный счетчик конкретной камеры (с фоллбэком на счетчик задачи)
+                        const taskScans = scanner.good_scans_task !== undefined
+                            ? scanner.good_scans_task
+                            : Number(t.stats?.scanned ?? 0);
+
+// Сквозной накат драйвера (lifetime)
+                        const lifetimeScans = scanner.good_scans || 0;
 
                         return `
 <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
@@ -815,11 +808,11 @@
     </div>
     <div style="font-size:0.75rem; color:#aaa;">Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
     <div style="font-size:0.75rem; color:#aaa;">
-        В партии: <b style="color:#a78bfa;">${scanInTask}</b>
+        В партии: <b style="color:var(--success);">${taskScans}</b>
         <span style="color:#555;">|</span>
-        Сквозной: <b style="color:#777;" title="Общий счетчик устройства">${scanLifetime}</b>
+        Всего: <b style="color:#888;" title="Сквозной счетчик драйвера">${lifetimeScans}</b>
         <span style="color:#555;">|</span>
-        Чтение: <b>${formatScannerTime(scanner.last_read_at)}</b>
+        Время: <b>${formatScannerTime(scanner.last_read_at)}</b>
     </div>
     <div style="margin-top:3px;">
         <div style="font-family:monospace; font-size:0.72rem; color:#c4b5fd; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний считанный код">
