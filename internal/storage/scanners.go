@@ -203,6 +203,20 @@ func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, raw
 	return read, nil
 }
 
+func (s *Store) GetScannerScansInTask(scannerID, taskID int) int {
+	if taskID <= 0 {
+		return 0
+	}
+	db := s.getCodesDB()
+	var count int
+	_ = db.QueryRow(`
+		SELECT COUNT(DISTINCT code) 
+		FROM scanner_reads 
+		WHERE scanner_id = ? AND task_id = ? AND match_status <> 'no_read'`,
+		scannerID, taskID).Scan(&count)
+	return count
+}
+
 // GetTaskCodesDump возвращает полный массив кодов задания из шарда кодов
 func (s *Store) GetTaskCodesDump(taskID int) ([]models.TaskCode, error) {
 	db := s.getCodesDB()
