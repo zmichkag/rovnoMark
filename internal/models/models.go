@@ -88,14 +88,15 @@ const (
 )
 
 type ScannerRead struct {
-	ID          int       `json:"id"`
-	ScannerID   int       `json:"scanner_id"`
-	LineID      int       `json:"line_id"`
-	TaskID      *int      `json:"task_id,omitempty"`
-	TaskCodeID  *int      `json:"task_code_id,omitempty"`
-	Code        string    `json:"code"`
-	MatchStatus string    `json:"match_status"`
-	ReadAt      time.Time `json:"read_at"`
+	ID            int       `json:"id"`
+	ScannerID     int       `json:"scanner_id"`
+	LineID        int       `json:"line_id"`
+	TaskID        *int      `json:"task_id,omitempty"`
+	TaskCodeID    *int      `json:"task_code_id,omitempty"`
+	Code          string    `json:"code"`
+	MatchStatus   string    `json:"match_status"`
+	ReadAt        time.Time `json:"read_at"`
+	GoodScansTask int       `json:"good_scans_task"`
 }
 
 type LineConfig struct {
