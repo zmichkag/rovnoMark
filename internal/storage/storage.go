@@ -801,7 +801,7 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 
 	err := activeDB.QueryRow(query, cleanCode, "%"+cleanCode+"%").Scan(&taskID, &status, &printedAt, &weight)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if s.mode == StorageModeSharded && errors.Is(err, sql.ErrNoRows) {
 		files, _ := filepath.Glob(filepath.Join(s.dataDir, "codes_*.db"))
 		for _, f := range files {
 			if strings.Contains(f, s.curMonth) {

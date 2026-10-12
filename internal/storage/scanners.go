@@ -174,7 +174,9 @@ func (s *Store) RecordScannerRead(scanner models.ScannerConfig, code string, raw
 		nullableTaskID = taskID
 	}
 
-	result, err := s.db.Exec(`
+	// пишем в тот же шард кодов, откуда читаем!
+	db := s.getCodesDB()
+	result, err := db.Exec(`
 		INSERT INTO scanner_reads (
 			scanner_id, line_id, task_id, code, raw_data, match_status, read_at
 		) VALUES (?, ?, ?, ?, ?, 'unmatched', ?)`,

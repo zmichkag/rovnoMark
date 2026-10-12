@@ -726,12 +726,20 @@
                 const total = t.stats?.total || 1;
                 const printed = t.stats?.printed || 0;
 
-                // 4. Суммирование сканов по всем камерам линии
+                // 4. Определение сканов для текущей задачи
                 let totalScanned = 0;
-                if (scanners.length > 0) {
-                    totalScanned = scanners.reduce((sum, s) => sum + (s.good_scans_task || s.good_scans || 0), 0);
-                } else {
-                    totalScanned = t.stats?.scanned || 0;
+
+                //Бэкенд посчитал точное число валидированных кодов задачи
+                if (t.stats && typeof t.stats.scanned === 'number') {
+                    totalScanned = t.stats.scanned;
+                }
+                //Партионные счётчики сканеров на линии
+                else if (scanners.length > 0) {
+                    totalScanned = scanners.reduce((sum, s) => {
+                        // Берем именно task-счетчик, если он есть
+                        const taskScans = (s.good_scans_task !== undefined) ? s.good_scans_task : 0;
+                        return sum + taskScans;
+                    }, 0);
                 }
 
                 // 5. Проценты и считываемость (Read Rate)
@@ -789,28 +797,36 @@
                         const scOnline = !!scanner.online;
                         const scannerNameEscaped = String(scanner.name || '').replace(/'/g, "\\'");
                         const lastScanned = scanner.last_code || (idx === 0 ? t.last_scanned_code : null) || '-';
+                        const scanInTask = scanner.good_scans_task ?? (t.stats?.scanned || 0);
+                        const scanLifetime = scanner.good_scans || 0;
 
                         return `
-                        <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
-                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
-                                <b style="font-size:0.85rem; color:#fff;">📷 ${scanner.name}</b>
-                                <div style="display:flex; align-items:center; gap:6px;">
-                                    <span style="font-size:0.7rem; color:${scOnline ? '#a78bfa' : 'var(--danger)'}; font-weight:bold;">
-                                        ${scOnline ? 'ONLINE' : 'OFFLINE'}
-                                    </span>
-                                    <button class="btn" style="padding:1px 6px; font-size:0.7rem; background:#222; border-color:#444;" onclick="showScannerReads(${scanner.id}, '${scannerNameEscaped}')">
-                                        ИСТОРИЯ
-                                    </button>
-                                </div>
-                            </div>
-                            <div style="font-size:0.75rem; color:#aaa;">Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
-                            <div style="font-size:0.75rem; color:#aaa;">В задании: <b style="color:var(--success);">${totalScanned}</b> | Время чтения: <b>${formatScannerTime(scanner.last_read_at)}</b></div>
-                            <div style="margin-top:3px;">
-                                <div style="font-family:monospace; font-size:0.72rem; color:#c4b5fd; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний считанный код">
-                                    ${lastScanned}
-                                </div>
-                            </div>
-                        </div>`;
+<div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
+        <b style="font-size:0.85rem; color:#fff;">📷 ${scanner.name}</b>
+        <div style="display:flex; align-items:center; gap:6px;">
+            <span style="font-size:0.7rem; color:${scOnline ? '#a78bfa' : 'var(--danger)'}; font-weight:bold;">
+                ${scOnline ? 'ONLINE' : 'OFFLINE'}
+            </span>
+            <button class="btn" style="padding:1px 6px; font-size:0.7rem; background:#222; border-color:#444;" onclick="showScannerReads(${scanner.id}, '${scannerNameEscaped}')">
+                ИСТОРИЯ
+            </button>
+        </div>
+    </div>
+    <div style="font-size:0.75rem; color:#aaa;">Хост: <b>${scanner.address}:${scanner.port || '-'}</b> (${scannerRoleLabel(scanner.role)})</div>
+    <div style="font-size:0.75rem; color:#aaa;">
+        В партии: <b style="color:#a78bfa;">${scanInTask}</b>
+        <span style="color:#555;">|</span>
+        Сквозной: <b style="color:#777;" title="Общий счетчик устройства">${scanLifetime}</b>
+        <span style="color:#555;">|</span>
+        Чтение: <b>${formatScannerTime(scanner.last_read_at)}</b>
+    </div>
+    <div style="margin-top:3px;">
+        <div style="font-family:monospace; font-size:0.72rem; color:#c4b5fd; background:#111; padding:2px 5px; border-radius:3px; overflow-wrap:anywhere; border:1px solid #222;" title="Последний считанный код">
+            ${lastScanned}
+        </div>
+    </div>
+</div>`;
                     }).join('');
                 }
 
