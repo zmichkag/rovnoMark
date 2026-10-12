@@ -50,9 +50,11 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 		models.PrinterConfig
 		models.PrinterState
 	}
+
 	type ScannerInfo struct {
 		models.ScannerConfig
 		core.ScannerStatus
+		GoodScansTask int
 	}
 	type LineGroup struct {
 		models.LineConfig
@@ -75,9 +77,13 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, scanner := range scanners {
+		activeTaskID, _ := s.store.GetActiveTaskByLine(scanner.LineID)
+		taskScans := s.store.GetScannerScansInTask(scanner.ID, activeTaskID)
+
 		scannersByLine[scanner.LineID] = append(scannersByLine[scanner.LineID], ScannerInfo{
 			ScannerConfig: scanner,
 			ScannerStatus: scannerStates[scanner.ID],
+			GoodScansTask: taskScans,
 		})
 	}
 
@@ -115,8 +121,6 @@ func (s *Server) handlePrintersAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.ID = int(newID)
-
-	// internal/api/handlers_printers.go в методе handlePrintersAdd:
 
 	switch cfg.DriverType {
 	case "savema":
