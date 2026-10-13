@@ -703,8 +703,10 @@
             container.innerHTML = tasks.map(t => {
                 // 1. Сначала извлекаем линию и устройства из глобального кэша
                 const line = window.linesMap[t.line_id] || {};
-                const printers = line.printers || [];
-                const scanners = line.scanners || [];
+
+// Фильтруем активные устройства на линии:
+                const printers = (line.printers || []).filter(p => p.is_active !== false);
+                const scanners = (line.scanners || []).filter(s => s.is_active !== false);
 
                 // 2. Временные метки процесса (Старт / Печать / Скан)
                 const rawTime = t.created_at || t.started_at || t.start_time;
