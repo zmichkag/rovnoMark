@@ -525,25 +525,28 @@ func (s *Server) handleDashboardLive(w http.ResponseWriter, r *http.Request) {
 	printerCatalog := make(map[int]map[string]interface{})
 	offlineCount := 0
 
-	for _, cfg := range allPrintersConfig {
-		st := states[cfg.ID]
-		isOffline := strings.Contains(st.Status, "ОФФЛАЙН") || st.Status == "INITIALIZING"
+	for _, printerConfig := range allPrintersConfig {
+		if !printerConfig.IsActive {
+			continue
+		}
+		printerState := states[printerConfig.ID]
+		isOffline := strings.Contains(printerState.Status, "ОФФЛАЙН") || printerState.Status == "INITIALIZING"
 		if isOffline {
 			offlineCount++
 		}
 
-		printerCatalog[cfg.ID] = map[string]interface{}{
-			"id":           cfg.ID,
-			"name":         cfg.Name,
-			"ip":           cfg.IP,
-			"port":         cfg.Port,
-			"driver_type":  cfg.DriverType,
-			"is_active":    cfg.IsActive,
-			"status":       st.Status,
-			"ribbon":       st.Ribbon,
-			"queue_free":   st.Queue,
-			"cur_count":    st.CurCount,
-			"cur_template": st.CurTemplate,
+		printerCatalog[printerConfig.ID] = map[string]interface{}{
+			"id":           printerConfig.ID,
+			"name":         printerConfig.Name,
+			"ip":           printerConfig.IP,
+			"port":         printerConfig.Port,
+			"driver_type":  printerConfig.DriverType,
+			"is_active":    printerConfig.IsActive,
+			"status":       printerState.Status,
+			"ribbon":       printerState.Ribbon,
+			"queue_free":   printerState.Queue,
+			"cur_count":    printerState.CurCount,
+			"cur_template": printerState.CurTemplate,
 		}
 	}
 
