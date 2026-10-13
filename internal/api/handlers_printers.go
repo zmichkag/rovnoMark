@@ -69,30 +69,39 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 		scannerStates = s.scannerMgr.GetDashboardData()
 	}
 	var allForUI []PrinterInfo
-	for _, cfg := range configs {
-		info := PrinterInfo{PrinterConfig: cfg, PrinterState: states[cfg.ID]}
+	for _, printerConfig := range configs {
+		if !printerConfig.IsActive {
+			continue
+		}
+		info := PrinterInfo{PrinterConfig: printerConfig, PrinterState: states[printerConfig.ID]}
 		allForUI = append(allForUI, info)
-		if lineID, ok := lineMap[cfg.ID]; ok {
+		if lineID, ok := lineMap[printerConfig.ID]; ok {
 			grouped[lineID] = append(grouped[lineID], info)
 		}
 	}
-	for _, scanner := range scanners {
-		activeTaskID, _ := s.store.GetActiveTaskByLine(scanner.LineID)
-		taskScans := s.store.GetScannerScansInTask(scanner.ID, activeTaskID)
+	for _, scannerConfig := range scanners {
+		if !scannerConfig.IsActive {
+			continue
+		}
+		activeTaskID, _ := s.store.GetActiveTaskByLine(scannerConfig.LineID)
+		taskScans := s.store.GetScannerScansInTask(scannerConfig.ID, activeTaskID)
 
-		scannersByLine[scanner.LineID] = append(scannersByLine[scanner.LineID], ScannerInfo{
-			ScannerConfig: scanner,
-			ScannerStatus: scannerStates[scanner.ID],
+		scannersByLine[scannerConfig.LineID] = append(scannersByLine[scannerConfig.LineID], ScannerInfo{
+			ScannerConfig: scannerConfig,
+			ScannerStatus: scannerStates[scannerConfig.ID],
 			GoodScansTask: taskScans,
 		})
 	}
 
 	var responseLines []LineGroup
-	for _, l := range lines {
+	for _, lineConfig := range lines {
+		if !lineConfig.IsActive {
+			continue
+		}
 		responseLines = append(responseLines, LineGroup{
-			LineConfig: l,
-			Printers:   grouped[l.ID],
-			Scanners:   scannersByLine[l.ID],
+			LineConfig: lineConfig,
+			Printers:   grouped[lineConfig.ID],
+			Scanners:   scannersByLine[lineConfig.ID],
 		})
 	}
 
