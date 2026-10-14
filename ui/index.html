@@ -128,17 +128,113 @@
             padding: 10px;
             margin-bottom: 10px;
         }
+
+        /* Верхний статус-бар в шапке */
+        .header-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid var(--surface);
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .header-bar h1 { margin: 0; border: none; padding: 0; font-size: 1.6rem; }
+        .sys-pills { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .sys-pill {
+            background: var(--surface);
+            border: 1px solid #333;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .sys-pill b { color: #fff; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .dot.ok { background: var(--success); box-shadow: 0 0 6px var(--success); }
+        .dot.err { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+        /* Панель вкладок + Зона оперативных варнингов */
+        .top-nav-row {
+            display: flex;
+            align-items: stretch;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .top-nav-row .tabs { margin-bottom: 0; align-items: center; }
+        .alerts-strip {
+            flex: 1;
+            min-height: 42px;
+            background: #181818;
+            border: 1px solid #2d2d2d;
+            border-radius: 6px;
+            padding: 6px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .alert-badge {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.78rem;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        .alert-badge:hover { transform: translateY(-1px); }
+        .alert-badge.critical {
+            background: rgba(220, 53, 69, 0.18);
+            border: 1px solid var(--danger);
+            color: #ff6b7a;
+        }
+        .alert-badge.warning {
+            background: rgba(255, 193, 7, 0.14);
+            border: 1px solid var(--warning);
+            color: #ffd454;
+        }
+        .alert-badge.ok {
+            background: rgba(40, 167, 69, 0.12);
+            border: 1px solid rgba(40, 167, 69, 0.4);
+            color: #6edff6;
+            color: var(--success);
+            cursor: default;
+        }
     </style>
 </head>
 <body>
-<h1>
-    <span id="app-title">Загрузка...</span>
-    <span style="color: var(--text-muted); font-size: 0.9rem; font-weight: normal;" id="app-version-badge"></span>
-    <span style="color: var(--text-muted); font-size: 1rem;">| Диспетчер печати</span>
-</h1>
-<div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('monitoring')">Мониторинг парка</button>
-    <button class="tab-btn" onclick="switchTab('settings')">Настройки</button>
+<div class="header-bar">
+    <h1>
+        <span id="app-title">Загрузка...</span>
+        <span style="color: var(--text-muted); font-size: 0.9rem; font-weight: normal;" id="app-version-badge"></span>
+        <span style="color: var(--text-muted); font-size: 1rem;">| Диспетчер печати</span>
+    </h1>
+    <!-- ВЕРХНЕЕ ПОЛЕ: Глобальная сводка парка -->
+    <div class="sys-pills" id="top-system-bar">
+        <div class="sys-pill"><span class="dot ok" id="net-dot"></span> <span id="net-text">Связь ОК</span></div>
+        <div class="sys-pill">🚀 Активных задач: <b id="pill-tasks">0</b></div>
+        <div class="sys-pill">🖨️ Принтеры: <b id="pill-printers">-</b></div>
+        <div class="sys-pill">📷 Камеры: <b id="pill-scanners">-</b></div>
+        <div class="sys-pill" style="font-family: monospace; font-size: 0.9rem;"><b id="pill-clock">--:--:--</b></div>
+    </div>
+</div>
+
+<div class="top-nav-row">
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('monitoring')">Мониторинг парка</button>
+        <button class="tab-btn" onclick="switchTab('settings')">Настройки</button>
+    </div>
+    <!-- НИЖНЕЕ ПОЛЕ: Оперативные варнинги и алерты -->
+    <div class="alerts-strip" id="operational-alerts">
+        <span style="color: var(--text-muted); font-size: 0.8rem;">Анализ состояния линий...</span>
+    </div>
 </div>
 
 <div id="monitoring" class="tab-content active">
@@ -476,6 +572,23 @@
         }[role] || role || '-';
     }
 
+    // 1. Живые часы запускаем ОДИН раз глобально
+    setInterval(() => {
+        const el = document.getElementById('pill-clock');
+        if (el) el.innerText = new Date().toLocaleTimeString('ru-RU');
+    }, 1000);
+
+    // 2. Глобальная функция фокуса на карточку по клику на алерт
+    window.focusTaskCard = function(taskId) {
+        const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+        if (card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            card.style.outline = '2px solid var(--warning)';
+            setTimeout(() => card.style.outline = 'none', 2000);
+        }
+    };
+
+    // 3. Опрос активных задач
     async function fetchActiveTasks() {
         const container = document.getElementById('tasks-list');
         try {
@@ -489,10 +602,21 @@
                 tasks = responseData;
             }
 
+            // Индикатор живой связи с сервером
+            const netDot = document.getElementById('net-dot');
+            const netText = document.getElementById('net-text');
+            if (netDot && netText) {
+                netDot.className = 'dot ok';
+                netText.innerText = 'Связь ОК';
+            }
+
             if (!tasks || tasks.length === 0) {
+                updateTopBars([]); // <-- ВЫЗОВ ПРИ ПУСТОМ СПИСКЕ
                 container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Активных заданий нет</div>';
                 return;
             }
+
+            updateTopBars(tasks); // <-- ВЫЗОВ ДЛЯ ОТРИСОВКИ АЛЕРТОВ И ПИЛЛСОВ
 
             container.innerHTML = tasks.map(t => {
                 const line = window.linesMap[t.line_id] || {};
@@ -686,8 +810,138 @@
                 </div>`;
             }).join('');
         } catch (err) {
+            // Если сеть или сервер упали — зажигаем красный индикатор в шапке
+            const netDot = document.getElementById('net-dot');
+            const netText = document.getElementById('net-text');
+            if (netDot && netText) {
+                netDot.className = 'dot err';
+                netText.innerText = 'Сбой связи';
+            }
             container.innerHTML = `<div style="color: var(--danger); padding: 10px;">⚠️ Ошибка связи: ${err.message}</div>`;
         }
+    }
+
+    function updateTopBars(tasks = []) {
+        const pillTasks = document.getElementById('pill-tasks');
+        if (pillTasks) pillTasks.innerText = tasks.length;
+
+        let totalPrinters = 0, okPrinters = 0;
+        let totalScanners = 0, okScanners = 0;
+
+        Object.values(window.linesMap).forEach(l => {
+            (l.printers || []).filter(p => p.is_active !== false).forEach(p => {
+                totalPrinters++;
+                if (!(p.status || '').includes('ОФФЛАЙН') && !(p.status || '').includes('ОШИБКА')) okPrinters++;
+            });
+            (l.scanners || []).filter(s => s.is_active !== false).forEach(s => {
+                totalScanners++;
+                if (s.online) okScanners++;
+            });
+        });
+
+        const pEl = document.getElementById('pill-printers');
+        if (pEl) {
+            pEl.innerText = `${okPrinters} / ${totalPrinters}`;
+            pEl.style.color = okPrinters < totalPrinters ? 'var(--danger)' : 'var(--success)';
+        }
+
+        const sEl = document.getElementById('pill-scanners');
+        if (sEl) {
+            sEl.innerText = `${okScanners} / ${totalScanners}`;
+            sEl.style.color = okScanners < totalScanners ? 'var(--danger)' : '#a78bfa';
+        }
+
+        const strip = document.getElementById('operational-alerts');
+        if (!strip) return;
+
+        if (tasks.length === 0) {
+            strip.innerHTML = `<span style="color: var(--text-muted); font-size: 0.8rem;">Нет активных заданий</span>`;
+            return;
+        }
+
+        const alerts = [];
+
+        tasks.forEach(t => {
+            const line = window.linesMap[t.line_id] || {};
+            const printers = (line.printers || []).filter(p => p.is_active !== false);
+            const scanners = (line.scanners || []).filter(s => s.is_active !== false);
+
+            const total = t.stats?.total || 1;
+            const printed = t.stats?.printed || 0;
+            const scanned = Number(t.stats?.scanned ?? 0);
+
+            if (printed >= 30) {
+                const readRate = (scanned / printed) * 100;
+                const diff = printed - scanned;
+                if (readRate < 85.0) {
+                    alerts.push({
+                        level: 'critical',
+                        taskId: t.task_id,
+                        text: `🔴 [${t.line_name}] Считываемость: ${readRate.toFixed(1)}% (-${diff} шт)`
+                    });
+                } else if (readRate < 95.0) {
+                    alerts.push({
+                        level: 'warning',
+                        taskId: t.task_id,
+                        text: `🟡 [${t.line_name}] Считываемость < 95%: ${readRate.toFixed(1)}% (-${diff} шт)`
+                    });
+                }
+            }
+
+            printers.forEach(p => {
+                const st = (p.status || '').toUpperCase();
+                if (st.includes('ОФФЛАЙН') || st.includes('ОШИБКА')) {
+                    alerts.push({
+                        level: 'critical',
+                        taskId: t.task_id,
+                        text: `🔴 [${t.line_name}] Принтер ${p.name}: ${p.status}`
+                    });
+                }
+
+                if (p.ribbon && p.ribbon !== 'N/A' && p.ribbon !== '-') {
+                    const ribVal = parseInt(String(p.ribbon).replace(/[^0-9]/g, ''), 10);
+                    if (!Number.isNaN(ribVal) && ribVal <= 15) {
+                        alerts.push({
+                            level: ribVal <= 5 ? 'critical' : 'warning',
+                            taskId: t.task_id,
+                            text: `${ribVal <= 5 ? '🔴' : '🟡'} [${p.name}] Мало риббона: ${p.ribbon}`
+                        });
+                    }
+                }
+            });
+
+            scanners.forEach(s => {
+                if (!s.online) {
+                    alerts.push({
+                        level: 'critical',
+                        taskId: t.task_id,
+                        text: `🔴 [${t.line_name}] Камера ${s.name} OFFLINE`
+                    });
+                }
+            });
+
+            const printPct = (printed / total) * 100;
+            if (printPct >= 95 && printed < total) {
+                alerts.push({
+                    level: 'warning',
+                    taskId: t.task_id,
+                    text: `📦 [${t.line_name}] Партия заканчивается: осталось ${total - printed} шт`
+                });
+            }
+        });
+
+        if (alerts.length === 0) {
+            strip.innerHTML = `<div class="alert-badge ok">✅ Все активные линии в норме (считываемость ≥ 95%, оборудование онлайн)</div>`;
+            return;
+        }
+
+        alerts.sort((a, b) => (a.level === 'critical' ? -1 : 1));
+
+        strip.innerHTML = alerts.map(a => `
+            <div class="alert-badge ${a.level}" onclick="focusTaskCard(${a.taskId})" title="Нажмите, чтобы перейти к карточке задачи #${a.taskId}">
+                ${a.text}
+            </div>
+        `).join('');
     }
 
     function renderPrintersGrid(data) {
