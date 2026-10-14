@@ -444,31 +444,6 @@
         if (tabId === 'templatesTab') updateTemplateTargets();
     }
 
-    async function fetchSystemInfo() {
-        try {
-            const res = await fetch('/api/system/info');
-            if (!res.ok) return;
-            const data = await res.json();
-
-            const brandName = data.brand?.name || 'RovnoMark';
-            const buildVer = data.build?.version || 'dev';
-            const gitCommit = data.build?.git_commit ? ` (${data.build.git_commit.slice(0, 7)})` : '';
-
-            // Обновляем заголовок вкладки в браузере
-            document.title = `${brandName} v${buildVer} | Диспетчер`;
-
-            // Обновляем визуальный заголовок в интерфейсе
-            const titleEl = document.getElementById('app-title');
-            const verBadgeEl = document.getElementById('app-version-badge');
-
-            if (titleEl) titleEl.innerText = brandName;
-            if (verBadgeEl) verBadgeEl.innerText = `v${buildVer}${gitCommit}`;
-        } catch (e) {
-            console.warn('Не удалось загрузить версию системы:', e);
-            document.getElementById('app-title').innerText = 'RovnoMark';
-        }
-    }
-
     function togglePumperFields() {
         const mode = document.getElementById('p_pumper_mode').value;
         const leadLoopField = document.getElementById('field_lead_loop');
@@ -682,6 +657,31 @@
         }
     }
 
+    async function fetchSystemInfo() {
+        try {
+            const res = await fetch('/api/system/info');
+            if (!res.ok) return;
+            const data = await res.json();
+
+            const brandName = data.brand?.name || 'RovnoMark';
+            const buildVer = data.build?.version || 'dev';
+            const gitCommit = data.build?.git_commit ? ` (${data.build.git_commit.slice(0, 7)})` : '';
+
+            // Обновляем заголовок вкладки в браузере
+            document.title = `${brandName} v${buildVer} | Диспетчер`;
+
+            // Обновляем визуальный заголовок в интерфейсе
+            const titleEl = document.getElementById('app-title');
+            const verBadgeEl = document.getElementById('app-version-badge');
+
+            if (titleEl) titleEl.innerText = brandName;
+            if (verBadgeEl) verBadgeEl.innerText = `v${buildVer}${gitCommit}`;
+        } catch (e) {
+            console.warn('Не удалось загрузить версию системы:', e);
+            document.getElementById('app-title').innerText = 'RovnoMark';
+        }
+    }
+
     async function fetchActiveTasks() {
         const container = document.getElementById('tasks-list');
         try {
@@ -704,7 +704,7 @@
                 // 1. Сначала извлекаем линию и устройства из глобального кэша
                 const line = window.linesMap[t.line_id] || {};
 
-// Фильтруем активные устройства на линии:
+                // Фильтруем активные устройства на линии:
                 const printers = (line.printers || []).filter(p => p.is_active !== false);
                 const scanners = (line.scanners || []).filter(s => s.is_active !== false);
 
@@ -718,8 +718,13 @@
                     }
                 }
 
-                const rawPrintedTime = t.last_printed_at || (printers[0] && printers[0].last_printed_at);
-                const lastPrintedTime = formatTaskTime ? formatTaskTime(rawPrintedTime) : (rawPrintedTime || '-');
+                const lastPrinted = printer.last_printed_code
+                    || printer.cur_code
+                    || (idx === 0 ? (t.last_printed_code || t.last_code) : null)
+                    || '-';
+                const rawPrintedTime = t.last_printed_at
+                    || (printers[0] && (printers[0].last_printed_at || printers[0].printed_at));
+                const lastPrintedTime = formatTaskTime(rawPrintedTime);
 
                 const rawScannedTime = scanners[0] && scanners[0].last_read_at;
                 const lastScannedTime = formatScannerTime(rawScannedTime);
@@ -727,6 +732,7 @@
                 // 3. План и печать
                 const total = t.stats?.total || 1;
                 const printed = t.stats?.printed || 0;
+
 
                 // 4. Определение сканов для текущей задачи
                 const totalScanned = Number(t.stats?.scanned ?? 0);
@@ -912,6 +918,22 @@
         }
     }
 
+    function formatTaskTime(value) {
+        if (!value || value.startsWith('0001-')) return '-';
+        // Нормализуем пробел под формат ISO
+        const safe = typeof value === 'string' ? value.replace(' ', 'T') : value;
+        const date = new Date(safe);
+        if (Number.isNaN(date.getTime())) return value;
+
+        return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function formatScannerTime(value) {
+        if (!value || value.startsWith('0001-')) return '-';
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('ru-RU');
+    }
+
     async function stopTask(task_id, lineId) {
         if(!confirm('Остановить выполнение задачи?')) return;
         try {
@@ -946,21 +968,6 @@
                 ВЕБ-ИНТЕРФЕЙС
             </a>
         </div>`;
-    }
-
-    function formatTaskTime(value) {
-        if (!value || value.startsWith('0001-')) return '-';
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return value;
-
-        // Формат: ЧЧ:ММ:СС (если нужно с датой: date.toLocaleString('ru-RU'))
-        return date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-    }
-
-    function formatScannerTime(value) {
-        if (!value || value.startsWith('0001-')) return '-';
-        const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('ru-RU');
     }
 
     function scannerRoleLabel(role) {

@@ -1077,6 +1077,22 @@ func (s *Store) GetTaskStaticFieldsJSON(taskID int) (string, error) {
 	return staticJSON, err
 }
 
+func (s *Store) GetLastPrintedCodeForPrinter(taskID, printerID int) (string, time.Time, error) {
+	db := s.getCodesDB()
+	var code string
+	var pTimeStr sql.NullString
+	err := db.QueryRow(`
+        SELECT code, printed_at 
+        FROM task_codes 
+        WHERE task_id = ? AND printer_id = ? AND status = 'printed' 
+        ORDER BY printer_index DESC LIMIT 1`, taskID, printerID).Scan(&code, &pTimeStr)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	t, _ := time.Parse("2006-01-02 15:04:05", pTimeStr.String)
+	return code, t, nil
+}
+
 func (s *Store) GetRndTextByTask(taskID int) (string, error) {
 	var rndText string
 	err := s.db.QueryRow("SELECT rnd_text FROM tasks WHERE id = ?", taskID).Scan(&rndText)
@@ -1223,6 +1239,13 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 				FROM scanner_reads 
 				WHERE task_id = ? AND match_status <> 'no_read'`, id).Scan(&scanned)
 
+			var lastPrintedCode, lastPrintedAt sql.NullString
+			_ = codesDB.QueryRow(`
+            SELECT code, printed_at 
+            FROM task_codes 
+            WHERE task_id = ? AND status = 'printed' 
+            ORDER BY printed_at DESC, id DESC LIMIT 1`, id).Scan(&lastPrintedCode, &lastPrintedAt)
+
 			result = append(result, map[string]interface{}{
 				"task_id":            id,
 				"line_id":            lID,
@@ -1232,6 +1255,8 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 				"status":             status,
 				"created_at":         created,
 				"rnd_text":           rndText,
+				"last_printed_code":  lastPrintedCode.String,
+				"last_printed_at":    lastPrintedAt.String,
 				"stats": map[string]int{
 					"total":    total,
 					"printed":  printed,

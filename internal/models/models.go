@@ -108,15 +108,18 @@ type LineConfig struct {
 }
 
 type PrinterState struct {
-	LastTemplate   string
-	LastStaticHash string
-	Status         string `json:"status"`
-	Ribbon         string `json:"ribbon"`
-	Queue          string `json:"queue"`
-	Speed          string `json:"speed"`
-	CurCount       string `json:"cur_count"`
-	CurTemplate    string `json:"cur_template"`
-	LastWeight     string `json:"last_weight,omitempty"`
+	LastTemplate     string
+	LastStaticHash   string
+	Status           string    `json:"status"`
+	Ribbon           string    `json:"ribbon"`
+	Queue            string    `json:"queue"`
+	Speed            string    `json:"speed"`
+	CurCount         string    `json:"cur_count"`
+	CurTemplate      string    `json:"cur_template"`
+	LastWeight       string    `json:"last_weight,omitempty"`
+	LastPrintedCode  string    `json:"last_printed_code,omitempty"`
+	LastPrintedIndex int       `json:"last_printed_index,omitempty"`
+	LastPrintedAt    time.Time `json:"last_printed_at,omitempty"`
 }
 
 type LogEntry struct {

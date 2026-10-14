@@ -142,6 +142,7 @@ func (tp *TaskProcessor) pumpValentinFastLoop(
 
 	// Первичный код взводится строго 1 раз
 	if err := tp.pushSingleValentinCode(taskID, printerID, role, vDriver, false, isSinglePrinter); err != nil {
+
 		slog.Error("VALENTIN-FAST-SINGLE: Ошибка первичного взвода", "err", err)
 		return
 	}
@@ -306,6 +307,16 @@ func (tp *TaskProcessor) pushSingleValentinCode(
 	}
 
 	_ = tp.Store.UpdateCodeStatusByID(codeObj.ID, "printed", codeObj.PrinterIndex)
+
+	// Запоминаем в кэш менеджера:
+	tp.Manager.mu.Lock()
+	st := tp.Manager.states[printerID]
+	st.LastPrintedCode = cleanCode
+	st.LastPrintedAt = time.Now()
+	st.LastPrintedIndex = codeObj.PrinterIndex
+	tp.Manager.states[printerID] = st
+	tp.Manager.mu.Unlock()
+
 	return nil
 }
 
@@ -628,6 +639,15 @@ func (pm *PrinterManager) BackgroundPoller(ctx context.Context, store *storage.S
 										"confirmed_now", affected,
 									)
 								}
+								if lastCode, pTime, errLast := store.GetLastPrintedCodeForPrinter(activeTaskID, cfg.ID); errLast == nil {
+									pm.mu.Lock()
+									st := pm.states[id]
+									st.LastPrintedCode = lastCode
+									st.LastPrintedAt = pTime
+									st.LastPrintedIndex = lastPrintedIdx
+									pm.states[id] = st
+									pm.mu.Unlock()
+								}
 							}
 						}
 					}
@@ -649,8 +669,11 @@ func (pm *PrinterManager) BackgroundPoller(ctx context.Context, store *storage.S
 			}
 
 			newState := models.PrinterState{
-				LastTemplate:   oldState.LastTemplate,
-				LastStaticHash: oldState.LastStaticHash,
+				LastTemplate:     oldState.LastTemplate,
+				LastStaticHash:   oldState.LastStaticHash,
+				LastPrintedCode:  oldState.LastPrintedCode,
+				LastPrintedIndex: oldState.LastPrintedIndex,
+				LastPrintedAt:    oldState.LastPrintedAt,
 			}
 
 			isOfflineNow := err != nil
