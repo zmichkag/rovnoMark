@@ -577,7 +577,41 @@ func (d *Driver) ClearQueue() error {
 }
 
 func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
-	return d.ClearQueue()
+	// 1. Очищаем физическую очередь кодов перед началом новой смены/задания
+	if err := d.ClearQueue(); err != nil {
+		slog.Warn("MARKEM-ASYNC: Предупреждение при очистке очереди", "ip", d.Address, "err", err)
+	}
+
+	// 2. Пакетная конфигурация критических параметров железа:
+	// - packDataQueueSize: емкость аппаратной очереди (200)
+	// - packDataQueueLowWatermark: порог отправки события нехватки данных (20)
+	// - packDataQueueSource: источник данных — TCP-сокет
+	// - varDataLogLevel: отключение внутреннего дублирующего аудита (защита от ошибки 2202)
+	// - imageNotReadyAction: при нехватке кодов поднимать Warning, а не ронять головку в Fault
+	cmdSettings := `<SetSettings act="{act}">
+		<Setting><ID>packDataQueueSource</ID><Value>DATA_Q_SOURCE_COMMS</Value></Setting>
+		<Setting><ID>packDataQueueSize</ID><Value>200</Value></Setting>
+		<Setting><ID>packDataQueueLowWatermark</ID><Value>20</Value></Setting>
+		<Setting><ID>varDataLogLevel</ID><Value>VDL_NONE</Value></Setting>
+		<Setting><ID>imageNotReadyAction</ID><Value>LRA_RAISE_WARNING</Value></Setting>
+	</SetSettings>`
+
+	resp, err := d.sendSOAPWaitACK(cmdSettings)
+	if err != nil {
+		slog.Warn("MARKEM-ASYNC: Не удалось применить расширенные настройки сессии", "ip", d.Address, "err", err)
+	} else {
+		slog.Info("MARKEM-ASYNC: Параметры очереди и защиты от 2202 успешно инициализированы", "ip", d.Address, "resp", resp)
+	}
+
+	// 3. Подписка на асинхронную телеметрию (п. 3.9 DCP Usage Guide)
+	// Заставляем принтер самостоятельно слать события состояния и расхода риббона
+	go func() {
+		_ = d.rawSendNoWait(`<RequestPackMLStatus act="{act}"/>`)
+		_ = d.rawSendNoWait(`<RequestSuppliesUpdate act="{act}"/>`)
+		_ = d.rawSendNoWait(`<RequestCounts act="{act}"/>`)
+	}()
+
+	return nil
 }
 
 func (d *Driver) PrintTemplate(template string, fields map[string]string) error {
