@@ -32,6 +32,7 @@ type bizerbaEquipment struct {
 func defaultBizerbaEquipment() bizerbaEquipment {
 	return configuredBizerbaEquipment(Profile{})
 }
+
 func configuredBizerbaEquipment(profile Profile) bizerbaEquipment {
 	profile = normalizeProfile(profile)
 	unique := uniqueDataController(disabledUniqueDataController{})
