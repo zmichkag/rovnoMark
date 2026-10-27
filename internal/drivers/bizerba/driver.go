@@ -293,8 +293,6 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	return nil
 }
 
-// updateStaticFieldsOn записывает дату в GL06 и бригаду в GL15 через готовое соединение.
-// updateStaticFieldsOn применяет маппинг к входным полям и шлет их в весы
 func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]string) error {
 	if len(fields) == 0 {
 		return nil
@@ -306,12 +304,11 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 			continue
 		}
 
-		// 1. Ищем регистр Bizerba по маппингу
+		// 1. Ищем регистр весов по карте StaticMap
 		targetRegister := ""
 		if reg, ok := d.equipment.mapping.StaticMap[key]; ok && reg != "" {
 			targetRegister = strings.ToUpper(strings.TrimSpace(reg))
 		} else {
-			// Проверяем регистронезависимо
 			for mapKey, mapReg := range d.equipment.mapping.StaticMap {
 				if strings.EqualFold(mapKey, key) && mapReg != "" {
 					targetRegister = strings.ToUpper(strings.TrimSpace(mapReg))
@@ -320,7 +317,7 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 			}
 		}
 
-		// Если в маппинге нет — проверяем, вдруг сам ключ является регистром Bizerba (напр. "GL06", "GT02")
+		// 2. Если в маппинге нет — проверяем, вдруг сам ключ является регистром Bizerba (напр. "GL06", "GT02")
 		if targetRegister == "" {
 			upper := strings.ToUpper(strings.TrimSpace(key))
 			if isBizerbaRegister(upper) {
@@ -328,11 +325,12 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 			}
 		}
 
+		// Если соответствия нет — поле предназначено не для Bizerba, пропускаем
 		if targetRegister == "" {
-			continue // поле не относится к Bizerba, пропускаем
+			continue
 		}
 
-		// 2. Если поле даты (GL06, GL07, GL08) — нормализуем под ddMMyy
+		// 3. Если поле относится к датам Bizerba (GL06, GL07, GL08) — нормализуем под формат ddMMyy
 		formattedValue := val
 		if strings.HasPrefix(targetRegister, "GL0") {
 			if normDate, err := normalizeBizerbaDate(val); err == nil {
@@ -340,7 +338,7 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 			}
 		}
 
-		// 3. Отправляем в весы: A!REG|VAL
+		// 4. Отправляем команду в весы: A!REG|VAL
 		if err := sendWrite(conn, "A!"+targetRegister, formattedValue, d.timeout); err != nil {
 			return fmt.Errorf("ошибка установки поля Bizerba %s (%s=%q): %w", targetRegister, key, formattedValue, err)
 		}
@@ -517,6 +515,7 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		d.mu.Unlock()
 		close(s.done)
 	}()
+
 	conn, err := d.newConn()
 	if err == nil {
 		err = conn.Open(d.device, d.device, true)
@@ -539,133 +538,151 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 
 	var pending []queuedMark
 	var active *queuedMark
-	// clearMarkFields удаляет данные последней марки, чтобы при пустой очереди
-	// устройство не могло повторно напечатать уже использованный DataMatrix.
+
+	serialReg := d.equipment.mapping.SerialField
+	cryptoReg := d.equipment.mapping.CryptoField
+
 	clearMarkFields := func() error {
-		if err := sendWrite(conn, "A!GT03", "", d.timeout); err != nil {
-			return fmt.Errorf("ошибка очистки поля Bizerba GT03: %w", err)
+		if err := sendWrite(conn, "A!"+serialReg, "", d.timeout); err != nil {
+			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", serialReg, err)
 		}
-		if err := sendWrite(conn, "A!GT04", "", d.timeout); err != nil {
-			return fmt.Errorf("ошибка очистки поля Bizerba GT04: %w", err)
+		if err := sendWrite(conn, "A!"+cryptoReg, "", d.timeout); err != nil {
+			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", cryptoReg, err)
 		}
 		return nil
 	}
-	// Замыкание установки следующей марки
+
 	installNext := func() error {
 		if active != nil || len(pending) == 0 {
 			return nil
 		}
 		next := pending[0]
 		pending = pending[1:]
-		if err := sendWrite(conn, "A!"+d.equipment.mapping.SerialField, next.serial, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.mapping.SerialField, err)
+		if err := sendWrite(conn, "A!"+serialReg, next.serial, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", serialReg, err)
 		}
-		if err := sendWrite(conn, "A!"+d.equipment.mapping.CryptoField, next.crypto, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.mapping.CryptoField, err)
+		if err := sendWrite(conn, "A!"+cryptoReg, next.crypto, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", cryptoReg, err)
 		}
 		active = &next
 		return nil
 	}
 
 	for {
-		select {
-		case req := <-s.requests:
-			switch req.kind {
-			case "enqueue":
-				if capacity <= 0 {
-					req.resp <- sessionResponse{err: fmt.Errorf("сессия передачи марок Bizerba не инициализирована")}
-					continue
-				}
-				used := len(pending)
-				if active != nil {
-					used++
-				}
-				free := capacity - used
-				if free < len(req.marks) {
-					req.resp <- sessionResponse{err: fmt.Errorf("в очереди Bizerba свободно место для %d из %d марок", free, len(req.marks))}
-					continue
-				}
-				pending = append(pending, req.marks...)
-				err := installNext()
-				req.resp <- sessionResponse{value: len(req.marks), err: err}
-				if err != nil {
-					s.setError(err)
-					_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-					return
-				}
-			case "free":
-				used := len(pending)
-				if active != nil {
-					used++
-				}
-				req.resp <- sessionResponse{value: capacity - used}
-			case "call":
-				req.resp <- sessionResponse{err: req.call(conn)}
-			case "prepare":
-				err := d.updateStaticFieldsOn(conn, req.prepared.staticFields)
-				if err == nil {
-					capacity = req.prepared.capacity
-				}
-				req.resp <- sessionResponse{err: err}
-			case "stop", "close":
-				err := sendWrite(conn, "A!GWC3", "0", d.timeout)
-				req.resp <- sessionResponse{err: err}
-				return
-			}
-		default:
-			payload, status, receiveErr := conn.ReceiveOne(spontaneousQueue, receivePollTimeout)
-			if receiveErr != nil {
-				s.setError(receiveErr)
-				_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-				return
-			}
-			if status != bcsStatusOK && status != bcsStatusMore && status != bcsStatusTimeout {
-				s.setError(fmt.Errorf("BCS ReceiveOne(%q): получен статус %d", spontaneousQueue, status))
-				_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-				return
-			}
-			isWeightPackage := status != bcsStatusTimeout && hasField(payload, "PV01")
-			isPassingPackage := status != bcsStatusTimeout && hasField(payload, "PW05")
-			if active != nil && (isWeightPackage || isPassingPackage) {
-				weight := ""
-				var weightErr error
-				switch {
-				case isWeightPackage && d.equipment.captureWeight:
-					weight, weightErr = bizerbaWeight(payload)
-				case isPassingPackage:
-					// PW05 reports a passing package without weighing data. The mark was
-					// applied, so persist it with zero weight and advance the queue.
-					weight = "0"
-				}
-				if weight != "" || weightErr != nil {
-					switch {
-					case weightErr != nil:
-						slog.Error("Не удалось извлечь вес из пакета Bizerba", "mark", active.code, "err", weightErr, "packet", payload)
-					case d.equipment.recordWeight == nil:
-						slog.Error("Для Bizerba не настроено хранилище веса напечатанной марки", "mark", active.code, "weight", weight)
-					default:
-						if recordErr := d.equipment.recordWeight(active.index, active.code, weight); recordErr != nil {
-							slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", recordErr)
-						}
+		// Шаг 1: Разгрузка очереди входящих управляющих запросов без блокировки
+		drainRequests := true
+		for drainRequests {
+			select {
+			case req := <-s.requests:
+				switch req.kind {
+				case "enqueue":
+					if capacity <= 0 {
+						req.resp <- sessionResponse{err: fmt.Errorf("сессия передачи марок Bizerba не инициализирована")}
+						continue
 					}
-				}
-				d.mu.Lock()
-				d.lastPrinted = active.index
-				d.mu.Unlock()
-				active = nil
-				if err := installNext(); err != nil {
-					s.setError(err)
-					_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-					return
-				}
-				if active == nil && len(pending) == 0 {
-					if err := clearMarkFields(); err != nil {
+					used := len(pending)
+					if active != nil {
+						used++
+					}
+					free := capacity - used
+					if free < len(req.marks) {
+						req.resp <- sessionResponse{err: fmt.Errorf("в очереди Bizerba свободно место для %d из %d марок", free, len(req.marks))}
+						continue
+					}
+					pending = append(pending, req.marks...)
+					err := installNext()
+					req.resp <- sessionResponse{value: len(req.marks), err: err}
+					if err != nil {
 						s.setError(err)
 						_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
 						return
 					}
+				case "free":
+					used := len(pending)
+					if active != nil {
+						used++
+					}
+					req.resp <- sessionResponse{value: capacity - used}
+				case "call":
+					req.resp <- sessionResponse{err: req.call(conn)}
+				case "prepare":
+					err := d.updateStaticFieldsOn(conn, req.prepared.staticFields)
+					if err == nil {
+						capacity = req.prepared.capacity
+					}
+					req.resp <- sessionResponse{err: err}
+				case "stop", "close":
+					_ = clearMarkFields()
+					err := sendWrite(conn, "A!GWC3", "0", d.timeout)
+					req.resp <- sessionResponse{err: err}
+					return
+				}
+			default:
+				drainRequests = false
+			}
+		}
+
+		// Шаг 2: Чтение спонтанных пакетов взвешивания с контролируемым таймаутом
+		payload, status, receiveErr := conn.ReceiveOne(spontaneousQueue, receivePollTimeout)
+		if receiveErr != nil {
+			s.setError(receiveErr)
+			_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+			return
+		}
+		if status != bcsStatusOK && status != bcsStatusMore && status != bcsStatusTimeout {
+			s.setError(fmt.Errorf("BCS ReceiveOne(%q): получен статус %d", spontaneousQueue, status))
+			_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+			return
+		}
+
+		// Шаг 3: Обработка факта взвешивания / проезда упаковки
+		isWeightPackage := status != bcsStatusTimeout && hasField(payload, "PV01")
+		isPassingPackage := status != bcsStatusTimeout && hasField(payload, "PW05")
+
+		if active != nil && (isWeightPackage || isPassingPackage) {
+			weight := ""
+			var weightErr error
+			switch {
+			case isWeightPackage && d.equipment.captureWeight:
+				weight, weightErr = bizerbaWeight(payload)
+			case isPassingPackage:
+				weight = "0"
+			}
+
+			if weight != "" || weightErr != nil {
+				switch {
+				case weightErr != nil:
+					slog.Error("Не удалось извлечь вес из пакета Bizerba", "mark", active.code, "err", weightErr, "packet", payload)
+				case d.equipment.recordWeight == nil:
+					slog.Error("Для Bizerba не настроено хранилище веса напечатанной марки", "mark", active.code, "weight", weight)
+				default:
+					if recordErr := d.equipment.recordWeight(active.index, active.code, weight); recordErr != nil {
+						slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", recordErr)
+					}
 				}
 			}
+
+			d.mu.Lock()
+			d.lastPrinted = active.index
+			d.mu.Unlock()
+			active = nil
+
+			if err := installNext(); err != nil {
+				s.setError(err)
+				_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+				return
+			}
+
+			if active == nil && len(pending) == 0 {
+				if err := clearMarkFields(); err != nil {
+					slog.Warn("Не удалось очистить поля марки в конце очереди Bizerba", "err", err)
+				}
+			}
+		}
+
+		// Шаг 4: Защита процессора от холостого хода при статус-таймауте
+		if status == bcsStatusTimeout && active == nil {
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
@@ -752,43 +769,38 @@ func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (in
 	var activeGTIN string
 
 	for i, code := range codes {
-		// Раскусываем марку из SQLite шлюза
 		parsed, err := marking.ParseAndValidateShortGS1(strings.TrimSpace(code))
 		if err != nil {
 			return 0, fmt.Errorf("некорректная марка с индексом %d: %w", i, err)
 		}
 
 		if i == 0 {
-			activeGTIN = parsed.GTIN // 14 цифр GTIN из кода маркировки
+			activeGTIN = parsed.GTIN // 14 цифр GTIN из первой марки[cite: 269]
 		} else if parsed.GTIN != activeGTIN {
 			return 0, fmt.Errorf("в партии обнаружен чужой GTIN на марке #%d: %s (ожидался %s)", i, parsed.GTIN, activeGTIN)
 		}
 
-		// Подготавливаем хвосты под динамическую отправку на каждую упаковку
 		marks = append(marks, queuedMark{
 			index:  startIndex + i,
 			code:   parsed.ToDBFormat(),
-			serial: parsed.CountryCode + parsed.Serial, // AI 21 -> в serial_field (GT03)
-			crypto: "@1D93" + parsed.CryptoTail,        // AI 93 -> в crypto_field (GT04)
+			serial: parsed.CountryCode + parsed.Serial,
+			crypto: "@1D93" + parsed.CryptoTail,
 		})
 	}
 
-	// Сценарий 2: если в настройках принтера указано поле под GTIN (например, GT22 / ШК2)
-	// и оно ещё не было выставлено в текущей сессии
-	gtinRegister := d.equipment.mapping.GTINField
-	if gtinRegister != "" && activeGTIN != "" {
+	// Если задан gtin_field (ШК2) — перед стартом отправляем туда чистый GTIN марки
+	gtinReg := strings.ToUpper(strings.TrimSpace(d.equipment.mapping.GTINField))
+	if gtinReg != "" && activeGTIN != "" {
 		d.mu.Lock()
 		if d.prepared != nil {
 			if d.prepared.staticFields == nil {
 				d.prepared.staticFields = make(map[string]string)
 			}
-			// Записываем GTIN в ШК2 перед стартом смены/партии: A!GT22|04620031245728[cite: 269]
-			d.prepared.staticFields[gtinRegister] = activeGTIN
+			d.prepared.staticFields[gtinReg] = activeGTIN
 		}
 		d.mu.Unlock()
 	}
 
-	// Открываем сессию (если еще не открыта) и шлем статические поля[cite: 269]
 	if err := d.startPreparedSession(); err != nil {
 		return 0, err
 	}
@@ -797,10 +809,15 @@ func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (in
 	s := d.session
 	d.mu.RUnlock()
 	if s == nil {
+		d.mu.RLock()
+		err := d.sessionErr
+		d.mu.RUnlock()
+		if err != nil {
+			return 0, err
+		}
 		return 0, fmt.Errorf("сессия передачи марок Bizerba не инициализирована")
 	}
 
-	// Заряжаем хвосты в очередь драйвера[cite: 269]
 	return s.request(sessionRequest{kind: "enqueue", marks: marks})
 }
 

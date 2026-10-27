@@ -1,11 +1,11 @@
 package bizerba
 
-// FieldMapping описывает привязку логических полей к регистрам Bizerba (GTxx, GLxx).
+// FieldMapping описывает сопоставление полей 1С с регистрами Bizerba (GxNet).
 type FieldMapping struct {
-	SerialField string            `json:"serial_field"` // Куда слать серийник КМ (по умолчанию "GT03")
-	CryptoField string            `json:"crypto_field"` // Куда слать криптохвост КМ (по умолчанию "GT04")
-	GTINField   string            `json:"gtin_field"`   // Куда слать GTIN марки, если ШК2 пустой (например, "GT22"). Если пусто — ШК2 не трогаем!
-	StaticMap   map[string]string `json:"static_map"`   // Маппинг полей 1С: "date01" -> "GL06", "composition" -> "GT02" и т.д.
+	SerialField string            `json:"serial_field"` // Регистр для серийника КМ (по умолчанию "GT03")
+	CryptoField string            `json:"crypto_field"` // Регистр для криптохвоста КМ (по умолчанию "GT04")
+	GTINField   string            `json:"gtin_field"`   // Виртуальный регистр для GTIN весового товара (например "GT22")
+	StaticMap   map[string]string `json:"static_map"`   // 1С ключ -> регистр Bizerba ("composition": "GT02", "date01": "GL06")
 }
 
 type Config struct {
@@ -14,5 +14,5 @@ type Config struct {
 	RecordGXNET   bool         `json:"record_gxnet"`
 	Mode          string       `json:"mode"`     // stream / unique
 	Conveyor      bool         `json:"conveyor"` // управление конвейером
-	Mapping       FieldMapping `json:"mapping"`  // сопоставление полей
+	Mapping       FieldMapping `json:"mapping"`  // декларативный маппинг
 }
