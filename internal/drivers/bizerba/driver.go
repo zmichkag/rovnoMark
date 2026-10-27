@@ -294,22 +294,66 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 }
 
 // updateStaticFieldsOn записывает дату в GL06 и бригаду в GL15 через готовое соединение.
+// updateStaticFieldsOn применяет маппинг к входным полям и шлет их в весы
 func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]string) error {
-	if date := firstField(fields, "date", "production_date", "GL06", "дата"); date != "" {
-		formatted, err := normalizeBizerbaDate(date)
-		if err != nil {
-			return err
-		}
-		if err := sendWrite(conn, "A!GL06", formatted, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки даты Bizerba %q: %w", formatted, err)
-		}
+	if len(fields) == 0 {
+		return nil
 	}
-	if brigade := firstField(fields, "brigade", "team", "GL15", "бригада"); brigade != "" {
-		if err := sendWrite(conn, "A!GL15", brigade, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки бригады Bizerba %q: %w", brigade, err)
+
+	for key, value := range fields {
+		val := strings.TrimSpace(value)
+		if val == "" {
+			continue
+		}
+
+		// 1. Ищем регистр Bizerba по маппингу
+		targetRegister := ""
+		if reg, ok := d.equipment.mapping.StaticMap[key]; ok && reg != "" {
+			targetRegister = strings.ToUpper(strings.TrimSpace(reg))
+		} else {
+			// Проверяем регистронезависимо
+			for mapKey, mapReg := range d.equipment.mapping.StaticMap {
+				if strings.EqualFold(mapKey, key) && mapReg != "" {
+					targetRegister = strings.ToUpper(strings.TrimSpace(mapReg))
+					break
+				}
+			}
+		}
+
+		// Если в маппинге нет — проверяем, вдруг сам ключ является регистром Bizerba (напр. "GL06", "GT02")
+		if targetRegister == "" {
+			upper := strings.ToUpper(strings.TrimSpace(key))
+			if isBizerbaRegister(upper) {
+				targetRegister = upper
+			}
+		}
+
+		if targetRegister == "" {
+			continue // поле не относится к Bizerba, пропускаем
+		}
+
+		// 2. Если поле даты (GL06, GL07, GL08) — нормализуем под ddMMyy
+		formattedValue := val
+		if strings.HasPrefix(targetRegister, "GL0") {
+			if normDate, err := normalizeBizerbaDate(val); err == nil {
+				formattedValue = normDate
+			}
+		}
+
+		// 3. Отправляем в весы: A!REG|VAL
+		if err := sendWrite(conn, "A!"+targetRegister, formattedValue, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s (%s=%q): %w", targetRegister, key, formattedValue, err)
 		}
 	}
 	return nil
+}
+
+func isBizerbaRegister(reg string) bool {
+	if len(reg) != 4 {
+		return false
+	}
+	prefix := reg[:2]
+	return prefix == "GT" || prefix == "GL" || prefix == "GW" || prefix == "GD"
 }
 
 // GetCurrentTemplate возвращает текущий PLU, используя кратковременный кэш чтения.
@@ -506,20 +550,18 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		}
 		return nil
 	}
+	// Замыкание установки следующей марки
 	installNext := func() error {
 		if active != nil || len(pending) == 0 {
 			return nil
 		}
 		next := pending[0]
 		pending = pending[1:]
-		// В выбранном PLU-шаблоне текст DataMatrix собирается из полей GT03 и GT04:
-		// GT03 содержит шестисимвольный блок AI 21 (код страны и серийный номер),
-		// а GT04 — разделитель GS в виде @1D, идентификатор AI 93 и криптохвост.
-		if err := sendWrite(conn, "A!GT03", next.serial, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba GT03: %w", err)
+		if err := sendWrite(conn, "A!"+d.equipment.mapping.SerialField, next.serial, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.mapping.SerialField, err)
 		}
-		if err := sendWrite(conn, "A!GT04", next.crypto, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba GT04: %w", err)
+		if err := sendWrite(conn, "A!"+d.equipment.mapping.CryptoField, next.crypto, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.mapping.CryptoField, err)
 		}
 		active = &next
 		return nil
@@ -702,30 +744,63 @@ func formatScaledInteger(value string, exponent int) (string, error) {
 
 // PrintBatchIndexed разбирает GS1-коды и добавляет их в очередь активной сессии.
 func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (int, error) {
+	if len(codes) == 0 {
+		return 0, nil
+	}
+
 	marks := make([]queuedMark, 0, len(codes))
+	var activeGTIN string
+
 	for i, code := range codes {
+		// Раскусываем марку из SQLite шлюза
 		parsed, err := marking.ParseAndValidateShortGS1(strings.TrimSpace(code))
 		if err != nil {
-			return 0, fmt.Errorf("некорректная марка с индексом %d в пакете: %w", i, err)
+			return 0, fmt.Errorf("некорректная марка с индексом %d: %w", i, err)
 		}
-		marks = append(marks, queuedMark{index: startIndex + i, code: parsed.ToDBFormat(), serial: parsed.CountryCode + parsed.Serial,
-			crypto: "@1D93" + parsed.CryptoTail})
+
+		if i == 0 {
+			activeGTIN = parsed.GTIN // 14 цифр GTIN из кода маркировки
+		} else if parsed.GTIN != activeGTIN {
+			return 0, fmt.Errorf("в партии обнаружен чужой GTIN на марке #%d: %s (ожидался %s)", i, parsed.GTIN, activeGTIN)
+		}
+
+		// Подготавливаем хвосты под динамическую отправку на каждую упаковку
+		marks = append(marks, queuedMark{
+			index:  startIndex + i,
+			code:   parsed.ToDBFormat(),
+			serial: parsed.CountryCode + parsed.Serial, // AI 21 -> в serial_field (GT03)
+			crypto: "@1D93" + parsed.CryptoTail,        // AI 93 -> в crypto_field (GT04)
+		})
 	}
+
+	// Сценарий 2: если в настройках принтера указано поле под GTIN (например, GT22 / ШК2)
+	// и оно ещё не было выставлено в текущей сессии
+	gtinRegister := d.equipment.mapping.GTINField
+	if gtinRegister != "" && activeGTIN != "" {
+		d.mu.Lock()
+		if d.prepared != nil {
+			if d.prepared.staticFields == nil {
+				d.prepared.staticFields = make(map[string]string)
+			}
+			// Записываем GTIN в ШК2 перед стартом смены/партии: A!GT22|04620031245728[cite: 269]
+			d.prepared.staticFields[gtinRegister] = activeGTIN
+		}
+		d.mu.Unlock()
+	}
+
+	// Открываем сессию (если еще не открыта) и шлем статические поля[cite: 269]
 	if err := d.startPreparedSession(); err != nil {
 		return 0, err
 	}
+
 	d.mu.RLock()
 	s := d.session
 	d.mu.RUnlock()
 	if s == nil {
-		d.mu.RLock()
-		err := d.sessionErr
-		d.mu.RUnlock()
-		if err != nil {
-			return 0, err
-		}
 		return 0, fmt.Errorf("сессия передачи марок Bizerba не инициализирована")
 	}
+
+	// Заряжаем хвосты в очередь драйвера[cite: 269]
 	return s.request(sessionRequest{kind: "enqueue", marks: marks})
 }
 

@@ -2,17 +2,13 @@ package bizerba
 
 import "strings"
 
-// MarkingMode определяет способ передачи кодов конкретной Bizerba.
 type MarkingMode string
 
 const (
-	// MarkingModeStream передаёт очередную марку через GT03/GT04.
 	MarkingModeStream MarkingMode = "stream"
-	// MarkingModeUnique резервирует файловую загрузку через BCS UploadFileFTP.
 	MarkingModeUnique MarkingMode = "unique"
 )
 
-// Profile содержит настройки, относящиеся только к оборудованию Bizerba.
 type Profile struct {
 	RecordGXNET    bool
 	RecordResponse func(Response) error
@@ -20,10 +16,9 @@ type Profile struct {
 	Conveyor       bool
 	CaptureWeight  bool
 	RecordWeight   func(printerIndex int, mark, weight string) error
+	Mapping        FieldMapping
 }
 
-// bizerbaEquipment объединяет необязательные возможности конкретной машины.
-// Они принадлежат только драйверу Bizerba и не меняют общий интерфейс принтера.
 type bizerbaEquipment struct {
 	mode            MarkingMode
 	conveyorEnabled bool
@@ -31,6 +26,49 @@ type bizerbaEquipment struct {
 	unique          uniqueDataController
 	captureWeight   bool
 	recordWeight    func(printerIndex int, mark, weight string) error
+	mapping         FieldMapping
+}
+
+func defaultBizerbaEquipment() bizerbaEquipment {
+	return configuredBizerbaEquipment(Profile{})
+}
+func configuredBizerbaEquipment(profile Profile) bizerbaEquipment {
+	profile = normalizeProfile(profile)
+	unique := uniqueDataController(disabledUniqueDataController{})
+	if profile.Mode == MarkingModeUnique {
+		unique = stubUniqueDataController{}
+	}
+
+	mapping := profile.Mapping
+	if strings.TrimSpace(mapping.SerialField) == "" {
+		mapping.SerialField = "GT03"
+	}
+	if strings.TrimSpace(mapping.CryptoField) == "" {
+		mapping.CryptoField = "GT04"
+	}
+	if mapping.StaticMap == nil {
+		mapping.StaticMap = make(map[string]string)
+	}
+
+	return bizerbaEquipment{
+		mode:            profile.Mode,
+		conveyorEnabled: profile.Conveyor,
+		conveyor:        noopConveyorController{},
+		unique:          unique,
+		captureWeight:   profile.CaptureWeight,
+		recordWeight:    profile.RecordWeight,
+		mapping:         mapping,
+	}
+}
+
+func normalizeProfile(profile Profile) Profile {
+	switch MarkingMode(strings.ToLower(strings.TrimSpace(string(profile.Mode)))) {
+	case MarkingModeUnique:
+		profile.Mode = MarkingModeUnique
+	default:
+		profile.Mode = MarkingModeStream
+	}
+	return profile
 }
 
 // conveyorController управляет конвейером ездовой Bizerba.
@@ -51,41 +89,6 @@ type uniqueDataController interface {
 	Append(conn bcsConnection, codes []string) error
 	Ready(conn bcsConnection) (bool, error)
 	End(conn bcsConnection) error
-}
-
-// defaultBizerbaEquipment сохраняет текущее поведение: поток GT03/GT04,
-// без управления конвейером и без обращения к Unique.
-func defaultBizerbaEquipment() bizerbaEquipment {
-	return configuredBizerbaEquipment(Profile{})
-}
-
-// configuredBizerbaEquipment создаёт профиль из сохранённых настроек принтера.
-// Пока контроллеры являются заглушками и не отправляют аппаратных команд.
-func configuredBizerbaEquipment(profile Profile) bizerbaEquipment {
-	profile = normalizeProfile(profile)
-	unique := uniqueDataController(disabledUniqueDataController{})
-	if profile.Mode == MarkingModeUnique {
-		unique = stubUniqueDataController{}
-	}
-	return bizerbaEquipment{
-		mode:            profile.Mode,
-		conveyorEnabled: profile.Conveyor,
-		conveyor:        noopConveyorController{},
-		unique:          unique,
-		captureWeight:   profile.CaptureWeight,
-		recordWeight:    profile.RecordWeight,
-	}
-}
-
-// normalizeProfile подставляет безопасный потоковый режим для пустого или неизвестного значения.
-func normalizeProfile(profile Profile) Profile {
-	switch MarkingMode(strings.ToLower(strings.TrimSpace(string(profile.Mode)))) {
-	case MarkingModeUnique:
-		profile.Mode = MarkingModeUnique
-	default:
-		profile.Mode = MarkingModeStream
-	}
-	return profile
 }
 
 // noopConveyorController — безопасная заглушка для стационарной Bizerba.

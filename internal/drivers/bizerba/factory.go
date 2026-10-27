@@ -30,6 +30,7 @@ func CreateDriver(cfg models.PrinterConfig, store WeightStore) *Driver {
 		Conveyor:      bSettings.Conveyor,
 		CaptureWeight: bSettings.CaptureWeight,
 		RecordGXNET:   bSettings.RecordGXNET,
+		Mapping:       bSettings.Mapping,
 		RecordResponse: func(resp Response) error {
 			if store == nil {
 				return nil
