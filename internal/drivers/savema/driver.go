@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,7 +47,9 @@ func New(ip string, port int) *Driver {
 }
 
 // ============================================================================
-// Низкоуровневый сетевой слой (Persistent TCP Connection)
+// Низкоуровневый сетевой слой. Контроллеры Savema могут закрывать TCP-сеанс
+// после каждого ответа, поэтому каждая успешно завершённая команда освобождает
+// соединение и следующая команда открывает новое без ожидания тайм-аута.
 // ============================================================================
 
 func (d *Driver) ensureConnectionLocked() error {
@@ -80,6 +83,7 @@ func (d *Driver) closeConnectionLocked() {
 func (d *Driver) sendRaw(cmd string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	requestStarted := time.Now()
 
 	cmd = strings.TrimSpace(cmd)
 	if !strings.HasPrefix(cmd, "~") {
@@ -128,7 +132,8 @@ func (d *Driver) sendRaw(cmd string) (string, error) {
 
 		if result.Len() > 0 {
 			raw := strings.TrimSpace(result.String())
-			slog.Debug("SAVEMA IO", "ip", d.Address, "cmd", cmd, "reply", raw)
+			d.closeConnectionLocked()
+			slog.Debug("SAVEMA IO", "ip", d.Address, "cmd", cmd, "reply", raw, "attempt", attempt, "elapsed_ms", time.Since(requestStarted).Milliseconds())
 			return raw, nil
 		}
 	}
@@ -168,17 +173,14 @@ func (d *Driver) InitSession(fieldName string, maxQueue int, staticFields map[st
 	_, _ = d.sendRaw(fmt.Sprintf("SPLDDF{%s}", dataCsvName))
 
 	// 5. Сохранение и проливка статических параметров
-	d.stateMu.Lock()
-	for k, v := range staticFields {
-		d.staticFields[k] = v
+	if err := d.UpdateStaticFields(staticFields); err != nil {
+		return fmt.Errorf("SAVEMA: не удалось установить параметры партии: %w", err)
 	}
+
+	d.stateMu.Lock()
 	d.lastCount = 0
 	d.batchSize = 0
 	d.stateMu.Unlock()
-
-	if len(staticFields) > 0 {
-		_ = d.UpdateStaticFields(staticFields)
-	}
 
 	return nil
 }
@@ -193,16 +195,7 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 	// Загрузка шаблона допустима только в режиме STOP (WAITING)
 	_, _ = d.sendRaw("SPPSTP")
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("SPLLTF{%s}", template))
-
-	for k, v := range fields {
-		cleanVal := strings.ReplaceAll(v, "|", "")
-		cleanVal = strings.ReplaceAll(cleanVal, "~gt~", "")
-		sb.WriteString(fmt.Sprintf("|SPMCTV{%s~gt~%s}", k, cleanVal))
-	}
-
-	resp, err := d.sendRaw(sb.String())
+	resp, err := d.sendRaw(fmt.Sprintf("SPLLTF{%s}", template))
 	if err != nil {
 		return fmt.Errorf("SAVEMA: ошибка отправки команды выбора шаблона %s: %w", template, err)
 	}
@@ -212,10 +205,11 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 
 	d.stateMu.Lock()
 	d.curTemplate = template
-	for k, v := range fields {
-		d.staticFields[k] = v
-	}
 	d.stateMu.Unlock()
+
+	if err := d.UpdateStaticFields(fields); err != nil {
+		return fmt.Errorf("SAVEMA: шаблон %s загружен, но его параметры не установлены: %w", template, err)
+	}
 
 	slog.Info("SAVEMA: Шаблон успешно активирован", "ip", d.Address, "template", template)
 	return nil
@@ -226,7 +220,7 @@ func (d *Driver) SelectTemplate(template string, fields map[string]string) error
 // 2. Остановка печати, удаление старого CSV и сброс кэша базы (SPLDDF + SPLCDB).
 // 3. Загрузка CSV через SPLCDF.
 // 4. ПЕРЕВЫБОР ШАБЛОНА (SPLLTF): принуждает контроллер перечитать CSV и построить индекс строк.
-// 5. Восстановление статических полей (SPMCTV), сброшенных командой SPLLTF.
+// 5. Восстановление статических полей (SPMCSV), сброшенных командой SPLLTF.
 // 6. Установка лимита партии SPPSLQ{N} и запуск автомата SPPSAP.
 func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
@@ -283,7 +277,7 @@ func (d *Driver) PrintBatchIndexed(fieldName string, startIndex int, codes []str
 	// 5. Восстановление статических полей (SPLLTF сбрасывает их в дефолтные значения из файла .rox)
 	if len(staticCopy) > 0 {
 		if err := d.UpdateStaticFields(staticCopy); err != nil {
-			slog.Warn("SAVEMA: предупреждение при восстановлении статики после перевыбора макета", "err", err)
+			return 0, fmt.Errorf("SAVEMA: шаблон %s перезагружен, но параметры партии не восстановлены: %w", templateName, err)
 		}
 	}
 
@@ -370,19 +364,38 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 		return nil
 	}
 
-	var sb strings.Builder
-	first := true
-	for k, v := range fields {
-		if !first {
-			sb.WriteString("|")
+	d.stateMu.RLock()
+	template := d.curTemplate
+	d.stateMu.RUnlock()
+
+	resolved := fields
+	if template != "" {
+		var err error
+		resolved, err = d.resolveStaticFieldNames(template, fields)
+		if err != nil {
+			return err
 		}
-		cleanVal := strings.ReplaceAll(v, "|", "")
-		cleanVal = strings.ReplaceAll(cleanVal, "~gt~", "")
-		sb.WriteString(fmt.Sprintf("SPMCTV{%s~gt~%s}", k, cleanVal))
-		first = false
 	}
 
-	resp, err := d.sendRaw(sb.String())
+	names := make([]string, 0, len(resolved))
+	for name := range resolved {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var params strings.Builder
+	for _, name := range names {
+		if params.Len() > 0 {
+			params.WriteString("~gt~")
+		}
+		cleanVal := strings.ReplaceAll(resolved[name], "|", "")
+		cleanVal = strings.ReplaceAll(cleanVal, "~gt~", "")
+		params.WriteString(name)
+		params.WriteString("~gt~")
+		params.WriteString(cleanVal)
+	}
+
+	resp, err := d.sendRaw("SPMCSV{" + params.String() + "}")
 	if err != nil {
 		return err
 	}
@@ -391,12 +404,38 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	}
 
 	d.stateMu.Lock()
-	for k, v := range fields {
+	d.staticFields = make(map[string]string, len(resolved))
+	for k, v := range resolved {
 		d.staticFields[k] = v
 	}
 	d.stateMu.Unlock()
 
 	return nil
+}
+
+func (d *Driver) resolveStaticFieldNames(template string, fields map[string]string) (map[string]string, error) {
+	templateFields, err := d.GetTemplateFields(template)
+	if err != nil {
+		return nil, fmt.Errorf("SAVEMA: не удалось получить поля шаблона %s: %w", template, err)
+	}
+
+	available := make(map[string]string, len(templateFields))
+	for _, name := range templateFields {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			available[strings.ToLower(name)] = name
+		}
+	}
+
+	resolved := make(map[string]string, len(fields))
+	for name, value := range fields {
+		exactName, ok := available[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			return nil, fmt.Errorf("SAVEMA: поле %q отсутствует в шаблоне %s", name, template)
+		}
+		resolved[exactName] = value
+	}
+	return resolved, nil
 }
 
 func (d *Driver) GetStatus() (string, error) {

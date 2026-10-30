@@ -3,6 +3,7 @@ package bizerba
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ type fakeSend struct{ header, data string }
 type fakeConnection struct {
 	mu          sync.Mutex
 	opens       []bool
+	identities  []string
+	openErrors  []error
 	sends       []fakeSend
 	spontaneous chan string
 	closed      int
@@ -28,10 +31,16 @@ func newFakeConnection() *fakeConnection {
 
 func (f *fakeConnection) Open(identity, device string, spontaneous bool) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.opens = append(f.opens, spontaneous)
+	f.identities = append(f.identities, identity)
 	f.identity = identity
 	f.device = device
-	f.mu.Unlock()
+	if len(f.openErrors) > 0 {
+		err := f.openErrors[0]
+		f.openErrors = f.openErrors[1:]
+		return err
+	}
 	return nil
 }
 
@@ -39,6 +48,12 @@ func (f *fakeConnection) openTarget() (string, string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.identity, f.device
+}
+
+func (f *fakeConnection) openIdentities() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.identities...)
 }
 
 func (f *fakeConnection) Send(header, data string, _ time.Duration) (string, int, error) {
@@ -104,11 +119,67 @@ func TestGetStatusUsesTransientNonSpontaneousConnection(t *testing.T) {
 		t.Fatalf("Close count = %d, want 2", closed)
 	}
 	identity, device := fake.openTarget()
-	if identity != "GLPMax" || device != "GLPMax" {
-		t.Fatalf("Open target = (%q, %q), want (GLPMax, GLPMax)", identity, device)
+	if !strings.HasPrefix(identity, "AP-") || device != "GLPMax" {
+		t.Fatalf("Open target = (%q, %q), want (AP-..., GLPMax)", identity, device)
 	}
 	if len(sends) != 2 || sends[0] != (fakeSend{"A?PL03", "0"}) || sends[1] != (fakeSend{"A?PL03", "0"}) {
 		t.Fatalf("sends = %#v", sends)
+	}
+}
+
+func TestGetStatusRetriesTransientOpenWithFreshIdentity(t *testing.T) {
+	fake := newFakeConnection()
+	fake.openErrors = []error{errors.New("Text nicht gefunden")}
+	driver := newDriver("Primary", func() (bcsConnection, error) { return fake, nil })
+
+	status, err := driver.GetStatus()
+	if err != nil || status != "ГОТОВ" {
+		t.Fatalf("GetStatus() = %q, %v", status, err)
+	}
+	identities := fake.openIdentities()
+	if len(identities) != 2 || identities[0] == identities[1] {
+		t.Fatalf("Open identities = %v, want two different identities", identities)
+	}
+	opens, sends, closed := fake.snapshot()
+	if !reflect.DeepEqual(opens, []bool{false, false}) {
+		t.Fatalf("Open spontaneous flags = %v, want [false false]", opens)
+	}
+	if closed != 2 {
+		t.Fatalf("Close count = %d, want 2", closed)
+	}
+	if len(sends) != 1 || sends[0] != (fakeSend{"A?PL03", "0"}) {
+		t.Fatalf("sends = %#v", sends)
+	}
+}
+
+func TestGetStatusDoesNotQueryBCSDuringActiveSession(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriver("GLPMax", func() (bcsConnection, error) { return fake, nil })
+	driver.currentPLU = "2644"
+	driver.lastPLURead = time.Now().Add(-time.Minute)
+	if err := driver.InitSession("DATAMATRIX", 10, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.GetBufferFreeSpace(); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := driver.GetStatus()
+	if err != nil || status != "ГОТОВ" {
+		t.Fatalf("GetStatus() = %q, %v", status, err)
+	}
+	plu, err := driver.GetCurrentTemplate()
+	if err != nil || plu != "2644" {
+		t.Fatalf("GetCurrentTemplate() = %q, %v", plu, err)
+	}
+	_, sends, _ := fake.snapshot()
+	for _, send := range sends {
+		if send.header == "A?PL03" || send.header == "A?GL19" {
+			t.Fatalf("active-session telemetry queried BCS: %#v", sends)
+		}
+	}
+	if err := driver.ClearQueue(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -147,7 +218,8 @@ func TestSelectTemplateSetsOptionalUserDesign(t *testing.T) {
 
 	if err := driver.SelectTemplate("2644", map[string]string{
 		"design": "8192",
-		"date":   "20.08.2026",
+		"date01": "07.10.2026",
+		"date02": "21.11.2026",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +227,8 @@ func TestSelectTemplateSetsOptionalUserDesign(t *testing.T) {
 	want := []fakeSend{
 		{"A!XV00|GL19|LX02", "2644"},
 		{"A!GW17", "8192"},
-		{"A!GL06", "200826"},
+		{"A!GL06", "071026"},
+		{"A!GL07", "211126"},
 	}
 	if !reflect.DeepEqual(sends, want) {
 		t.Fatalf("sends = %#v, want %#v", sends, want)
@@ -280,7 +353,7 @@ func TestMarkSessionUsesGT0607WithoutExplicitGSSeparator(t *testing.T) {
 		t.Fatalf("PrintBatchIndexed() = %d, %v", loaded, err)
 	}
 	waitForSend(t, fake, fakeSend{"A!GT06", "5?NFCZ"})
-	waitForSend(t, fake, fakeSend{"A!GT07", "93SwuV"})
+	waitForSend(t, fake, fakeSend{"A!GT07", "SwuV"})
 
 	fake.spontaneous <- "A!PV01|PW02|6|PW00|0|GW09|2|GL16|0|PD00|KG;-3;200|LX02"
 	waitForSend(t, fake, fakeSend{"A!GT06", ""})

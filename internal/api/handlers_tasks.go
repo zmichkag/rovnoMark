@@ -20,6 +20,12 @@ import (
 )
 
 func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
+	requestStarted := time.Now()
+	var timingTaskID int64
+	defer func() {
+		slog.Debug("TASK-CREATE TIMING", "stage", "total", "task_id", timingTaskID, "elapsed_ms", time.Since(requestStarted).Milliseconds())
+	}()
+
 	if r.Method != http.MethodPost {
 		sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
 		return
@@ -31,7 +37,9 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stageStarted := time.Now()
 	bodyBytes, err := io.ReadAll(r.Body)
+	slog.Debug("TASK-CREATE TIMING", "stage", "read_body", "bytes", len(bodyBytes), "elapsed_ms", time.Since(stageStarted).Milliseconds())
 	if err != nil {
 		slog.Error("TASK-CREATE: Ошибка чтения Body от 1С", "err", err)
 		sendJSONError(w, http.StatusBadRequest, "Failed to read request body")
@@ -68,7 +76,10 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	staticBytes, _ := json.Marshal(req.StaticFields)
+	stageStarted = time.Now()
 	taskID, err := s.store.CreateTask(lineID, req.TemplateName, req.DynamicFieldName, string(staticBytes), req.RndText)
+	timingTaskID = taskID
+	slog.Debug("TASK-CREATE TIMING", "stage", "create_db_record", "task_id", taskID, "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", err)
 	if err != nil {
 		sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при создании задачи: "+err.Error())
 		return
@@ -80,6 +91,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, pCfg := range printersInLine {
+		printerStarted := time.Now()
 		p := s.manager.GetPrinter(pCfg.ID)
 		if p == nil {
 			_ = s.store.SetTaskStatus(int(taskID), models.TaskStateFailed)
@@ -87,7 +99,19 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		status, err := p.GetStatus()
+		stageStarted = time.Now()
+		var status string
+		if pCfg.DriverType == "bizerba" {
+			// SelectTemplate immediately below performs real BCS writes and reports a
+			// connection failure. Bizerba GetStatus only verifies that PL03 can be
+			// parsed, then always returns ГОТОВ, so doing both adds a full slow BCS
+			// query without providing another readiness check.
+			status = "ГОТОВ"
+			err = nil
+		} else {
+			status, err = p.GetStatus()
+		}
+		slog.Debug("TASK-CREATE TIMING", "stage", "printer_status", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", err)
 		checkString := strings.ToUpper(status)
 		if err != nil {
 			checkString = strings.ToUpper(err.Error())
@@ -105,31 +129,48 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.DynamicFieldName == "" {
+			stageStarted = time.Now()
 			_ = p.ClearQueue()
+			slog.Debug("TASK-CREATE TIMING", "stage", "clear_queue", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds())
+			stageStarted = time.Now()
 			if err := p.SelectTemplate(req.TemplateName, req.StaticFields); err != nil {
+				slog.Debug("TASK-CREATE TIMING", "stage", "select_template", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", err)
 				_ = s.store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 				sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка установки шаблона на %s: %v", pCfg.Name, err))
 				return
 			}
+			slog.Debug("TASK-CREATE TIMING", "stage", "select_template", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds())
 		} else {
 			selectFields := req.StaticFields
 			if pCfg.DriverType == "videojet" {
 				selectFields = nil
 			}
 
+			stageStarted = time.Now()
 			if err := p.SelectTemplate(req.TemplateName, selectFields); err != nil {
+				slog.Debug("TASK-CREATE TIMING", "stage", "select_template", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", err)
 				_ = s.store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 				sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка макета на %s: %v", pCfg.Name, err))
 				return
 			}
+			slog.Debug("TASK-CREATE TIMING", "stage", "select_template", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds())
 
 			compositeFields, _ := core.PrepareDynamicPipeline(req.DynamicFieldName, req.StaticFields, "")
+			if pCfg.DriverType == "videojet" {
+				// Videojet serialises only the changing mark code. Constant job fields
+				// are applied by InitSession through SCF.
+				compositeFields = req.DynamicFieldName
+			}
+			stageStarted = time.Now()
 			if err := p.InitSession(compositeFields, 1000, req.StaticFields); err != nil {
+				slog.Debug("TASK-CREATE TIMING", "stage", "init_session", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", err)
 				_ = s.store.SetTaskStatus(int(taskID), models.TaskStateFailed)
 				sendJSONError(w, http.StatusInternalServerError, fmt.Sprintf("Ошибка инициализации сессии на %s: %v", pCfg.Name, err))
 				return
 			}
+			slog.Debug("TASK-CREATE TIMING", "stage", "init_session", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds())
 		}
+		slog.Debug("TASK-CREATE TIMING", "stage", "printer_prepare_total", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(printerStarted).Milliseconds())
 	}
 
 	for _, pCfg := range printersInLine {
@@ -137,7 +178,9 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		if p == nil {
 			continue
 		}
+		stageStarted = time.Now()
 		totalPrints, errTotal := p.GetTotalPrints()
+		slog.Debug("TASK-CREATE TIMING", "stage", "counter_snapshot", "task_id", taskID, "printer", pCfg.Name, "driver", pCfg.DriverType, "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", errTotal)
 		if errTotal != nil {
 			totalPrints = -1
 		}
@@ -155,18 +198,27 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTaskAppend(w http.ResponseWriter, r *http.Request) {
+	requestStarted := time.Now()
+	var timingTaskID int
+	defer func() {
+		slog.Debug("TASK-APPEND TIMING", "stage", "total", "task_id", timingTaskID, "elapsed_ms", time.Since(requestStarted).Milliseconds())
+	}()
+
 	if r.Method != http.MethodPost {
 		sendJSONError(w, http.StatusMethodNotAllowed, "Only POST allowed")
 		return
 	}
 
 	taskID, err := strconv.Atoi(r.URL.Query().Get("task_id"))
+	timingTaskID = taskID
 	if err != nil || taskID <= 0 {
 		sendJSONError(w, http.StatusBadRequest, "Missing or invalid task_id parameter in URL")
 		return
 	}
 
+	stageStarted := time.Now()
 	bodyBytes, err := io.ReadAll(r.Body)
+	slog.Debug("TASK-APPEND TIMING", "stage", "read_body", "task_id", taskID, "bytes", len(bodyBytes), "elapsed_ms", time.Since(stageStarted).Milliseconds())
 	if err != nil {
 		sendJSONError(w, http.StatusBadRequest, "Failed to read request body")
 		return
@@ -175,15 +227,18 @@ func (s *Server) handleTaskAppend(w http.ResponseWriter, r *http.Request) {
 	var rawReq struct {
 		Codes []json.RawMessage `json:"codes"`
 	}
+	stageStarted = time.Now()
 	if err := json.Unmarshal(bodyBytes, &rawReq); err != nil {
 		sendJSONError(w, http.StatusBadRequest, "Ошибка в структуре JSON")
 		return
 	}
+	slog.Debug("TASK-APPEND TIMING", "stage", "decode_envelope", "task_id", taskID, "codes", len(rawReq.Codes), "elapsed_ms", time.Since(stageStarted).Milliseconds())
 	if len(rawReq.Codes) == 0 {
 		sendJSONError(w, http.StatusBadRequest, "Пришел пустой массив кодов")
 		return
 	}
 
+	stageStarted = time.Now()
 	inboundItems := make([]models.InboundCodeItem, 0, len(rawReq.Codes))
 	for i, rawItem := range rawReq.Codes {
 		var item models.InboundCodeItem
@@ -214,19 +269,27 @@ func (s *Server) handleTaskAppend(w http.ResponseWriter, r *http.Request) {
 
 		inboundItems = append(inboundItems, item)
 	}
+	slog.Debug("TASK-APPEND TIMING", "stage", "normalize_codes", "task_id", taskID, "codes", len(inboundItems), "validate_gs1", s.validateGS1, "elapsed_ms", time.Since(stageStarted).Milliseconds())
 
+	stageStarted = time.Now()
 	if err := s.store.AppendTaskCodes(taskID, inboundItems); err != nil {
+		slog.Debug("TASK-APPEND TIMING", "stage", "insert_codes", "task_id", taskID, "codes", len(inboundItems), "elapsed_ms", time.Since(stageStarted).Milliseconds(), "err", err)
 		slog.Error("Append: Ошибка записи в БД", "task_id", taskID, "err", err)
 		sendJSONError(w, http.StatusInternalServerError, "Ошибка БД при сохранении кодов")
 		return
 	}
+	slog.Debug("TASK-APPEND TIMING", "stage", "insert_codes", "task_id", taskID, "codes", len(inboundItems), "elapsed_ms", time.Since(stageStarted).Milliseconds())
 
+	stageStarted = time.Now()
 	_ = s.store.SetTaskStatus(taskID, models.TaskStateActive)
+	slog.Debug("TASK-APPEND TIMING", "stage", "activate_task", "task_id", taskID, "elapsed_ms", time.Since(stageStarted).Milliseconds())
 
 	lineID, err := s.store.GetLineIDByTask(taskID)
 	if err == nil {
 		//		s.driver.SelectTemplate(lineID) //Сергеев
+		stageStarted = time.Now()
 		s.taskProcessor.StartPumping(lineID, taskID)
+		slog.Debug("TASK-APPEND TIMING", "stage", "start_pumper", "task_id", taskID, "line_id", lineID, "elapsed_ms", time.Since(stageStarted).Milliseconds())
 	}
 
 	rndText, _ := s.store.GetRndTextByTask(taskID)

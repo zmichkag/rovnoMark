@@ -5,6 +5,7 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,13 +94,23 @@ func (d *Driver) InitSession(compositeFields string, maxQueue int, staticFields 
 	slog.Info("VIDEOJET: Инициализация динамической сессии", "fields", compositeFields, "max_queue", maxQueue)
 
 	// 1. Очищаем старый буфер сериализации
-	if _, err := d.sendRaw("SCB"); err != nil {
+	resp, err := d.sendRaw("SCB")
+	if err != nil {
 		return fmt.Errorf("SCB failed: %v", err)
+	}
+	if strings.Contains(resp, "ERR") {
+		return fmt.Errorf("принтер отклонил SCB: %s", resp)
 	}
 
 	// 2. Устанавливаем лимит записей в очереди
-	if _, err := d.sendRaw(fmt.Sprintf("SMR|%d|", maxQueue)); err != nil {
+	cmdSMR := fmt.Sprintf("SMR|%d|", maxQueue)
+	resp, err = d.sendRaw(cmdSMR)
+	if err != nil {
 		return fmt.Errorf("SMR failed: %v", err)
+	}
+	if strings.Contains(resp, "ERR") {
+		currentLimit, _ := d.sendRaw("SGM")
+		return fmt.Errorf("принтер отклонил %s: %s (SGM=%q)", cmdSMR, resp, currentLimit)
 	}
 
 	// 3. Формируем команду SHO из составной строки полей
@@ -107,12 +118,24 @@ func (d *Driver) InitSession(compositeFields string, maxQueue int, staticFields 
 	protocolFields := strings.ReplaceAll(compositeFields, ";", "|")
 	cmdSHO := fmt.Sprintf("SHO|%s|", protocolFields)
 
-	resp, err := d.sendRaw(cmdSHO)
+	resp, err = d.sendRaw(cmdSHO)
 	if err != nil {
 		return fmt.Errorf("ошибка сокета при отправке SHO: %v", err)
 	}
 	if strings.Contains(resp, "ERR") {
-		return fmt.Errorf("принтер отклонил SHO (%s): %s", cmdSHO, resp)
+		state, _ := d.sendRaw("GST")
+		faults, _ := d.sendRaw("GFT")
+		warnings, _ := d.sendRaw("GWN")
+		maxRecords, _ := d.sendRaw("SGM")
+		recordCount, _ := d.sendRaw("SRC")
+		return fmt.Errorf("принтер отклонил SHO (%s): %s (GST=%q, GFT=%q, GWN=%q, SGM=%q, SRC=%q)", cmdSHO, resp, state, faults, warnings, maxRecords, recordCount)
+	}
+
+	// Static job fields must remain outside the serialisation header. Once SHO
+	// has enabled serialisation mode, SCF updates those fields for every queued
+	// record without making them part of each SID payload.
+	if err := d.UpdateStaticFields(staticFields); err != nil {
+		return fmt.Errorf("ошибка обновления статических полей: %v", err)
 	}
 
 	// 4. Сбрасываем внутренний указатель принтера
@@ -131,7 +154,13 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 
 	var sb strings.Builder
 	sb.WriteString("SCF")
-	for name, value := range fields {
+	keys := make([]string, 0, len(fields))
+	for name := range fields {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		value := fields[name]
 		cleanValue := strings.ReplaceAll(value, "|", "")
 		sb.WriteString(fmt.Sprintf("|%s=%s", name, cleanValue))
 	}
@@ -227,9 +256,9 @@ func (d *Driver) GetStatus() (string, error) {
 	case "0":
 		return "ВЫКЛЮЧЕН", nil
 	case "1":
-		return "НЕ ГОТОВ", nil
+		return "НЕ ГОТОВ (ЗАПУСК)", nil
 	case "2":
-		return "ГОТОВ", nil
+		return "НЕ ГОТОВ (ОСТАНОВКА)", nil
 	case "3":
 		return "ПЕЧАТЬ", nil
 	case "4":

@@ -3,11 +3,13 @@ package bizerba
 import (
 	"fmt"
 	"log/slog"
+	"os"
 	"rovnoMark/internal/core/marking"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,7 +17,11 @@ const (
 	defaultRequestTimeout = 3 * time.Second
 	receivePollTimeout    = 200 * time.Millisecond
 	spontaneousQueue      = "DUSTBIN"
+	transientOpenAttempts = 3
+	transientRetryDelay   = 250 * time.Millisecond
 )
+
+var transientConnectionSequence atomic.Uint64
 
 type queuedMark struct {
 	index  int
@@ -129,15 +135,26 @@ func (d *Driver) withConnection(fn func(bcsConnection) error) error {
 	defer d.transientMu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	conn, err := d.newConn()
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 1; attempt <= transientOpenAttempts; attempt++ {
+		conn, err := d.newConn()
+		if err == nil {
+			identity := fmt.Sprintf("AP-%d-%d", os.Getpid(), transientConnectionSequence.Add(1))
+			err = conn.Open(identity, d.device, false)
+			if err == nil {
+				defer conn.Close()
+				return fn(conn)
+			}
+			_ = conn.Close()
+		}
+		lastErr = err
+		if attempt < transientOpenAttempts {
+			slog.Debug("BIZERBA: повторное открытие кратковременного BCS-соединения",
+				"device", d.device, "attempt", attempt, "err", err)
+			time.Sleep(transientRetryDelay)
+		}
 	}
-	defer conn.Close()
-	if err := conn.Open(d.device, d.device, false); err != nil {
-		return err
-	}
-	return fn(conn)
+	return lastErr
 }
 
 // sendWrite отправляет команду записи и проверяет статус, возвращённый BCS.
@@ -297,7 +314,7 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 }
 
 // updateStaticFieldsOn выбирает пользовательский дизайн через GW17,
-// записывает дату в GL06 и бригаду в GL15 через готовое соединение.
+// записывает даты в GL06/GL07 и бригаду в GL15 через готовое соединение.
 func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]string) error {
 	formattedDesign, err := bizerbaDesign(fields)
 	if err != nil {
@@ -308,13 +325,22 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 			return fmt.Errorf("ошибка установки дизайна Bizerba %q: %w", formattedDesign, err)
 		}
 	}
-	if date := firstField(fields, "date", "production_date", "GL06", "дата"); date != "" {
+	if date := firstField(fields, "date01", "date1", "date", "production_date", "GL06", "дата"); date != "" {
 		formatted, err := normalizeBizerbaDate(date)
 		if err != nil {
 			return err
 		}
 		if err := sendWrite(conn, "A!GL06", formatted, d.timeout); err != nil {
 			return fmt.Errorf("ошибка установки даты Bizerba %q: %w", formatted, err)
+		}
+	}
+	if date := firstField(fields, "date02", "date2", "expiry_date", "expiration_date", "GL07", "срок_годности"); date != "" {
+		formatted, err := normalizeBizerbaDate(date)
+		if err != nil {
+			return err
+		}
+		if err := sendWrite(conn, "A!GL07", formatted, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки второй даты Bizerba %q: %w", formatted, err)
 		}
 	}
 	if brigade := firstField(fields, "brigade", "team", "GL15", "бригада"); brigade != "" {
@@ -328,9 +354,12 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 // GetCurrentTemplate возвращает текущий PLU, используя кратковременный кэш чтения.
 func (d *Driver) GetCurrentTemplate() (string, error) {
 	d.mu.RLock()
-	cached, readAt := d.currentPLU, d.lastPLURead
+	cached, readAt, activeSession := d.currentPLU, d.lastPLURead, d.session != nil
 	d.mu.RUnlock()
-	if cached != "" && time.Since(readAt) < 3*time.Second {
+	// The selected PLU is fixed for the lifetime of a marking session. Reading it
+	// back for dashboard telemetry would occupy the same COM channel that installs
+	// marks and delay the pumper.
+	if cached != "" && (activeSession || time.Since(readAt) < 3*time.Second) {
 		return cached, nil
 	}
 	var response string
@@ -368,6 +397,23 @@ func ParseFieldResponse(response, expectedField string) (string, error) {
 // GetStatus проверяет доступность устройства чтением общего состояния PL03.
 // Проверка не зависит от того, выбран ли на машине PLU и существует ли его текст.
 func (d *Driver) GetStatus() (string, error) {
+	// An active spontaneous session already owns the sole COM/BCS channel and
+	// continuously detects transport failures in ReceiveOne. A live status query
+	// here would be serialized with mark installation and can stall the pumper for
+	// several seconds on GLPMax.
+	d.mu.RLock()
+	activeSession, sessionErr, closed := d.session != nil, d.sessionErr, d.closed
+	d.mu.RUnlock()
+	if closed {
+		return "OFFLINE", fmt.Errorf("драйвер Bizerba закрыт")
+	}
+	if activeSession {
+		return "ГОТОВ", nil
+	}
+	if sessionErr != nil {
+		return "OFFLINE", sessionErr
+	}
+
 	var response string
 	err := d.runCommand(func(conn bcsConnection) error {
 		var err error
@@ -505,6 +551,12 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		return
 	}
 	defer conn.Close()
+	slog.Debug("BIZERBA-MARK: сессия передачи марок запущена",
+		"device", d.device,
+		"mode", d.equipment.mode,
+		"serial_field", d.equipment.serialField,
+		"crypto_field", d.equipment.cryptoField,
+		"capacity", capacity)
 
 	var pending []queuedMark
 	var active *queuedMark
@@ -517,6 +569,10 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		if err := sendWrite(conn, "A!"+d.equipment.cryptoField, "", d.timeout); err != nil {
 			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", d.equipment.cryptoField, err)
 		}
+		slog.Debug("BIZERBA-MARK: поля марки очищены",
+			"device", d.device,
+			"serial_field", d.equipment.serialField,
+			"crypto_field", d.equipment.cryptoField)
 		return nil
 	}
 	installNext := func() error {
@@ -533,6 +589,14 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", d.equipment.cryptoField, err)
 		}
 		active = &next
+		slog.Debug("BIZERBA-MARK: очередная марка установлена",
+			"device", d.device,
+			"index", next.index,
+			"serial_field", d.equipment.serialField,
+			"serial_length", len(next.serial),
+			"crypto_field", d.equipment.cryptoField,
+			"crypto_length", len(next.crypto),
+			"pending", len(pending))
 		return nil
 	}
 
@@ -555,6 +619,11 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 					continue
 				}
 				pending = append(pending, req.marks...)
+				slog.Debug("BIZERBA-MARK: пакет добавлен во внутреннюю очередь",
+					"device", d.device,
+					"added", len(req.marks),
+					"pending", len(pending),
+					"has_active", active != nil)
 				err := installNext()
 				req.resp <- sessionResponse{value: len(req.marks), err: err}
 				if err != nil {
@@ -595,6 +664,22 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 			}
 			isWeightPackage := status != bcsStatusTimeout && hasField(payload, "PV01")
 			isPassingPackage := status != bcsStatusTimeout && hasField(payload, "PW05")
+			if isWeightPackage || isPassingPackage {
+				event := "PW05"
+				if isWeightPackage {
+					event = "PV01"
+				}
+				activeIndex := -1
+				if active != nil {
+					activeIndex = active.index
+				}
+				slog.Debug("BIZERBA-MARK: получен сигнал печати",
+					"device", d.device,
+					"event", event,
+					"active_index", activeIndex,
+					"pending", len(pending),
+					"bcs_status", status)
+			}
 			if active != nil && (isWeightPackage || isPassingPackage) {
 				weight := ""
 				var weightErr error
@@ -713,8 +798,16 @@ func formatScaledInteger(value string, exponent int) (string, error) {
 
 // PrintBatchIndexed разбирает GS1-коды и добавляет их в очередь активной сессии.
 func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (int, error) {
+	if d.equipment.unique.Enabled() {
+		if _, err := buildUniqueDataFile(codes); err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("режим Bizerba UniqueData подготовил файл, но FTP-загрузка ещё не настроена; коды не переданы устройству")
+	}
 	marks := make([]queuedMark, 0, len(codes))
-	cryptoPrefix := "93"
+	// Без явного разделителя GT07 принимает только четырехсимвольное значение AI 93.
+	// При явной передаче Bizerba сама ожидает перед ним код разделителя и идентификатор AI.
+	cryptoPrefix := ""
 	if d.equipment.explicitGSSeparator {
 		cryptoPrefix = "@1D93"
 	}

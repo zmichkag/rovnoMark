@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -321,58 +320,112 @@ func (tp *TaskProcessor) pushSingleValentinCode(
 func (tp *TaskProcessor) runSavemaBatchPumper(ctx context.Context, lineID, taskID, printerID int, sDriver *savema.Driver) {
 	defer tp.stopTaskTracking(taskID)
 
-	// 1. Извлекаем ВСЮ пачку задания из SQLite
-	codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 1000)
-	if err != nil || len(codes) == 0 {
-		slog.Warn("SAVEMA-PUMPER: Нет кодов для отправки", "task_id", taskID, "err", err)
-		return
-	}
-
-	var payload []string
-	for _, c := range codes {
-		payload = append(payload, c.Code)
-	}
-
-	dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
-	if dynamicField == "" {
-		dynamicField = "DataMatrix"
-	}
-
-	// 2. Заливаем CSV, устанавливаем SPPSLQ ровно на len(codes) и запускаем печать
-	loaded, err := sDriver.PrintBatchIndexed(dynamicField, codes[0].PrinterIndex, payload)
-	if err != nil || loaded == 0 {
-		slog.Error("SAVEMA-PUMPER: Ошибка заливки CSV в Savema", "task_id", taskID, "err", err)
-		return
-	}
-
-	// 3. Мониторинг прогресса через опрос счетчика SPGGCP
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
-		select {
-		case <-ctx.Done():
+		status, err := tp.Store.GetTaskStatus(taskID)
+		if err != nil || status == "stopped" || status == "completed" {
 			_ = sDriver.ClearQueue()
 			return
-		case <-ticker.C:
-			status, err := tp.Store.GetTaskStatus(taskID)
-			if err != nil || status == "stopped" || status == "completed" {
+		}
+
+		// Savema работает файлами ограниченного размера. Берем очередную часть задания,
+		// а после ее завершения продолжаем со следующими кодами.
+		fetchStarted := time.Now()
+		codes, err := tp.Store.FetchAndAssignCodes(taskID, printerID, 1000)
+		if err != nil || len(codes) > 0 {
+			slog.Debug("SAVEMA-PUMPER TIMING", "stage", "fetch_and_assign", "task_id", taskID, "printer_id", printerID, "codes", len(codes), "elapsed_ms", time.Since(fetchStarted).Milliseconds(), "err", err)
+		}
+		if err != nil {
+			slog.Error("SAVEMA-PUMPER: Ошибка выборки кодов", "task_id", taskID, "err", err)
+			if !waitForSavemaPumper(ctx, time.Second) {
 				_ = sDriver.ClearQueue()
 				return
 			}
-
-			printedCount, err := sDriver.GetLastPrintedIndex()
-			if err == nil && printedCount > 0 {
-				// Синхронизируем базу кодов с SQLite
-				_, _ = tp.Store.MarkAsPrinted(taskID, printerID, printedCount)
-			}
-
-			// Партия отпечатана — завершаем насос
-			if printedCount >= len(codes) {
-				slog.Info("SAVEMA-PUMPER: Партия полностью завершена", "task_id", taskID, "printed", printedCount)
+			continue
+		}
+		if len(codes) == 0 {
+			// Задание остается активным: 1С может дописать следующую часть кодов позднее.
+			if !waitForSavemaPumper(ctx, 500*time.Millisecond) {
+				_ = sDriver.ClearQueue()
 				return
 			}
+			continue
 		}
+
+		payload := make([]string, 0, len(codes))
+		for _, c := range codes {
+			payload = append(payload, c.Code)
+		}
+
+		dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
+		if dynamicField == "" {
+			dynamicField = "DataMatrix"
+		}
+
+		batchStartIndex := codes[0].PrinterIndex
+		uploadStarted := time.Now()
+		loaded, err := sDriver.PrintBatchIndexed(dynamicField, batchStartIndex, payload)
+		slog.Debug("SAVEMA-PUMPER TIMING", "stage", "upload_batch", "task_id", taskID, "printer_id", printerID, "codes", len(payload), "loaded", loaded, "elapsed_ms", time.Since(uploadStarted).Milliseconds(), "err", err)
+		if err != nil || loaded == 0 {
+			// Коды еще не попали в принтер, поэтому возвращаем их в pending для повтора.
+			_, _ = tp.Store.ReconcileAndFinalizeTaskCodes(taskID, printerID, batchStartIndex-1)
+			slog.Error("SAVEMA-PUMPER: Ошибка заливки CSV в Savema", "task_id", taskID, "err", err)
+			if !waitForSavemaPumper(ctx, time.Second) {
+				_ = sDriver.ClearQueue()
+				return
+			}
+			continue
+		}
+
+		ticker := time.NewTicker(500 * time.Millisecond)
+		batchComplete := false
+		for !batchComplete {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				_ = sDriver.ClearQueue()
+				return
+			case <-ticker.C:
+				status, err := tp.Store.GetTaskStatus(taskID)
+				if err != nil || status == "stopped" || status == "completed" {
+					ticker.Stop()
+					_ = sDriver.ClearQueue()
+					return
+				}
+
+				printedInBatch, err := sDriver.GetLastPrintedIndex()
+				if err != nil {
+					continue
+				}
+				if printedInBatch > loaded {
+					printedInBatch = loaded
+				}
+				if printedInBatch > 0 {
+					lastTaskIndex := batchStartIndex + printedInBatch - 1
+					_, _ = tp.Store.MarkAsPrinted(taskID, printerID, lastTaskIndex)
+				}
+
+				if printedInBatch >= loaded {
+					batchComplete = true
+					slog.Info("SAVEMA-PUMPER: Часть задания завершена",
+						"task_id", taskID,
+						"loaded", loaded,
+						"last_task_index", batchStartIndex+loaded-1,
+					)
+				}
+			}
+		}
+		ticker.Stop()
+	}
+}
+
+func waitForSavemaPumper(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -435,17 +488,8 @@ func (tp *TaskProcessor) RunDefaultPumper(ctx context.Context, lineID, taskID in
 				var compositeFields string
 
 				if pCfg.DriverType == "videojet" {
-					dynamicField, _ := tp.Store.GetTaskDynamicField(taskID)
-					staticJSONStr, _ := tp.Store.GetTaskStaticFieldsJSON(taskID)
-					var staticFields map[string]string
-					if staticJSONStr != "" {
-						_ = json.Unmarshal([]byte(staticJSONStr), &staticFields)
-					}
-
 					for _, item := range pending {
-						fields, payload := PrepareDynamicPipeline(dynamicField, staticFields, item.Code)
-						compositeFields = fields
-						compositePayloads = append(compositePayloads, payload)
+						compositePayloads = append(compositePayloads, item.Code)
 					}
 				} else {
 					compositeFields, _ = tp.Store.GetTaskDynamicField(taskID)
@@ -482,6 +526,7 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
+	var nextPendingProbe time.Time
 
 	for {
 		select {
@@ -492,19 +537,56 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 			if err != nil || status == "stopped" || status == "completed" {
 				return
 			}
-
-			freeSpace, err := bDriver.GetBufferFreeSpace()
-			if err != nil || freeSpace <= 0 {
+			if time.Now().Before(nextPendingProbe) {
 				continue
 			}
 
-			targetLoad := freeSpace
-			if targetLoad > 5 {
-				targetLoad = 5
+			// Do not enter the single BCS/COM session when the whole currently known
+			// task is already in the driver's memory queue. New append portions are
+			// discovered with a cheap SQLite probe instead.
+			available, err := tp.Store.GetPendingCodes(taskID, 1)
+			if err != nil {
+				slog.Error("BIZERBA-PUMPER: Ошибка проверки новых кодов", "task_id", taskID, "err", err)
+				nextPendingProbe = time.Now().Add(500 * time.Millisecond)
+				continue
+			}
+			if len(available) == 0 {
+				nextPendingProbe = time.Now().Add(500 * time.Millisecond)
+				continue
 			}
 
+			bufferStarted := time.Now()
+			freeSpace, err := bDriver.GetBufferFreeSpace()
+			if err != nil || freeSpace > 0 {
+				slog.Debug("BIZERBA-PUMPER TIMING", "stage", "buffer_free_space", "task_id", taskID, "printer_id", printerID, "free_space", freeSpace, "elapsed_ms", time.Since(bufferStarted).Milliseconds(), "err", err)
+			}
+			if err != nil || freeSpace <= 0 {
+				continue
+			}
+			// Stop may arrive while GetBufferFreeSpace is waiting behind a BCS write.
+			// Recheck before assigning any more database rows to the printer.
+			status, err = tp.Store.GetTaskStatus(taskID)
+			if err != nil || status == "stopped" || status == "completed" {
+				return
+			}
+
+			targetLoad := freeSpace
+			// Bizerba's driver queue is in-process memory. Enqueuing a batch sends
+			// only the first mark to BCS, so small chunks merely add extra round trips
+			// through the single COM session without reducing device-side load.
+			if targetLoad > 1000 {
+				targetLoad = 1000
+			}
+
+			fetchStarted := time.Now()
 			pending, err := tp.Store.FetchAndAssignCodes(taskID, printerID, targetLoad)
+			if err != nil || len(pending) > 0 {
+				slog.Debug("BIZERBA-PUMPER TIMING", "stage", "fetch_and_assign", "task_id", taskID, "printer_id", printerID, "requested", targetLoad, "codes", len(pending), "elapsed_ms", time.Since(fetchStarted).Milliseconds(), "err", err)
+			}
 			if err != nil || len(pending) == 0 {
+				if err == nil {
+					nextPendingProbe = time.Now().Add(500 * time.Millisecond)
+				}
 				continue
 			}
 
@@ -518,7 +600,10 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 				codes = append(codes, cleanCode)
 			}
 
-			_, err = bDriver.PrintBatchIndexed("DATAMATRIX", startIndex, codes)
+			enqueueStarted := time.Now()
+			loaded, enqueueErr := bDriver.PrintBatchIndexed("DATAMATRIX", startIndex, codes)
+			err = enqueueErr
+			slog.Debug("BIZERBA-PUMPER TIMING", "stage", "enqueue_batch", "task_id", taskID, "printer_id", printerID, "codes", len(codes), "loaded", loaded, "elapsed_ms", time.Since(enqueueStarted).Milliseconds(), "err", err)
 			if err != nil {
 				slog.Error("BIZERBA-PUMPER: Ошибка отправки пакета в драйвер", "err", err)
 				time.Sleep(200 * time.Millisecond)
@@ -629,6 +714,7 @@ func (pm *PrinterManager) StartTelemetryCollector(store *storage.Store, interval
 
 func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 	slog.Info("ПОЛЛЕР ПРОСНУЛСЯ")
+	var pollsInFlight sync.Map
 	for {
 		pm.mu.RLock()
 		var ids []int
@@ -640,105 +726,112 @@ func (pm *PrinterManager) BackgroundPoller(store *storage.Store) {
 		lineMap, _ := store.GetPrinterLineMap()
 
 		for _, id := range ids {
-			pm.mu.RLock()
-			p := pm.printers[id]
-			cfg := pm.configs[id]
-			pm.mu.RUnlock()
-
-			if !cfg.IsActive {
+			if _, alreadyPolling := pollsInFlight.LoadOrStore(id, struct{}{}); alreadyPolling {
 				continue
 			}
+			go func(id int, lineMap map[int]int) {
+				defer pollsInFlight.Delete(id)
 
-			status, err := p.GetStatus()
-			var ribbon, queue, speed, curCount, curTemplate string
+				pm.mu.RLock()
+				p := pm.printers[id]
+				cfg := pm.configs[id]
+				pm.mu.RUnlock()
 
-			if err == nil {
-				ribbon, _ = p.GetRemainingRibbon()
-
-				free, errSpace := p.GetBufferFreeSpace()
-				if errSpace == nil {
-					queue = strconv.Itoa(free)
-				} else {
-					queue = "N/A"
+				if p == nil || !cfg.IsActive {
+					return
 				}
 
-				speed, _ = p.GetPrintSpeed()
-				curCount, _ = p.GetCurrentPrintCount()
-				curTemplate, _ = p.GetCurrentTemplate()
+				status, err := p.GetStatus()
+				var ribbon, queue, speed, curCount, curTemplate string
 
-				if cfg.DriverType != "valentine_nice" && lineMap != nil {
-					if lineID, ok := lineMap[id]; ok {
-						activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
-						if errTask == nil && activeTaskID > 0 {
-							lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
-							if errIdx == nil && lastPrintedIdx >= 0 {
-								affected, errMark := store.MarkAsPrinted(activeTaskID, cfg.ID, lastPrintedIdx)
-								if errMark == nil && affected > 0 {
-									slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
-										"printer", cfg.Name,
-										"printer_id", cfg.ID,
-										"task_id", activeTaskID,
-										"last_index", lastPrintedIdx,
-										"confirmed_now", affected,
-									)
+				if err == nil {
+					ribbon, _ = p.GetRemainingRibbon()
+
+					free, errSpace := p.GetBufferFreeSpace()
+					if errSpace == nil {
+						queue = strconv.Itoa(free)
+					} else {
+						queue = "N/A"
+					}
+
+					speed, _ = p.GetPrintSpeed()
+					curCount, _ = p.GetCurrentPrintCount()
+					curTemplate, _ = p.GetCurrentTemplate()
+
+					if cfg.DriverType != "valentine_nice" && cfg.DriverType != "savema" && lineMap != nil {
+						if lineID, ok := lineMap[id]; ok {
+							activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
+							if errTask == nil && activeTaskID > 0 {
+								lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
+								if errIdx == nil && lastPrintedIdx >= 0 {
+									affected, errMark := store.MarkAsPrinted(activeTaskID, cfg.ID, lastPrintedIdx)
+									if errMark == nil && affected > 0 {
+										slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
+											"printer", cfg.Name,
+											"printer_id", cfg.ID,
+											"task_id", activeTaskID,
+											"last_index", lastPrintedIdx,
+											"confirmed_now", affected,
+										)
+									}
 								}
 							}
 						}
 					}
 				}
-			}
 
-			pm.mu.Lock()
-			oldState := pm.states[id]
-			pID := id
-			var lIDPtr *int
-			if lineMap != nil {
-				if lID, ok := lineMap[id]; ok {
-					lIDPtr = &lID
+				pm.mu.Lock()
+				oldState := pm.states[id]
+				pID := id
+				var lIDPtr *int
+				if lineMap != nil {
+					if lID, ok := lineMap[id]; ok {
+						lIDPtr = &lID
+					}
 				}
-			}
 
-			if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
-				pm.addLogNoLock(store, &pID, lIDPtr, "info", fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
-			}
+				if err == nil && oldState.CurTemplate != "" && curTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
+					pm.addLogNoLock(store, &pID, lIDPtr, "info", fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
+				}
 
-			newState := models.PrinterState{
-				LastTemplate:   oldState.LastTemplate,
-				LastStaticHash: oldState.LastStaticHash,
-			}
+				newState := models.PrinterState{
+					LastTemplate:   oldState.LastTemplate,
+					LastStaticHash: oldState.LastStaticHash,
+				}
 
-			isOfflineNow := err != nil
-			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
+				isOfflineNow := err != nil
+				wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
 
-			if isOfflineNow && !wasOffline {
-				pm.addLogNoLock(store, &pID, lIDPtr, "error", fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))
-				newState.Status = fmt.Sprintf("ОФФЛАЙН: %v", err)
-				newState.Ribbon = "N/A"
-				newState.Queue = "N/A"
-				newState.Speed = "N/A"
-				newState.CurCount = "N/A"
-				newState.CurTemplate = "N/A"
-			} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
-				pm.addLogNoLock(store, &pID, lIDPtr, "success", "Связь восстановлена. Статус: "+status)
-				newState.Status = status
-				newState.Ribbon = ribbon
-				newState.Queue = queue
-				newState.Speed = speed
-				newState.CurCount = curCount
-				newState.CurTemplate = curTemplate
-			} else if isOfflineNow {
-				newState.Status = oldState.Status
-			} else {
-				newState.Status = status
-				newState.Ribbon = ribbon
-				newState.Queue = queue
-				newState.Speed = speed
-				newState.CurCount = curCount
-				newState.CurTemplate = curTemplate
-			}
+				if isOfflineNow && !wasOffline {
+					pm.addLogNoLock(store, &pID, lIDPtr, "error", fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))
+					newState.Status = fmt.Sprintf("ОФФЛАЙН: %v", err)
+					newState.Ribbon = "N/A"
+					newState.Queue = "N/A"
+					newState.Speed = "N/A"
+					newState.CurCount = "N/A"
+					newState.CurTemplate = "N/A"
+				} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
+					pm.addLogNoLock(store, &pID, lIDPtr, "success", "Связь восстановлена. Статус: "+status)
+					newState.Status = status
+					newState.Ribbon = ribbon
+					newState.Queue = queue
+					newState.Speed = speed
+					newState.CurCount = curCount
+					newState.CurTemplate = curTemplate
+				} else if isOfflineNow {
+					newState.Status = oldState.Status
+				} else {
+					newState.Status = status
+					newState.Ribbon = ribbon
+					newState.Queue = queue
+					newState.Speed = speed
+					newState.CurCount = curCount
+					newState.CurTemplate = curTemplate
+				}
 
-			pm.states[id] = newState
-			pm.mu.Unlock()
+				pm.states[id] = newState
+				pm.mu.Unlock()
+			}(id, lineMap)
 		}
 		time.Sleep(2 * time.Second)
 	}
