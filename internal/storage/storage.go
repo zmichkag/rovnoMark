@@ -24,7 +24,7 @@ const (
 	StorageModeMonolith StorageMode = "monolith"
 
 	TargetMasterSchemaVersion = 6
-	TargetCodesSchemaVersion  = 3 // Поднято до v3 (перенос scanner_reads в шард)
+	TargetCodesSchemaVersion  = 3 // v3: перенос scanner_reads в шард
 )
 
 type weightEvent struct {
@@ -50,6 +50,16 @@ type Store struct {
 type ReconcileResult struct {
 	TotalPrinted  int `json:"total_printed"`
 	ReturnedCodes int `json:"returned_codes"`
+}
+
+type CodeReportRow struct {
+	TaskID       int       `json:"task_id"`
+	Code         string    `json:"code"`
+	ExtID        string    `json:"ext_id"`
+	Status       string    `json:"status"`
+	Weight       string    `json:"weight"`
+	PrinterIndex int       `json:"printer_index"`
+	PrintedAt    time.Time `json:"printed_at"`
 }
 
 func openSQLite(path string) (*sql.DB, error) {
@@ -140,7 +150,7 @@ func (s *Store) runWeightBatchWriter() {
 			return
 		}
 		s.flushWeightsToDB(batch)
-		batch = batch[:0] // Очищаем слайс с сохранением капасити
+		batch = batch[:0]
 	}
 
 	for {
@@ -165,7 +175,6 @@ func (s *Store) flushWeightsToDB(events []weightEvent) {
 	}
 	defer tx.Rollback()
 
-	// Готовим стейтмент один раз на всю пачку
 	stmt, err := tx.Prepare(`
 		UPDATE task_codes 
 		SET weight = ? 
@@ -329,10 +338,8 @@ func MigrateMaster(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_task_counters_task_printer ON task_printer_counters(task_id, printer_id);
 		`,
 		2: `
-		-- Добавляем универсальный JSON-конфиг для вендорских драйверов
 		ALTER TABLE printers ADD COLUMN settings_json TEXT DEFAULT '{}';
 
-		-- Журнал отвесов Catchweight (динамический вес под каждую упаковку)
 		CREATE TABLE IF NOT EXISTS mark_weights (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_id INTEGER NOT NULL,
@@ -346,7 +353,6 @@ func MigrateMaster(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_mark_weights_task ON mark_weights(task_id);
 		CREATE INDEX IF NOT EXISTS idx_mark_weights_created ON mark_weights(created_at);
 
-		-- Дампы протокола GXNET (для включенного расширенного аудита)
 		CREATE TABLE IF NOT EXISTS bizerba_responses (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			printer_id INTEGER NOT NULL,
@@ -378,9 +384,7 @@ func MigrateMaster(db *sql.DB) error {
 			FOREIGN KEY (target_device_id) REFERENCES printers(id)
 		);`,
 	}
-	// В ранее выпущенных сборках встречался user_version=4 без соответствующего
-	// набора DDL. Оставляем v4 совместимой, а v5 повторно применяет идемпотентную
-	// схему сканеров, чтобы восстановить такие базы.
+
 	migrations[4] = `SELECT 1;`
 	migrations[5] = migrations[3]
 	migrations[6] = `
@@ -811,7 +815,7 @@ func (s *Store) GetCodePassport(code string) (map[string]interface{}, error) {
 			if errArc != nil {
 				continue
 			}
-			errScan := arcDB.QueryRow(query, cleanCode, "%"+cleanCode+"%").Scan(&taskID, &status, &printedAt)
+			errScan := arcDB.QueryRow(query, cleanCode, "%"+cleanCode+"%").Scan(&taskID, &status, &printedAt, &weight)
 			arcDB.Close()
 			if errScan == nil {
 				err = nil
@@ -1086,6 +1090,33 @@ func (s *Store) GetLastPrintedCodeForPrinter(taskID, printerID int) (string, tim
         FROM task_codes 
         WHERE task_id = ? AND printer_id = ? AND status = 'printed' 
         ORDER BY printer_index DESC LIMIT 1`, taskID, printerID).Scan(&code, &pTimeStr)
+
+	// Фоллбэк на архивы, если задача перешла границу месяца
+	if s.mode == StorageModeSharded && (errors.Is(err, sql.ErrNoRows) || code == "") {
+		files, _ := filepath.Glob(filepath.Join(s.dataDir, "codes_*.db"))
+		for i := len(files) - 1; i >= 0; i-- {
+			f := files[i]
+			if strings.Contains(f, s.curMonth) {
+				continue
+			}
+			arcDB, errArc := sql.Open("sqlite", f+"?mode=ro")
+			if errArc != nil {
+				continue
+			}
+			errScan := arcDB.QueryRow(`
+				SELECT code, printed_at 
+				FROM task_codes 
+				WHERE task_id = ? AND printer_id = ? AND status = 'printed' 
+				ORDER BY printer_index DESC LIMIT 1`, taskID, printerID).Scan(&code, &pTimeStr)
+			_ = arcDB.Close()
+
+			if errScan == nil && code != "" {
+				err = nil
+				break
+			}
+		}
+	}
+
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -1192,7 +1223,7 @@ func (s *Store) GetTelemetry(printerID int, limit int) ([]map[string]interface{}
 	return result, nil
 }
 
-// GetActiveTasks с вычислением COUNT(DISTINCT code) из шарда кодов
+// GetActiveTasks с вычислением статистики и поиском по шардам
 func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{}, error) {
 	query := `
 		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), 
@@ -1241,10 +1272,46 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 
 			var lastPrintedCode, lastPrintedAt sql.NullString
 			_ = codesDB.QueryRow(`
-            SELECT code, printed_at 
-            FROM task_codes 
-            WHERE task_id = ? AND status = 'printed' 
-            ORDER BY printed_at DESC, id DESC LIMIT 1`, id).Scan(&lastPrintedCode, &lastPrintedAt)
+				SELECT code, printed_at 
+				FROM task_codes 
+				WHERE task_id = ? AND status = 'printed' 
+				ORDER BY printed_at DESC, id DESC LIMIT 1`, id).Scan(&lastPrintedCode, &lastPrintedAt)
+
+			// Если задача на стыке месяцев и в текущем шарде 0 записей — сканируем архивы
+			if s.mode == StorageModeSharded && total == 0 {
+				files, _ := filepath.Glob(filepath.Join(s.dataDir, "codes_*.db"))
+				for i := len(files) - 1; i >= 0; i-- {
+					f := files[i]
+					if strings.Contains(f, s.curMonth) {
+						continue
+					}
+					arcDB, errArc := sql.Open("sqlite", f+"?mode=ro")
+					if errArc != nil {
+						continue
+					}
+					_ = arcDB.QueryRow(`
+						SELECT COUNT(*), 
+						       COUNT(CASE WHEN status = 'printed' THEN 1 END), 
+						       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END) 
+						FROM task_codes WHERE task_id = ?`, id).Scan(&total, &printed, &buffered)
+
+					_ = arcDB.QueryRow(`
+						SELECT COUNT(DISTINCT code) 
+						FROM scanner_reads 
+						WHERE task_id = ? AND match_status <> 'no_read'`, id).Scan(&scanned)
+
+					_ = arcDB.QueryRow(`
+						SELECT code, printed_at 
+						FROM task_codes 
+						WHERE task_id = ? AND status = 'printed' 
+						ORDER BY printed_at DESC, id DESC LIMIT 1`, id).Scan(&lastPrintedCode, &lastPrintedAt)
+					_ = arcDB.Close()
+
+					if total > 0 {
+						break
+					}
+				}
+			}
 
 			result = append(result, map[string]interface{}{
 				"task_id":            id,
@@ -1272,7 +1339,7 @@ func (s *Store) GetActiveTasks(lineID, printerID int) ([]map[string]interface{},
 	return result, nil
 }
 
-// GetTaskInfo с вычислением COUNT(DISTINCT code) из шарда кодов
+// GetTaskInfo с гарантированным поиском по шардам
 func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interface{}, error) {
 	queryMaster := `
 		SELECT t.id, t.line_id, COALESCE(l.name, 'Неизвестная линия'), t.template_name, t.status, t.created_at,
@@ -1307,6 +1374,47 @@ func (s *Store) GetTaskInfo(ctx context.Context, taskID int) (map[string]interfa
 		SELECT COUNT(DISTINCT code)
 		FROM scanner_reads
 		WHERE task_id = ? AND match_status <> 'no_read'`, taskID).Scan(&scannedCount)
+
+	// Если в текущем активном шарде кодов нет — сканируем архивные шарды
+	if s.mode == StorageModeSharded && totalCodes == 0 {
+		files, _ := filepath.Glob(filepath.Join(s.dataDir, "codes_*.db"))
+		for i := len(files) - 1; i >= 0; i-- {
+			f := files[i]
+			if strings.Contains(f, s.curMonth) {
+				continue
+			}
+			arcDB, errArc := sql.Open("sqlite", f+"?mode=ro")
+			if errArc != nil {
+				continue
+			}
+			var arcTotal, arcPrinted, arcBuffer, arcPending, arcScanned int
+			var arcLastPrinted sql.NullString
+
+			errScan := arcDB.QueryRowContext(ctx, `
+				SELECT MAX(printed_at), COUNT(id),
+				       COUNT(CASE WHEN status = 'printed' THEN 1 END),
+				       COUNT(CASE WHEN status = 'in_buffer' THEN 1 END),
+				       COUNT(CASE WHEN status = 'pending' THEN 1 END)
+				FROM task_codes WHERE task_id = ?`, taskID).Scan(&arcLastPrinted, &arcTotal, &arcPrinted, &arcBuffer, &arcPending)
+
+			_ = arcDB.QueryRowContext(ctx, `
+				SELECT COUNT(DISTINCT code)
+				FROM scanner_reads
+				WHERE task_id = ? AND match_status <> 'no_read'`, taskID).Scan(&arcScanned)
+
+			_ = arcDB.Close()
+
+			if errScan == nil && arcTotal > 0 {
+				totalCodes = arcTotal
+				printedCount = arcPrinted
+				inBufferCount = arcBuffer
+				pendingCount = arcPending
+				scannedCount = arcScanned
+				lastPrintedAt = arcLastPrinted
+				break
+			}
+		}
+	}
 
 	return map[string]interface{}{
 		"task_id":              tID,
@@ -1458,14 +1566,12 @@ func (s *Store) SaveEventLog(lineID *int, printerID *int, eventType string, mess
 	return err
 }
 
-// SaveWeightAndMarkPrinted атомарно фиксирует вес и переводит код в статус 'printed'
 func (s *Store) SaveWeightAndMarkPrinted(taskID, printerID, printerIndex int, weight string) error {
 	weight = strings.TrimSpace(weight)
 	if weight == "" {
 		weight = "0"
 	}
 
-	// Отправляем в очередь батчинга, но уже с гарантией смены статуса
 	db := s.getCodesDB()
 	query := `
 		UPDATE task_codes 
@@ -1479,7 +1585,6 @@ func (s *Store) SaveWeightAndMarkPrinted(taskID, printerID, printerIndex int, we
 	return nil
 }
 
-// SaveMarkWeight быстро помещает событие в ОЗУ-очередь, исключая блокировки базы
 func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight string) error {
 	mark = strings.TrimSpace(mark)
 	weight = strings.TrimSpace(weight)
@@ -1498,13 +1603,10 @@ func (s *Store) SaveMarkWeight(taskID, printerID, printerIndex int, mark, weight
 		return nil
 	default:
 		slog.Warn("WEIGHT-QUEUE: Переполнение буфера отвесов! Синхронный сброс...")
-		// Фоллбэк: если очередь переполнена (2000 записей), пишем напрямую
 		return s.saveMarkWeightDirect(taskID, printerID, printerIndex, mark, weight)
 	}
 }
 
-// saveMarkWeightDirect выполняет синхронную запись отвеса напрямую в SQLite шард.
-// Используется как резервный канал при переполнении буфера в ОЗУ.
 func (s *Store) saveMarkWeightDirect(taskID, printerID, printerIndex int, mark, weight string) error {
 	db := s.getCodesDB()
 	query := `
@@ -1525,4 +1627,165 @@ func (s *Store) SaveTelemetry(printerID int, count string, ribbon string, status
 	_, err := s.db.Exec(`INSERT INTO printer_telemetry (printer_id, cur_count, ribbon, status, template) VALUES (?, ?, ?, ?, ?)`,
 		printerID, count, ribbon, status, template)
 	return err
+}
+
+// ============================================================================
+// КРОСС-ШАРДОВАЯ ВЫБОРКА И ОТЧЕТЫ (1С / MES)
+// ============================================================================
+
+// ResolveCodesShards находит все файлы шардов (codes_YYYY_MM.db), перекрывающие период
+func (s *Store) ResolveCodesShards(from, to time.Time) []string {
+	var shardPaths []string
+	if s.mode == StorageModeMonolith {
+		return shardPaths
+	}
+
+	cur := time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(to.Year(), to.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	for !cur.After(end) {
+		mKey := cur.Format("2006_01")
+		path := filepath.Join(s.dataDir, fmt.Sprintf("codes_%s.db", mKey))
+		if _, err := os.Stat(path); err == nil {
+			shardPaths = append(shardPaths, path)
+		}
+		cur = cur.AddDate(0, 1, 0)
+	}
+	return shardPaths
+}
+
+// GetTaskCodesReport возвращает все коды по задаче, проверяя активный и архивные шарды
+func (s *Store) GetTaskCodesReport(taskID int) ([]CodeReportRow, error) {
+	// 1. Попытка чтения из активного шарда
+	codes, err := s.queryTaskCodesFromDB(s.getCodesDB(), taskID)
+	if err == nil && len(codes) > 0 {
+		return codes, nil
+	}
+
+	if s.mode == StorageModeMonolith {
+		return codes, err
+	}
+
+	// 2. Если в активном пусто — перебираем архивные шарды
+	files, _ := filepath.Glob(filepath.Join(s.dataDir, "codes_*.db"))
+	for i := len(files) - 1; i >= 0; i-- {
+		f := files[i]
+		if strings.Contains(f, s.curMonth) {
+			continue
+		}
+
+		arcDB, errOpen := sql.Open("sqlite", f+"?mode=ro")
+		if errOpen != nil {
+			continue
+		}
+		codes, errQuery := s.queryTaskCodesFromDB(arcDB, taskID)
+		_ = arcDB.Close()
+
+		if errQuery == nil && len(codes) > 0 {
+			return codes, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func (s *Store) queryTaskCodesFromDB(db *sql.DB, taskID int) ([]CodeReportRow, error) {
+	query := `
+		SELECT task_id, code, COALESCE(ext_id, ''), status, COALESCE(weight, ''), 
+		       COALESCE(printer_index, 0), COALESCE(printed_at, '')
+		FROM task_codes 
+		WHERE task_id = ? 
+		ORDER BY id ASC`
+
+	rows, err := db.Query(query, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []CodeReportRow
+	for rows.Next() {
+		var row CodeReportRow
+		var pTimeStr string
+		if err := rows.Scan(&row.TaskID, &row.Code, &row.ExtID, &row.Status, &row.Weight, &row.PrinterIndex, &pTimeStr); err != nil {
+			return nil, err
+		}
+		if pTimeStr != "" {
+			row.PrintedAt, _ = time.Parse("2006-01-02 15:04:05", pTimeStr)
+		}
+		result = append(result, row)
+	}
+	return result, nil
+}
+
+// GetCodesReportAcrossDateRange выгружает историю кодов за интервал дат со всех шардов
+func (s *Store) GetCodesReportAcrossDateRange(from, to time.Time, status string) ([]CodeReportRow, error) {
+	shards := s.ResolveCodesShards(from, to)
+	if s.mode == StorageModeMonolith || len(shards) == 0 {
+		return s.queryCodesRangeFromDB(s.getCodesDB(), from, to, status)
+	}
+
+	var allRows []CodeReportRow
+	for _, shardPath := range shards {
+		var db *sql.DB
+		var err error
+
+		if strings.Contains(shardPath, s.curMonth) {
+			db = s.getCodesDB()
+		} else {
+			db, err = sql.Open("sqlite", shardPath+"?mode=ro")
+			if err != nil {
+				slog.Error("Не удалось открыть архивный шард", "path", shardPath, "err", err)
+				continue
+			}
+		}
+
+		rows, errQuery := s.queryCodesRangeFromDB(db, from, to, status)
+		if !strings.Contains(shardPath, s.curMonth) {
+			_ = db.Close()
+		}
+
+		if errQuery == nil {
+			allRows = append(allRows, rows...)
+		}
+	}
+
+	return allRows, nil
+}
+
+func (s *Store) queryCodesRangeFromDB(db *sql.DB, from, to time.Time, status string) ([]CodeReportRow, error) {
+	query := `
+		SELECT task_id, code, COALESCE(ext_id, ''), status, COALESCE(weight, ''), 
+		       COALESCE(printer_index, 0), COALESCE(printed_at, '')
+		FROM task_codes 
+		WHERE printed_at BETWEEN ? AND ?`
+
+	var args []any
+	args = append(args, from.Format("2006-01-02 15:04:05"), to.Format("2006-01-02 15:04:05"))
+
+	if status != "" {
+		query += " AND status = ?"
+		args = append(args, status)
+	}
+	query += " ORDER BY printed_at ASC"
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []CodeReportRow
+	for rows.Next() {
+		var row CodeReportRow
+		var pTimeStr string
+		if err := rows.Scan(&row.TaskID, &row.Code, &row.ExtID, &row.Status, &row.Weight, &row.PrinterIndex, &pTimeStr); err != nil {
+			return nil, err
+		}
+		if pTimeStr != "" {
+			row.PrintedAt, _ = time.Parse("2006-01-02 15:04:05", pTimeStr)
+		}
+		result = append(result, row)
+	}
+	return result, nil
 }
