@@ -51,7 +51,6 @@ type preparedSession struct {
 }
 
 // Driver управляет Bizerba через COM Automation API службы BCS ConnectService.
-// Параметры host и port сохранены в New только для совместимости с общей конфигурацией принтеров.
 type Driver struct {
 	device    string
 	timeout   time.Duration
@@ -75,29 +74,67 @@ type Driver struct {
 	captureDone   chan struct{}
 }
 
-// New создаёт драйвер для устройства с указанным именем подключения в BCS.
-// Значения host и port для COM-драйвера не используются.
+type deduplicationEntry struct {
+	msgType   string
+	timestamp time.Time
+}
+
+type pw02Deduplicator struct {
+	seen map[string]deduplicationEntry
+	ttl  time.Duration
+}
+
+func newPW02Deduplicator() *pw02Deduplicator {
+	return &pw02Deduplicator{
+		seen: make(map[string]deduplicationEntry),
+		ttl:  5 * time.Second,
+	}
+}
+
+// shouldProcess проверяет PW02. Если уже видели за 5 секунд — возвращает false.
+func (d *pw02Deduplicator) shouldProcess(handle, msgType string, now time.Time) bool {
+	for k, v := range d.seen {
+		if now.Sub(v.timestamp) > d.ttl {
+			delete(d.seen, k)
+		}
+	}
+
+	if entry, ok := d.seen[handle]; ok {
+		if now.Sub(entry.timestamp) <= d.ttl {
+			return false
+		}
+	}
+
+	d.seen[handle] = deduplicationEntry{msgType: msgType, timestamp: now}
+	return true
+}
+
+func (d *pw02Deduplicator) reset() {
+	d.seen = make(map[string]deduplicationEntry)
+}
+
 func New(_ string, _ int, device string) *Driver {
 	return newDriver(device, newBCSConnection)
 }
 
-// NewWithProfile создаёт драйвер с Bizerba-специфичным профилем оборудования.
 func NewWithProfile(_ string, _ int, device string, profile Profile) *Driver {
 	return newDriverWithProfile(device, newBCSConnection, profile)
 }
 
-// newDriver создаёт драйвер с заданной фабрикой COM-соединений.
-// Отдельная фабрика позволяет проверять логику драйвера без настоящего оборудования.
 func newDriver(device string, factory connectionFactory) *Driver {
 	return newDriverWithProfile(device, factory, Profile{})
 }
 
-// newDriverWithProfile создаёт тестируемый драйвер с заданным профилем оборудования.
 func newDriverWithProfile(device string, factory connectionFactory, profile Profile) *Driver {
-	d := &Driver{device: strings.TrimSpace(device), timeout: defaultRequestTimeout,
+	d := &Driver{
+		device:        strings.TrimSpace(device),
+		timeout:       defaultRequestTimeout,
 		recordGXNET:   profile.RecordGXNET && profile.RecordResponse != nil,
 		capturePaused: true,
-		equipment:     configuredBizerbaEquipment(profile), lastPrinted: -1, fields: make(map[string]string)}
+		equipment:     configuredBizerbaEquipment(profile),
+		lastPrinted:   -1,
+		fields:        make(map[string]string),
+	}
 	if profile.RecordGXNET && profile.RecordResponse != nil {
 		baseFactory := factory
 		factory = func() (bcsConnection, error) {
@@ -120,7 +157,6 @@ func newDriverWithProfile(device string, factory connectionFactory, profile Prof
 	return d
 }
 
-// withConnection выполняет одну операцию в коротком COM-сеансе без спонтанных сообщений.
 func (d *Driver) withConnection(fn func(bcsConnection) error) error {
 	if d.device == "" {
 		return fmt.Errorf("не задано имя устройства Bizerba в BCS")
@@ -140,7 +176,6 @@ func (d *Driver) withConnection(fn func(bcsConnection) error) error {
 	return fn(conn)
 }
 
-// sendWrite отправляет команду записи и проверяет статус, возвращённый BCS.
 func sendWrite(conn bcsConnection, header, data string, timeout time.Duration) error {
 	_, status, err := conn.Send(header, data, timeout)
 	if err != nil {
@@ -152,7 +187,6 @@ func sendWrite(conn bcsConnection, header, data string, timeout time.Duration) e
 	return nil
 }
 
-// executeQuery отправляет команду чтения и получает ответ по выданному BCS дескриптору.
 func executeQuery(conn bcsConnection, command, parameter string, timeout time.Duration) (string, error) {
 	handle, status, err := conn.Send(command, parameter, timeout)
 	if err != nil {
@@ -171,7 +205,6 @@ func executeQuery(conn bcsConnection, command, parameter string, timeout time.Du
 	return payload, nil
 }
 
-// runCommand выполняет команду в активной сессии марок либо открывает короткий COM-сеанс.
 func (d *Driver) runCommand(fn func(bcsConnection) error) error {
 	if d.recordGXNET {
 		d.startMu.Lock()
@@ -194,13 +227,11 @@ func (d *Driver) runCommand(fn func(bcsConnection) error) error {
 	return d.withConnection(fn)
 }
 
-// call передаёт произвольную операцию в поток активной COM-сессии.
 func (s *markSession) call(fn func(bcsConnection) error) error {
 	_, err := s.request(sessionRequest{kind: "call", call: fn})
 	return err
 }
 
-// request передаёт управляющий запрос в сессию и ожидает результат или её завершение.
 func (s *markSession) request(req sessionRequest) (int, error) {
 	req.resp = make(chan sessionResponse, 1)
 	select {
@@ -221,7 +252,6 @@ func (s *markSession) request(req sessionRequest) (int, error) {
 	}
 }
 
-// setError сохраняет последнюю ошибку сессии.
 func (s *markSession) setError(err error) {
 	if err == nil {
 		return
@@ -231,14 +261,12 @@ func (s *markSession) setError(err error) {
 	s.errMu.Unlock()
 }
 
-// failure возвращает сохранённую ошибку сессии.
 func (s *markSession) failure() error {
 	s.errMu.RLock()
 	defer s.errMu.RUnlock()
 	return s.err
 }
 
-// closedError возвращает причину аварийного завершения либо сообщение о закрытой сессии.
 func (s *markSession) closedError() error {
 	if err := s.failure(); err != nil {
 		return err
@@ -246,7 +274,6 @@ func (s *markSession) closedError() error {
 	return fmt.Errorf("сессия передачи марок Bizerba закрыта")
 }
 
-// SelectTemplate устанавливает на устройстве выбранный PLU и статические поля.
 func (d *Driver) SelectTemplate(plu string, fields map[string]string) error {
 	plu = strings.TrimSpace(plu)
 	if plu == "" {
@@ -254,9 +281,6 @@ func (d *Driver) SelectTemplate(plu string, fields map[string]string) error {
 	}
 	err := d.runCommand(func(conn bcsConnection) error {
 		if loadErr := sendWrite(conn, "A!XV00|GL19|LX02", plu, d.timeout); loadErr != nil {
-			// Some GLPMax versions apply GL19 but report "Datensatz nicht vorhanden"
-			// for the LX02 screen refresh. Accept the operation only after reading
-			// the selected PLU back from the device.
 			response, verifyErr := executeQuery(conn, "A?GL19", "0", d.timeout)
 			loadedPLU, parseErr := ParseFieldResponse(response, "GL19")
 			if verifyErr != nil || parseErr != nil || loadedPLU != plu {
@@ -275,12 +299,10 @@ func (d *Driver) SelectTemplate(plu string, fields map[string]string) error {
 	return nil
 }
 
-// PrintTemplate выбирает PLU и заполняет его статические поля.
 func (d *Driver) PrintTemplate(plu string, fields map[string]string) error {
 	return d.SelectTemplate(plu, fields)
 }
 
-// UpdateStaticFields обновляет поддерживаемые статические поля текущего PLU.
 func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	if err := d.runCommand(func(conn bcsConnection) error { return d.updateStaticFieldsOn(conn, fields) }); err != nil {
 		return err
@@ -293,26 +315,63 @@ func (d *Driver) UpdateStaticFields(fields map[string]string) error {
 	return nil
 }
 
-// updateStaticFieldsOn записывает дату в GL06 и бригаду в GL15 через готовое соединение.
+// updateStaticFieldsOn отправляет статические поля согласно FieldMapping
 func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]string) error {
-	if date := firstField(fields, "date", "production_date", "GL06", "дата"); date != "" {
-		formatted, err := normalizeBizerbaDate(date)
-		if err != nil {
-			return err
-		}
-		if err := sendWrite(conn, "A!GL06", formatted, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки даты Bizerba %q: %w", formatted, err)
-		}
+	if len(fields) == 0 {
+		return nil
 	}
-	if brigade := firstField(fields, "brigade", "team", "GL15", "бригада"); brigade != "" {
-		if err := sendWrite(conn, "A!GL15", brigade, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки бригады Bizerba %q: %w", brigade, err)
+
+	for key, value := range fields {
+		val := strings.TrimSpace(value)
+		if val == "" {
+			continue
+		}
+
+		targetRegister := ""
+		if reg, ok := d.equipment.mapping.StaticMap[key]; ok && reg != "" {
+			targetRegister = strings.ToUpper(strings.TrimSpace(reg))
+		} else {
+			for mapKey, mapReg := range d.equipment.mapping.StaticMap {
+				if strings.EqualFold(mapKey, key) && mapReg != "" {
+					targetRegister = strings.ToUpper(strings.TrimSpace(mapReg))
+					break
+				}
+			}
+		}
+
+		if targetRegister == "" {
+			upper := strings.ToUpper(strings.TrimSpace(key))
+			if isBizerbaRegister(upper) {
+				targetRegister = upper
+			}
+		}
+
+		if targetRegister == "" {
+			continue
+		}
+
+		formattedValue := val
+		if strings.HasPrefix(targetRegister, "GL0") {
+			if normDate, err := normalizeBizerbaDate(val); err == nil {
+				formattedValue = normDate
+			}
+		}
+
+		if err := sendWrite(conn, "A!"+targetRegister, formattedValue, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s (%s=%q): %w", targetRegister, key, formattedValue, err)
 		}
 	}
 	return nil
 }
 
-// GetCurrentTemplate возвращает текущий PLU, используя кратковременный кэш чтения.
+func isBizerbaRegister(reg string) bool {
+	if len(reg) != 4 {
+		return false
+	}
+	prefix := reg[:2]
+	return prefix == "GT" || prefix == "GL" || prefix == "GW" || prefix == "GD"
+}
+
 func (d *Driver) GetCurrentTemplate() (string, error) {
 	d.mu.RLock()
 	cached, readAt := d.currentPLU, d.lastPLURead
@@ -339,7 +398,6 @@ func (d *Driver) GetCurrentTemplate() (string, error) {
 	return plu, nil
 }
 
-// ParseFieldResponse извлекает значение ожидаемого поля из ответа протокола Bizerba.
 func ParseFieldResponse(response, expectedField string) (string, error) {
 	parts := strings.SplitN(strings.TrimSpace(response), "|", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) != "A!"+expectedField {
@@ -352,8 +410,6 @@ func ParseFieldResponse(response, expectedField string) (string, error) {
 	return value, nil
 }
 
-// GetStatus проверяет доступность устройства чтением общего состояния PL03.
-// Проверка не зависит от того, выбран ли на машине PLU и существует ли его текст.
 func (d *Driver) GetStatus() (string, error) {
 	var response string
 	err := d.runCommand(func(conn bcsConnection) error {
@@ -370,7 +426,6 @@ func (d *Driver) GetStatus() (string, error) {
 	return "ГОТОВ", nil
 }
 
-// InitSession сохраняет параметры будущей сессии марок, не открывая COM и канал E.
 func (d *Driver) InitSession(_ string, maxQueue int, staticFields map[string]string) error {
 	if maxQueue <= 0 {
 		return fmt.Errorf("размер очереди Bizerba должен быть больше нуля")
@@ -401,9 +456,6 @@ func (d *Driver) InitSession(_ string, maxQueue int, staticFields map[string]str
 	return nil
 }
 
-// startPreparedSession запускается очередью Bizerba после поступления списка марок.
-// Благодаря отложенному запуску /task/create не захватывает спонтанный COM-клиент
-// и не открывает канал E до первого успешного /task/append.
 func (d *Driver) startPreparedSession() error {
 	d.startMu.Lock()
 	defer d.startMu.Unlock()
@@ -459,8 +511,6 @@ func (d *Driver) startPreparedSession() error {
 	return nil
 }
 
-// runSession обслуживает очередь марок в одном закреплённом COM-потоке.
-// Сессия открывает канал E, принимает PV01/PW05 и устанавливает следующую марку.
 func (d *Driver) runSession(s *markSession, capacity int, staticFields map[string]string) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -473,6 +523,7 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		d.mu.Unlock()
 		close(s.done)
 	}()
+
 	conn, err := d.newConn()
 	if err == nil {
 		err = conn.Open(d.device, d.device, true)
@@ -495,140 +546,199 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 
 	var pending []queuedMark
 	var active *queuedMark
-	// clearMarkFields удаляет данные последней марки, чтобы при пустой очереди
-	// устройство не могло повторно напечатать уже использованный DataMatrix.
+
+	dedup := newPW02Deduplicator()
+
+	serialReg := d.equipment.mapping.SerialField
+	if serialReg == "" {
+		serialReg = "GT03"
+	}
+	cryptoReg := d.equipment.mapping.CryptoField
+	if cryptoReg == "" {
+		cryptoReg = "GT04"
+	}
+
 	clearMarkFields := func() error {
-		if err := sendWrite(conn, "A!GT03", "", d.timeout); err != nil {
-			return fmt.Errorf("ошибка очистки поля Bizerba GT03: %w", err)
+		if err := sendWrite(conn, "A!"+serialReg, "", d.timeout); err != nil {
+			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", serialReg, err)
 		}
-		if err := sendWrite(conn, "A!GT04", "", d.timeout); err != nil {
-			return fmt.Errorf("ошибка очистки поля Bizerba GT04: %w", err)
+		if err := sendWrite(conn, "A!"+cryptoReg, "", d.timeout); err != nil {
+			return fmt.Errorf("ошибка очистки поля Bizerba %s: %w", cryptoReg, err)
 		}
 		return nil
 	}
+
 	installNext := func() error {
 		if active != nil || len(pending) == 0 {
 			return nil
 		}
 		next := pending[0]
 		pending = pending[1:]
-		// В выбранном PLU-шаблоне текст DataMatrix собирается из полей GT03 и GT04:
-		// GT03 содержит шестисимвольный блок AI 21 (код страны и серийный номер),
-		// а GT04 — разделитель GS в виде @1D, идентификатор AI 93 и криптохвост.
-		if err := sendWrite(conn, "A!GT03", next.serial, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba GT03: %w", err)
+		if err := sendWrite(conn, "A!"+serialReg, next.serial, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", serialReg, err)
 		}
-		if err := sendWrite(conn, "A!GT04", next.crypto, d.timeout); err != nil {
-			return fmt.Errorf("ошибка установки поля Bizerba GT04: %w", err)
+		if err := sendWrite(conn, "A!"+cryptoReg, next.crypto, d.timeout); err != nil {
+			return fmt.Errorf("ошибка установки поля Bizerba %s: %w", cryptoReg, err)
 		}
 		active = &next
 		return nil
 	}
 
 	for {
-		select {
-		case req := <-s.requests:
-			switch req.kind {
-			case "enqueue":
-				if capacity <= 0 {
-					req.resp <- sessionResponse{err: fmt.Errorf("сессия передачи марок Bizerba не инициализирована")}
-					continue
-				}
-				used := len(pending)
-				if active != nil {
-					used++
-				}
-				free := capacity - used
-				if free < len(req.marks) {
-					req.resp <- sessionResponse{err: fmt.Errorf("в очереди Bizerba свободно место для %d из %d марок", free, len(req.marks))}
-					continue
-				}
-				pending = append(pending, req.marks...)
-				err := installNext()
-				req.resp <- sessionResponse{value: len(req.marks), err: err}
-				if err != nil {
-					s.setError(err)
-					_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-					return
-				}
-			case "free":
-				used := len(pending)
-				if active != nil {
-					used++
-				}
-				req.resp <- sessionResponse{value: capacity - used}
-			case "call":
-				req.resp <- sessionResponse{err: req.call(conn)}
-			case "prepare":
-				err := d.updateStaticFieldsOn(conn, req.prepared.staticFields)
-				if err == nil {
-					capacity = req.prepared.capacity
-				}
-				req.resp <- sessionResponse{err: err}
-			case "stop", "close":
-				err := sendWrite(conn, "A!GWC3", "0", d.timeout)
-				req.resp <- sessionResponse{err: err}
-				return
-			}
-		default:
-			payload, status, receiveErr := conn.ReceiveOne(spontaneousQueue, receivePollTimeout)
-			if receiveErr != nil {
-				s.setError(receiveErr)
-				_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-				return
-			}
-			if status != bcsStatusOK && status != bcsStatusMore && status != bcsStatusTimeout {
-				s.setError(fmt.Errorf("BCS ReceiveOne(%q): получен статус %d", spontaneousQueue, status))
-				_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-				return
-			}
-			isWeightPackage := status != bcsStatusTimeout && hasField(payload, "PV01")
-			isPassingPackage := status != bcsStatusTimeout && hasField(payload, "PW05")
-			if active != nil && (isWeightPackage || isPassingPackage) {
-				weight := ""
-				var weightErr error
-				switch {
-				case isWeightPackage && d.equipment.captureWeight:
-					weight, weightErr = bizerbaWeight(payload)
-				case isPassingPackage:
-					// PW05 reports a passing package without weighing data. The mark was
-					// applied, so persist it with zero weight and advance the queue.
-					weight = "0"
-				}
-				if weight != "" || weightErr != nil {
-					switch {
-					case weightErr != nil:
-						slog.Error("Не удалось извлечь вес из пакета Bizerba", "mark", active.code, "err", weightErr, "packet", payload)
-					case d.equipment.recordWeight == nil:
-						slog.Error("Для Bizerba не настроено хранилище веса напечатанной марки", "mark", active.code, "weight", weight)
-					default:
-						if recordErr := d.equipment.recordWeight(active.index, active.code, weight); recordErr != nil {
-							slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", recordErr)
-						}
+		drainRequests := true
+		for drainRequests {
+			select {
+			case req := <-s.requests:
+				switch req.kind {
+				case "enqueue":
+					if capacity <= 0 {
+						req.resp <- sessionResponse{err: fmt.Errorf("сессия передачи марок Bizerba не инициализирована")}
+						continue
 					}
-				}
-				d.mu.Lock()
-				d.lastPrinted = active.index
-				d.mu.Unlock()
-				active = nil
-				if err := installNext(); err != nil {
-					s.setError(err)
-					_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-					return
-				}
-				if active == nil && len(pending) == 0 {
-					if err := clearMarkFields(); err != nil {
+					used := len(pending)
+					if active != nil {
+						used++
+					}
+					free := capacity - used
+					if free < len(req.marks) {
+						req.resp <- sessionResponse{err: fmt.Errorf("в очереди Bizerba свободно место для %d из %d марок", free, len(req.marks))}
+						continue
+					}
+					pending = append(pending, req.marks...)
+					err := installNext()
+					req.resp <- sessionResponse{value: len(req.marks), err: err}
+					if err != nil {
 						s.setError(err)
 						_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
 						return
 					}
+				case "free":
+					used := len(pending)
+					if active != nil {
+						used++
+					}
+					req.resp <- sessionResponse{value: capacity - used}
+				case "call":
+					req.resp <- sessionResponse{err: req.call(conn)}
+				case "prepare":
+					dedup.reset()
+					err := d.updateStaticFieldsOn(conn, req.prepared.staticFields)
+					if err == nil {
+						capacity = req.prepared.capacity
+					}
+					req.resp <- sessionResponse{err: err}
+				case "stop", "close":
+					dedup.reset()
+					_ = clearMarkFields()
+					err := sendWrite(conn, "A!GWC3", "0", d.timeout)
+					req.resp <- sessionResponse{err: err}
+					return
 				}
+			default:
+				drainRequests = false
+			}
+		}
+
+		payload, status, receiveErr := conn.ReceiveOne(spontaneousQueue, receivePollTimeout)
+		if receiveErr != nil {
+			s.setError(receiveErr)
+			_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+			return
+		}
+		if status != bcsStatusOK && status != bcsStatusMore && status != bcsStatusTimeout {
+			s.setError(fmt.Errorf("BCS ReceiveOne(%q): получен статус %d", spontaneousQueue, status))
+			_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+			return
+		}
+
+		if status == bcsStatusTimeout {
+			if active == nil {
+				time.Sleep(10 * time.Millisecond)
+			}
+			continue
+		}
+
+		// 1. PW05 исключаем из учёта марок
+		if hasField(payload, "PW05") {
+			slog.Debug("Bizerba: получено сервисное сообщение PW05 (пропуск)", "packet", payload)
+			continue
+		}
+
+		// 2. Обрабатываем PV01, PV04, PV05
+		msgType := ""
+		switch {
+		case hasField(payload, "PV01"):
+			msgType = "PV01"
+		case hasField(payload, "PV04"):
+			msgType = "PV04"
+		case hasField(payload, "PV05"):
+			msgType = "PV05"
+		default:
+			continue
+		}
+
+		if active == nil {
+			continue
+		}
+
+		// 3. Извлекаем PW02 (handle)
+		handle, hasHandle := bizerbaFieldValue(payload, "PW02")
+		handle = strings.TrimSpace(handle)
+		if !hasHandle || handle == "" {
+			slog.Warn("Bizerba: сообщение без корректного PW02 пропущено", "type", msgType, "packet", payload)
+			continue
+		}
+
+		// 4. Защита от дублей по PW02 (5 секунд)
+		now := time.Now()
+		if !dedup.shouldProcess(handle, msgType, now) {
+			slog.Debug("Bizerba: повторное сообщение для PW02 в окне 5с пропущено", "handle", handle, "type", msgType)
+			continue
+		}
+
+		// 5. Определение веса
+		weight := ""
+		switch msgType {
+		case "PV01", "PV04":
+			w, err := bizerbaWeight(payload)
+			if err != nil {
+				slog.Warn("Bizerba: сообщение отклонено из-за некорректного/отсутствующего PD00", "type", msgType, "err", err, "packet", payload)
+				delete(dedup.seen, handle)
+				continue
+			}
+			weight = w
+
+		case "PV05":
+			weight = "0"
+		}
+
+		// 6. Запись веса
+		if d.equipment.recordWeight != nil {
+			if err := d.equipment.recordWeight(active.index, active.code, weight); err != nil {
+				slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", err)
+			}
+		}
+
+		// 7. Сдвиг очереди
+		d.mu.Lock()
+		d.lastPrinted = active.index
+		d.mu.Unlock()
+		active = nil
+
+		if err := installNext(); err != nil {
+			s.setError(err)
+			_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+			return
+		}
+
+		if active == nil && len(pending) == 0 {
+			if err := clearMarkFields(); err != nil {
+				slog.Warn("Не удалось очистить поля марки в конце очереди Bizerba", "err", err)
 			}
 		}
 	}
 }
 
-// hasField проверяет наличие поля в пакете протокола Bizerba.
 func hasField(packet, field string) bool {
 	for _, part := range strings.Split(packet, "|") {
 		part = strings.TrimSpace(part)
@@ -639,7 +749,6 @@ func hasField(packet, field string) bool {
 	return false
 }
 
-// bizerbaWeight извлекает PD00 и преобразует представление «KG;степень;целое» в килограммы.
 func bizerbaWeight(packet string) (string, error) {
 	raw, ok := bizerbaFieldValue(packet, "PD00")
 	if !ok || raw == "" {
@@ -666,7 +775,6 @@ func bizerbaWeight(packet string) (string, error) {
 	return weight, nil
 }
 
-// bizerbaFieldValue возвращает значение, следующее за именем поля в пакете Bizerba.
 func bizerbaFieldValue(packet, field string) (string, bool) {
 	parts := strings.Split(packet, "|")
 	for i, part := range parts {
@@ -678,7 +786,6 @@ func bizerbaFieldValue(packet, field string) (string, bool) {
 	return "", false
 }
 
-// formatScaledInteger форматирует целое с десятичной степенью без потери точности.
 func formatScaledInteger(value string, exponent int) (string, error) {
 	negative := strings.HasPrefix(value, "-")
 	digits := strings.TrimPrefix(strings.TrimPrefix(value, "-"), "+")
@@ -700,17 +807,46 @@ func formatScaledInteger(value string, exponent int) (string, error) {
 	return sign + digits[:point] + "." + digits[point:], nil
 }
 
-// PrintBatchIndexed разбирает GS1-коды и добавляет их в очередь активной сессии.
 func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (int, error) {
+	if len(codes) == 0 {
+		return 0, nil
+	}
+
 	marks := make([]queuedMark, 0, len(codes))
+	var activeGTIN string
+
 	for i, code := range codes {
 		parsed, err := marking.ParseAndValidateShortGS1(strings.TrimSpace(code))
 		if err != nil {
 			return 0, fmt.Errorf("некорректная марка с индексом %d в пакете: %w", i, err)
 		}
-		marks = append(marks, queuedMark{index: startIndex + i, code: parsed.ToDBFormat(), serial: parsed.CountryCode + parsed.Serial,
-			crypto: "@1D93" + parsed.CryptoTail})
+
+		if i == 0 {
+			activeGTIN = parsed.GTIN
+		} else if parsed.GTIN != activeGTIN {
+			return 0, fmt.Errorf("в партии обнаружен чужой GTIN на марке #%d: %s (ожидался %s)", i, parsed.GTIN, activeGTIN)
+		}
+
+		marks = append(marks, queuedMark{
+			index:  startIndex + i,
+			code:   parsed.ToDBFormat(),
+			serial: parsed.CountryCode + parsed.Serial,
+			crypto: "@1D93" + parsed.CryptoTail,
+		})
 	}
+
+	gtinReg := strings.ToUpper(strings.TrimSpace(d.equipment.mapping.GTINField))
+	if gtinReg != "" && activeGTIN != "" {
+		d.mu.Lock()
+		if d.prepared != nil {
+			if d.prepared.staticFields == nil {
+				d.prepared.staticFields = make(map[string]string)
+			}
+			d.prepared.staticFields[gtinReg] = activeGTIN
+		}
+		d.mu.Unlock()
+	}
+
 	if err := d.startPreparedSession(); err != nil {
 		return 0, err
 	}
@@ -729,7 +865,6 @@ func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (in
 	return s.request(sessionRequest{kind: "enqueue", marks: marks})
 }
 
-// stopSession закрывает канал E и завершает постоянный COM-сеанс.
 func (d *Driver) stopSession() error {
 	d.mu.RLock()
 	s := d.session
@@ -751,7 +886,6 @@ func (d *Driver) stopSession() error {
 	return err
 }
 
-// Close освобождает ресурсы активной или подготовленной сессии.
 func (d *Driver) Close() error {
 	d.startMu.Lock()
 	defer d.startMu.Unlock()
@@ -772,10 +906,8 @@ func (d *Driver) Close() error {
 	return err
 }
 
-// ClearQueue отменяет подготовленную очередь либо закрывает активную сессию марок.
 func (d *Driver) ClearQueue() error { return d.clearSession() }
 
-// clearSession удаляет отложенную конфигурацию и останавливает активную сессию.
 func (d *Driver) clearSession() error {
 	d.startMu.Lock()
 	defer d.startMu.Unlock()
@@ -786,7 +918,6 @@ func (d *Driver) clearSession() error {
 	return d.stopSession()
 }
 
-// GetBufferFreeSpace запускает подготовленную сессию и возвращает свободное место очереди.
 func (d *Driver) GetBufferFreeSpace() (int, error) {
 	if err := d.startPreparedSession(); err != nil {
 		return 0, err
@@ -803,14 +934,12 @@ func (d *Driver) GetBufferFreeSpace() (int, error) {
 	return s.request(sessionRequest{kind: "free"})
 }
 
-// GetLastPrintedIndex возвращает индекс последней марки, подтверждённой пакетом PV01 или PW05.
 func (d *Driver) GetLastPrintedIndex() (int, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.lastPrinted, nil
 }
 
-// GetTemplates возвращает текущий PLU как доступный шаблон устройства.
 func (d *Driver) GetTemplates() ([]string, error) {
 	plu, err := d.GetCurrentTemplate()
 	if err != nil {
@@ -819,36 +948,18 @@ func (d *Driver) GetTemplates() ([]string, error) {
 	return []string{plu}, nil
 }
 
-// GetTemplateFields возвращает поля, поддерживаемые драйвером Bizerba.
 func (d *Driver) GetTemplateFields(string) ([]string, error) {
 	return []string{"date", "brigade", "DATAMATRIX"}, nil
 }
 
-// GetRemainingRibbon возвращает заглушку: BCS-драйвер пока не читает остаток ленты.
 func (d *Driver) GetRemainingRibbon() (string, error) { return "N/A", nil }
 
-// GetQueueCapacity возвращает заглушку: физическая ёмкость очереди устройством не сообщается.
 func (d *Driver) GetQueueCapacity(string) (string, error) { return "0", nil }
 
-// GetPrintSpeed возвращает заглушку: скорость печати через BCS пока не читается.
 func (d *Driver) GetPrintSpeed() (string, error) { return "N/A", nil }
 
-// GetCurrentPrintCount возвращает заглушку: количество определяется по пакетам PV01/PW05.
 func (d *Driver) GetCurrentPrintCount() (string, error) { return "N/A", nil }
 
-// firstField ищет первое непустое значение по одному из допустимых имён поля.
-func firstField(fields map[string]string, names ...string) string {
-	for key, value := range fields {
-		for _, name := range names {
-			if strings.EqualFold(strings.TrimSpace(key), name) {
-				return strings.TrimSpace(value)
-			}
-		}
-	}
-	return ""
-}
-
-// normalizeBizerbaDate преобразует поддерживаемые представления даты в формат ddMMyy.
 func normalizeBizerbaDate(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if len(value) == 6 {
@@ -864,7 +975,6 @@ func normalizeBizerbaDate(value string) (string, error) {
 	return "", fmt.Errorf("неподдерживаемый формат даты Bizerba %q; ожидается ddMMyy, dd.MM.yyyy или yyyy-MM-dd", value)
 }
 
-// cloneFields создаёт независимую копию набора статических полей.
 func cloneFields(fields map[string]string) map[string]string {
 	result := make(map[string]string, len(fields))
 	for key, value := range fields {
@@ -873,8 +983,6 @@ func cloneFields(fields map[string]string) map[string]string {
 	return result
 }
 
-// GetTotalPrints удовлетворяет контракту core.Printer для снятия показаний одометра.
-// Для Bizerba возвращает индекс последней подтверждённой марки либо 0.
 func (d *Driver) GetTotalPrints() (int64, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
