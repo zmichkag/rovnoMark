@@ -14,6 +14,12 @@ import (
 	"rovnoMark/internal/storage"
 )
 
+func sendJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 func setupTestEnvironment(t *testing.T) (*storage.Store, *core.TaskProcessor, int, int64, func()) {
 	dbFile := "test_rovnoMark.db"
 	store := storage.New(dbFile)
@@ -48,9 +54,8 @@ func setupTestEnvironment(t *testing.T) (*storage.Store, *core.TaskProcessor, in
 	}
 
 	cleanup := func() {
-		os.Remove(dbFile)
-		os.Remove(dbFile + "-wal")
-		os.Remove(dbFile + "-shm")
+		_ = store.Close()
+		_ = os.RemoveAll(dbFile)
 	}
 
 	return store, taskProcessor, lineID, taskID, cleanup
