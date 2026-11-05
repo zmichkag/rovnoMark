@@ -94,13 +94,13 @@ func newPW02Deduplicator() *pw02Deduplicator {
 // shouldProcess проверяет PW02. Если уже видели за 5 секунд — возвращает false.
 func (d *pw02Deduplicator) shouldProcess(handle, msgType string, now time.Time) bool {
 	for k, v := range d.seen {
-		if now.Sub(v.timestamp) > d.ttl {
+		if now.Sub(v.timestamp) >= d.ttl {
 			delete(d.seen, k)
 		}
 	}
 
 	if entry, ok := d.seen[handle]; ok {
-		if now.Sub(entry.timestamp) <= d.ttl {
+		if now.Sub(entry.timestamp) < d.ttl {
 			return false
 		}
 	}
@@ -716,6 +716,10 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 		if d.equipment.recordWeight != nil {
 			if err := d.equipment.recordWeight(active.index, active.code, weight); err != nil {
 				slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", err)
+				// Не считаем сообщение обработанным: текущая марка остаётся
+				// активной, а повтор с тем же PW02 сможет сохранить её ещё раз.
+				delete(dedup.seen, handle)
+				continue
 			}
 		}
 

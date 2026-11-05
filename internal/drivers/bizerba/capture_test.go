@@ -53,24 +53,15 @@ func TestCaptureStartsOnlyForJobStopsAndRestartsForNewJob(t *testing.T) {
 	}
 	fake.spontaneous <- "A!PW05|1"
 	expectResponse(t, responses, "A!PW05|1")
-	deadline := time.Now().Add(time.Second)
-	for {
-		last, _ := d.GetLastPrintedIndex()
-		if last == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("PW05 last printed index = %d, want 1", last)
-		}
-		time.Sleep(time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
+	last, _ := d.GetLastPrintedIndex()
+	if last != -1 {
+		t.Fatalf("PW05 last printed index = %d, want -1", last)
 	}
 	select {
 	case got := <-recorded:
-		if got.mark != "0104620031245728215?NFCZ<GS>93SwuV" || got.weight != "0" {
-			t.Fatalf("PW05 recorded value = %#v", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("PW05 did not record the printed mark")
+		t.Fatalf("PW05 unexpectedly recorded value %#v", got)
+	case <-time.After(30 * time.Millisecond):
 	}
 	opensAfter, _, _ := fake.snapshot()
 	if !reflect.DeepEqual(opensBefore, opensAfter) {

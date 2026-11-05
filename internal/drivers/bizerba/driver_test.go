@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -172,7 +173,7 @@ func TestMarkSessionOpensEAdvancesOnPV01AndClosesE(t *testing.T) {
 	}
 	waitForSend(t, fake, fakeSend{"A!GT03", "5?NFCZ"})
 	waitForSend(t, fake, fakeSend{"A!GT04", "@1D93SwuV"})
-	fake.spontaneous <- "A!PV01|PW02|6|PW00|0|GW09|2|GL16|0|PD00|KG;-3;200|LX02"
+	fake.spontaneous <- "A!PV01|PW02|7|PW00|0|GW09|2|GL16|0|PD00|KG;-3;200|LX02"
 	waitForSend(t, fake, fakeSend{"A!GT03", "5ABCDE"})
 	waitForSend(t, fake, fakeSend{"A!GT04", "@1D931234"})
 	first := <-recorded
@@ -227,6 +228,217 @@ func TestBizerbaWeight(t *testing.T) {
 			t.Fatalf("bizerbaWeight(%q) = %q, %v; want %q", test.packet, got, err, test.want)
 		}
 	}
+}
+
+func TestPW02DeduplicatorWindow(t *testing.T) {
+	dedup := newPW02Deduplicator()
+	start := time.Unix(100, 0)
+
+	if !dedup.shouldProcess("5", "PV01", start) {
+		t.Fatal("first message was rejected")
+	}
+	if dedup.shouldProcess("5", "PV04", start.Add(5*time.Second-time.Nanosecond)) {
+		t.Fatal("paired message inside the five-second window was accepted")
+	}
+	if !dedup.shouldProcess("5", "PV05", start.Add(5*time.Second)) {
+		t.Fatal("handle was not reusable after five seconds")
+	}
+	if dedup.seen["5"].msgType != "PV05" {
+		t.Fatalf("stored message type = %q, want PV05", dedup.seen["5"].msgType)
+	}
+	dedup.reset()
+	if len(dedup.seen) != 0 {
+		t.Fatal("reset did not clear deduplication history")
+	}
+}
+
+func TestMarkSessionMessageRules(t *testing.T) {
+	tests := []struct {
+		name        string
+		packets     []string
+		wantWeights []string
+	}{
+		{name: "PV01", packets: []string{"A!PV01|PW02|1|PD00|KG;-3;200|LX02"}, wantWeights: []string{"0.200"}},
+		{name: "PV04", packets: []string{"A!PV04|PW02|2|PD00|KG;-3;300|LX02"}, wantWeights: []string{"0.300"}},
+		{name: "PV05", packets: []string{"A!PV05|PW02|3|LX02"}, wantWeights: []string{"0"}},
+		{
+			name: "PV01 then PV04",
+			packets: []string{
+				"A!PV01|PW02|4|PD00|KG;-3;400|LX02",
+				"A!PV04|PW02|4|PD00|KG;-3;999|LX02",
+			},
+			wantWeights: []string{"0.400"},
+		},
+		{
+			name: "PV04 then PV01",
+			packets: []string{
+				"A!PV04|PW02|5|PD00|KG;-3;500|LX02",
+				"A!PV01|PW02|5|PD00|KG;-3;999|LX02",
+			},
+			wantWeights: []string{"0.500"},
+		},
+		{
+			name: "PV01 then PV05",
+			packets: []string{
+				"A!PV01|PW02|6|PD00|KG;-3;600|LX02",
+				"A!PV05|PW02|6|LX02",
+			},
+			wantWeights: []string{"0.600"},
+		},
+		{
+			name: "same type duplicate",
+			packets: []string{
+				"A!PV05|PW02|7|LX02",
+				"A!PV05|PW02|7|LX02",
+			},
+			wantWeights: []string{"0"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake, driver, recorded := newMessageRuleSession(t, 2, nil)
+			for _, packet := range test.packets {
+				fake.spontaneous <- packet
+			}
+			for _, want := range test.wantWeights {
+				got := receiveRecordedWeight(t, recorded)
+				if got != want {
+					t.Fatalf("recorded weight = %q, want %q", got, want)
+				}
+			}
+			assertNoRecordedWeight(t, recorded)
+			waitForLastPrinted(t, driver, len(test.wantWeights))
+		})
+	}
+}
+
+func TestMarkSessionRejectsInvalidMessagesWithoutAdvancing(t *testing.T) {
+	tests := []struct {
+		name   string
+		packet string
+	}{
+		{name: "missing PD00", packet: "A!PV01|PW02|10|LX02"},
+		{name: "invalid PD00", packet: "A!PV04|PW02|10|PD00|broken|LX02"},
+		{name: "missing PW02", packet: "A!PV05|LX02"},
+		{name: "empty PW02", packet: "A!PV05|PW02||LX02"},
+		{name: "PW05", packet: "A!PW05|10"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake, driver, recorded := newMessageRuleSession(t, 1, nil)
+			fake.spontaneous <- test.packet
+			assertNoRecordedWeight(t, recorded)
+			last, err := driver.GetLastPrintedIndex()
+			if err != nil || last != -1 {
+				t.Fatalf("last printed index = %d, %v; want -1", last, err)
+			}
+		})
+	}
+}
+
+func TestInvalidPD00DoesNotReserveHandle(t *testing.T) {
+	fake, driver, recorded := newMessageRuleSession(t, 1, nil)
+	fake.spontaneous <- "A!PV01|PW02|11|PD00|broken|LX02"
+	assertNoRecordedWeight(t, recorded)
+	fake.spontaneous <- "A!PV04|PW02|11|PD00|KG;-3;110|LX02"
+	if got := receiveRecordedWeight(t, recorded); got != "0.110" {
+		t.Fatalf("recorded weight = %q, want 0.110", got)
+	}
+	waitForLastPrinted(t, driver, 1)
+}
+
+func TestRecordWeightFailureKeepsCurrentMarkAndAllowsRetry(t *testing.T) {
+	var attempts atomic.Int32
+	successful := make(chan string, 1)
+	fake, driver, _ := newMessageRuleSession(t, 1, func(weight string) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("storage unavailable")
+		}
+		successful <- weight
+		return nil
+	})
+
+	fake.spontaneous <- "A!PV01|PW02|12|PD00|KG;-3;120|LX02"
+	deadline := time.Now().Add(time.Second)
+	for attempts.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("record attempts = %d, want 1", got)
+	}
+	last, _ := driver.GetLastPrintedIndex()
+	if last != -1 {
+		t.Fatalf("failed write advanced queue to %d", last)
+	}
+
+	fake.spontaneous <- "A!PV01|PW02|12|PD00|KG;-3;120|LX02"
+	if got := receiveRecordedWeight(t, successful); got != "0.120" {
+		t.Fatalf("recorded weight = %q, want 0.120", got)
+	}
+	waitForLastPrinted(t, driver, 1)
+}
+
+func newMessageRuleSession(t *testing.T, markCount int, recordOverride func(string) error) (*fakeConnection, *Driver, chan string) {
+	t.Helper()
+	fake := newFakeConnection()
+	recorded := make(chan string, markCount+2)
+	record := func(_ int, _ string, weight string) error {
+		if recordOverride != nil {
+			return recordOverride(weight)
+		}
+		recorded <- weight
+		return nil
+	}
+	driver := newDriverWithProfile("GLPMax", func() (bcsConnection, error) { return fake, nil }, Profile{RecordWeight: record})
+	if err := driver.InitSession("DATAMATRIX", markCount, nil); err != nil {
+		t.Fatal(err)
+	}
+	allCodes := []string{
+		"0104620031245728215?NFCZ<GS>93SwuV",
+		"0104620031245728215ABCDE<GS>931234",
+	}
+	loaded, err := driver.PrintBatchIndexed("DATAMATRIX", 1, allCodes[:markCount])
+	if err != nil || loaded != markCount {
+		t.Fatalf("PrintBatchIndexed() = %d, %v", loaded, err)
+	}
+	t.Cleanup(func() { _ = driver.ClearQueue() })
+	return fake, driver, recorded
+}
+
+func receiveRecordedWeight(t *testing.T, recorded <-chan string) string {
+	t.Helper()
+	select {
+	case weight := <-recorded:
+		return weight
+	case <-time.After(time.Second):
+		t.Fatal("weight was not recorded")
+		return ""
+	}
+}
+
+func assertNoRecordedWeight(t *testing.T, recorded <-chan string) {
+	t.Helper()
+	select {
+	case weight := <-recorded:
+		t.Fatalf("unexpected recorded weight %q", weight)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func waitForLastPrinted(t *testing.T, driver *Driver, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		last, err := driver.GetLastPrintedIndex()
+		if err == nil && last == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	last, err := driver.GetLastPrintedIndex()
+	t.Fatalf("last printed index = %d, %v; want %d", last, err, want)
 }
 
 func waitForSend(t *testing.T, fake *fakeConnection, want fakeSend) {
