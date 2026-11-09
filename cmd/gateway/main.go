@@ -138,6 +138,8 @@ func runApp(ctx context.Context, port int, dataDir string, mode storage.StorageM
 			manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 		case "valentine_nice":
 			manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
+		case "valentine_native":
+			manager.AddPrinter(cfg, valentine.NewNativeDriver(cfg.IP, cfg.Port))
 		case "markem":
 			manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 		case "markem_async":
