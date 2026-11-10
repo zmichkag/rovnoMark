@@ -109,13 +109,13 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	if err := d.writeRawCmdNoLock(cmdFMB, "FMB"); err != nil {
 		return fmt.Errorf("сбой FMB: %w", err)
 	}
-	time.Sleep(35 * time.Millisecond)
+	time.Sleep(10 * time.Second)
 
 	// ШАГ 2: Перевод диспенсера в Режим 1 (строго после вызова макета, как в ручном тесте)
 	if err := d.writeRawCmdNoLock("FCDC--r1-------", "FCDC 1"); err != nil {
 		return fmt.Errorf("сбой установки FCDC 1: %w", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(10 * time.Second)
 
 	// ШАГ 2: Дата производства строго в поле 18
 	if dateProd != "" {
