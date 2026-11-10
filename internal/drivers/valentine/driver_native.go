@@ -50,13 +50,13 @@ func (d *NativeDriver) InitSession(fieldName string, maxQueue int, staticFields 
 		d.conn = conn
 	}
 
-	// 1. Отключаем асинхронный спам TD"
-	_ = d.writeRawCmdNoLock("CTE---r0-------")
-	time.Sleep(20 * time.Millisecond)
-
-	// 2. Включаем Режим 1: внешний статический диспенсер
-	_ = d.writeRawCmdNoLock("FCDC--r1-------")
-	time.Sleep(20 * time.Millisecond)
+	//// 1. Отключаем асинхронный спам TD"
+	//_ = d.writeRawCmdNoLock("CTE---r0-------")
+	//time.Sleep(20 * time.Millisecond)
+	//
+	//// 2. Включаем Режим 1: внешний статический диспенсер
+	//_ = d.writeRawCmdNoLock("FCDC--r1-------")
+	//time.Sleep(20 * time.Millisecond)
 
 	d.totalSent = 0
 
