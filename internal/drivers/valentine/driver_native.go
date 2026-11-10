@@ -11,24 +11,20 @@ import (
 	"time"
 )
 
-var fbbcRegex = regexp.MustCompile(`A(\d+)`)
-
-const (
-	// Жесткий размер буфера FIFO в RAM принтера для Режима 1
-	fifoBufferSize = 10
-)
+var fbbcNativeRegex = regexp.MustCompile(`A(\d+)`)
 
 type NativeDriver struct {
-	Address     string
-	Port        int
-	Timeout     time.Duration
-	conn        net.Conn
-	mu          sync.Mutex
-	curTemplate string
+	ID          int           // ID принтера
+	Address     string        // IP-адрес принтера
+	Port        int           // Порт CVPL (9100)
+	Timeout     time.Duration // Сетевой таймаут сокета
+	conn        net.Conn      // Активная TCP-сессия
+	mu          sync.Mutex    // Мьютекс сокета
+	curTemplate string        // Активный выбранный макет
 
-	totalSent    int // Сколько всего кодов улетело в FBC
-	totalPrinted int // Сколько этикеток реально сошло с ножа
-	lastRawFBBC  int // Сырое значение одометра FBBC
+	totalSent    int // Сквозной счетчик отправленных заданий
+	totalPrinted int // Физический одометр (нарастающий итог)
+	lastRawFBBC  int // Последнее значение аппаратного регистра FBBC
 }
 
 func NewNativeDriver(ip string, port int) *NativeDriver {
@@ -36,74 +32,131 @@ func NewNativeDriver(ip string, port int) *NativeDriver {
 		port = 9100
 	}
 	return &NativeDriver{
-		Address: ip,
-		Port:    port,
-		Timeout: 3 * time.Second,
+		Address:      ip,
+		Port:         port,
+		Timeout:      3 * time.Second,
+		conn:         nil,
+		curTemplate:  "",
+		totalSent:    0,
+		totalPrinted: 0,
+		lastRawFBBC:  0,
 	}
 }
 
+// InitSession поднимает сокет, глушит спам дисплея и переводит тракт в Режим 1
 func (d *NativeDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.reconnectNoLock(); err != nil {
-		return err
+	if d.conn == nil {
+		addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
+		conn, err := net.DialTimeout("tcp", addr, d.Timeout)
+		if err != nil {
+			return fmt.Errorf("native init: ошибка подключения к %s: %w", addr, err)
+		}
+		d.optimizeSocket(conn)
+		d.conn = conn
 	}
 
-	// Отключаем спам дисплея и включаем Режим 1
-	_ = d.writeCmdNoLock("CTE---r0-------")
-	_ = d.writeCmdNoLock("FCDC--r1-------")
+	// 1. Отключаем асинхронный спам строк TD" в сокет
+	_ = d.writeRawCmdNoLock("CTE---r0-------")
+	time.Sleep(20 * time.Millisecond)
+
+	// 2. Включаем Режим 1: внешний статический диспенсер
+	_ = d.writeRawCmdNoLock("FCDC--r1-------")
+	time.Sleep(20 * time.Millisecond)
 
 	d.totalSent = 0
 	d.totalPrinted = 0
 	d.lastRawFBBC = 0
 
-	slog.Info("VALENTIN-NATIVE: Инициализация выполнена (Mode 1, CTE 0)", "addr", d.Address)
+	slog.Info("VALENTIN-NATIVE: Сессия инициализирована (FCDC 1, CTE 0)", "addr", d.Address)
 	return nil
 }
 
+// SelectTemplate повторяет логику NiceLabel: строгая фильтрация полей без лишнего мусора
 func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.curTemplate = template
-	if err := d.reconnectNoLock(); err != nil {
-		return err
+	if template != "" {
+		d.curTemplate = template
+	} else if d.curTemplate == "" {
+		return fmt.Errorf("native select: передан пустой код макета (PLU)")
 	}
 
-	if err := d.writeCmdNoLock(fmt.Sprintf("FMB---r%s", d.curTemplate)); err != nil {
-		return err
+	if d.conn == nil {
+		if err := d.reconnectNoLock(); err != nil {
+			return fmt.Errorf("native select: ошибка реконнекта: %w", err)
+		}
 	}
-	time.Sleep(30 * time.Millisecond)
 
-	// Статика (BM18, BM19, BM21)
-	if v := staticFields["date01"]; v != "" {
-		_ = d.writeCmdNoLock(fmt.Sprintf("BM[18]%s", v))
+	// Вытягиваем только строго разрешенные поля (как в driver_nicelabel)
+	dateProd := staticFields["date01"]
+	dateExp := staticFields["date02"]
+	text01 := staticFields["text01"]
+
+	if strings.TrimSpace(dateProd) == "" {
+		dateProd = staticFields["18"]
 	}
-	if v := staticFields["date02"]; v != "" {
-		_ = d.writeCmdNoLock(fmt.Sprintf("BM[19]%s", v))
+	if strings.TrimSpace(dateExp) == "" {
+		dateExp = staticFields["19"]
 	}
-	if v := staticFields["text01"]; v != "" {
-		_ = d.writeCmdNoLock(fmt.Sprintf("BM[21]%s", v))
+	if strings.TrimSpace(text01) == "" {
+		text01 = staticFields["21"]
 	}
+
+	slog.Info("VALENTIN-NATIVE: Покомандная загрузка макета и статики",
+		"template", d.curTemplate,
+		"date_prod", dateProd,
+		"date_exp", dateExp,
+		"text01", text01,
+	)
+
+	// ШАГ 1: Загрузка макета из Flash (FMB)
+	cmdFMB := fmt.Sprintf("FMB---r%s", d.curTemplate)
+	if err := d.writeRawCmdNoLock(cmdFMB); err != nil {
+		return fmt.Errorf("сбой отправки FMB: %w", err)
+	}
+	time.Sleep(35 * time.Millisecond) // Пауза на переключение буфера в RAM
+
+	// ШАГ 2: Запись даты производства строго в поле 18 (BM[18])
+	if dateProd != "" {
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[18]%s", dateProd)); err != nil {
+			return fmt.Errorf("сбой отправки BM[18]: %w", err)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// ШАГ 3: Запись даты годности строго в поле 19 (BM[19])
+	if dateExp != "" {
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[19]%s", dateExp)); err != nil {
+			return fmt.Errorf("сбой отправки BM[19]: %w", err)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// ШАГ 4: Запись текста строго в поле 21 (BM[21])
+	if text01 != "" {
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[21]%s", text01)); err != nil {
+			return fmt.Errorf("сбой отправки BM[21]: %w", err)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// ШАГ 5: Первичный взвод ожидания датчика
+	if err := d.writeRawCmdNoLock("FBC---r--------"); err != nil {
+		return fmt.Errorf("сбой отправки FBC: %w", err)
+	}
+
+	d.totalSent = 0
+	d.totalPrinted = 0
+	d.lastRawFBBC = 0
 
 	return nil
 }
 
-// GetBufferFreeSpace отдаёт ядру размер доступного слота под пачку
-func (d *NativeDriver) GetBufferFreeSpace() (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	inFlight := d.totalSent - d.totalPrinted
-	free := fifoBufferSize - inFlight
-	if free <= 0 {
-		return 0, nil
-	}
-	return free, nil
-}
-
-// PrintBatchIndexed принимает пачку от pumperRoutine и шлёт в сокет
+// PrintBatchIndexed строго использует поле [20], игнорируя посторонние имена из ядра
 func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -112,39 +165,46 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.reconnectNoLock(); err != nil {
-		return 0, err
-	}
-
-	// Защита от кривых имен из 1С:
-	// Если передано пустое, "dm_data0" или "0" — жестко используем штатное поле 20 макета ЧЗ
-	targetField := "20"
-	if fieldName != "" && fieldName != "dm_data0" && fieldName != "0" {
-		targetField = fieldName
+	if d.conn == nil {
+		if err := d.reconnectNoLock(); err != nil {
+			return 0, fmt.Errorf("native print: ошибка сокета: %w", err)
+		}
 	}
 
 	sent := 0
-	for _, raw := range codes {
-		clean := d.normalizeDM(raw)
+	for _, rawCode := range codes {
+		cleanCode := rawCode
 
-		// 1. Загрузка данных матрицы в поле
-		cmdBM := fmt.Sprintf("BM[%s]%s", targetField, clean)
-		if err := d.writeCmdNoLock(cmdBM); err != nil {
-			return sent, fmt.Errorf("ошибка BM[%s]: %w", targetField, err)
+		// 1. Отрезаем метаданные 1С (после '|')
+		if idx := strings.Index(cleanCode, "|"); idx != -1 {
+			cleanCode = cleanCode[:idx]
 		}
 
-		// Обязательная технологическая пауза на растеризацию 2D-кода в RAM
+		// 2. Преобразуем <GS> в байт 0x1D и добавляем префикс ~1 для FNC1
+		cleanCode = strings.ReplaceAll(cleanCode, "<GS>", "\x1d")
+		if !strings.HasPrefix(cleanCode, "~1") {
+			cleanCode = "~1" + cleanCode
+		}
+		cleanCode = strings.TrimSpace(cleanCode)
+
+		// 3. СТРОГО ПОЛЕ [20] (никаких dm_data0 и других алиасов!)
+		cmdBM20 := fmt.Sprintf("BM[20]%s", cleanCode)
+		if err := d.writeRawCmdNoLock(cmdBM20); err != nil {
+			return sent, fmt.Errorf("сбой отправки BM[20]: %w", err)
+		}
+
+		// 🛑 Обязательная технологическая пауза 15мс на растеризацию 2D-кода в RAM
 		time.Sleep(15 * time.Millisecond)
 
-		// 2. Тираж строго 1 копия
-		if err := d.writeCmdNoLock("FBBA--r00001---"); err != nil {
-			return sent, fmt.Errorf("ошибка FBBA: %w", err)
+		// 4. ТИРАЖ: строго 1 оттиск
+		if err := d.writeRawCmdNoLock("FBBA--r00001---"); err != nil {
+			return sent, fmt.Errorf("сбой отправки FBBA: %w", err)
 		}
 		time.Sleep(5 * time.Millisecond)
 
-		// 3. Взвод триггера под нож диспенсера
-		if err := d.writeCmdNoLock("FBC---r--------"); err != nil {
-			return sent, fmt.Errorf("ошибка FBC: %w", err)
+		// 5. ВЗВОД ТРИГГЕРА ПОД ДАТЧИК
+		if err := d.writeRawCmdNoLock("FBC---r--------"); err != nil {
+			return sent, fmt.Errorf("сбой отправки FBC: %w", err)
 		}
 		time.Sleep(10 * time.Millisecond)
 
@@ -152,29 +212,24 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 		sent++
 	}
 
-	slog.Info("VALENTIN-NATIVE: Пачка кодов налита в очередь",
-		"target_field", targetField,
-		"batch_size", sent,
-		"total_sent", d.totalSent,
-		"in_flight", d.totalSent-d.totalPrinted,
-	)
-
 	return sent, nil
 }
 
-// GetCurrentPrintCount опрашивается тикером pumperRoutine для фиксации прогресса
+// GetCurrentPrintCount опрашивает FBBC с коротким дедлайном и фильтрацией TD"
 func (d *NativeDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if d.conn == nil {
 		if err := d.reconnectNoLock(); err != nil {
-			return strconv.Itoa(d.totalPrinted), err
+			return strconv.Itoa(d.totalPrinted), fmt.Errorf("сокет закрыт: %w", err)
 		}
 	}
 
+	// Короткий дедлайн для исключения блокировки тикера
 	_ = d.conn.SetDeadline(time.Now().Add(45 * time.Millisecond))
 	query := fmt.Sprintf("%cFBBC--w        %c", SOH, ETB)
+
 	if _, err := d.conn.Write([]byte(query)); err != nil {
 		d.closeConnNoLock()
 		return strconv.Itoa(d.totalPrinted), err
@@ -183,64 +238,83 @@ func (d *NativeDriver) GetCurrentPrintCount() (string, error) {
 	buf := make([]byte, 128)
 	n, err := d.conn.Read(buf)
 	if err != nil {
+		// При таймауте возвращаем текущее накопленное значение
 		return strconv.Itoa(d.totalPrinted), nil
 	}
 
-	resp := string(buf[:n])
-	if strings.Contains(resp, "TD\"") && !strings.Contains(resp, "A") {
+	rawResponse := string(buf[:n])
+	if strings.Contains(rawResponse, "TD\"") || !strings.Contains(rawResponse, "A") {
 		return strconv.Itoa(d.totalPrinted), nil
 	}
 
-	if match := fbbcRegex.FindStringSubmatch(resp); len(match) > 1 {
-		val, _ := strconv.Atoi(match[1])
-		if val > d.lastRawFBBC {
-			d.totalPrinted += (val - d.lastRawFBBC)
-		} else if val < d.lastRawFBBC && val > 0 {
-			// При занулении одометра новым кадром
-			d.totalPrinted += val
+	cleanResp := strings.Trim(rawResponse, string([]byte{SOH, byte(ETB), '\r', '\n', ' '}))
+	aIdx := strings.Index(cleanResp, "A")
+	if aIdx == -1 {
+		return strconv.Itoa(d.totalPrinted), nil
+	}
+
+	numStr := ""
+	for _, char := range cleanResp[aIdx+1:] {
+		if char >= '0' && char <= '9' {
+			numStr += string(char)
+		} else {
+			break
 		}
-		d.lastRawFBBC = val
+	}
+
+	if numStr == "" {
+		return strconv.Itoa(d.totalPrinted), nil
+	}
+
+	rawCount, _ := strconv.Atoi(numStr)
+
+	// Защита и учет дельты
+	if rawCount > d.lastRawFBBC {
+		delta := rawCount - d.lastRawFBBC
+		if delta < 10 {
+			d.totalPrinted += delta
+		}
+		d.lastRawFBBC = rawCount
+	} else if rawCount < d.lastRawFBBC && rawCount > 0 {
+		// Сброс одометра прошивкой при обновлении поля
+		d.totalPrinted += rawCount
+		d.lastRawFBBC = rawCount
 	}
 
 	return strconv.Itoa(d.totalPrinted), nil
 }
 
-func (d *NativeDriver) writeCmdNoLock(cmd string) error {
+// GetBufferFreeSpace сообщает ядру о готовности принять следующую этикетку
+func (d *NativeDriver) GetBufferFreeSpace() (int, error) {
+	// Как и в NiceLabelDriver, отдаем 1, чтобы пампер ядра работал в своем штатном ритме
+	return 1, nil
+}
+
+func (d *NativeDriver) writeRawCmdNoLock(cmd string) error {
 	frame := []byte(fmt.Sprintf("%c%s%c", SOH, cmd, ETB))
 	_ = d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
 	if _, err := d.conn.Write(frame); err != nil {
 		d.closeConnNoLock()
 		return err
 	}
-	time.Sleep(15 * time.Millisecond)
 	return nil
 }
 
-func (d *NativeDriver) normalizeDM(raw string) string {
-	code := raw
-	if idx := strings.Index(code, "|"); idx != -1 {
-		code = code[:idx]
+func (d *NativeDriver) optimizeSocket(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(5 * time.Second)
 	}
-	code = strings.ReplaceAll(code, "<GS>", "\x1d")
-	if !strings.HasPrefix(code, "~1") {
-		code = "~1" + code
-	}
-	return strings.TrimSpace(code)
 }
 
 func (d *NativeDriver) reconnectNoLock() error {
-	if d.conn != nil {
-		return nil
-	}
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
 		return err
 	}
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.SetNoDelay(true)
-		_ = tcp.SetKeepAlive(true)
-	}
+	d.optimizeSocket(conn)
 	d.conn = conn
 	return nil
 }
@@ -262,25 +336,27 @@ func (d *NativeDriver) Close() error {
 func (d *NativeDriver) ClearQueue() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_ = d.writeCmdNoLock("FD----r0-------")
-	_ = d.writeCmdNoLock("FGA---r--------")
+	_ = d.writeRawCmdNoLock("FD----r0-------")
+	_ = d.writeRawCmdNoLock("FGA---r--------")
 	d.totalSent = 0
 	d.totalPrinted = 0
 	d.lastRawFBBC = 0
 	return nil
 }
 
-// Заглушки под интерфейс core.Printer
+// Реализация контракта core.Printer
 func (d *NativeDriver) GetStatus() (string, error)                        { return "ГОТОВ", nil }
 func (d *NativeDriver) GetLastPrintedIndex() (int, error)                 { return d.totalPrinted, nil }
 func (d *NativeDriver) GetTotalPrints() (int64, error)                    { return int64(d.totalPrinted), nil }
 func (d *NativeDriver) UpdateStaticFields(f map[string]string) error      { return nil }
 func (d *NativeDriver) PrintTemplate(t string, f map[string]string) error { return nil }
 func (d *NativeDriver) GetTemplates() ([]string, error)                   { return []string{d.curTemplate}, nil }
-func (d *NativeDriver) GetTemplateFields(t string) ([]string, error)      { return []string{"20"}, nil }
-func (d *NativeDriver) GetRemainingRibbon() (string, error)               { return "N/A", nil }
-func (d *NativeDriver) GetQueueCapacity(q string) (string, error)         { return "N/A", nil }
-func (d *NativeDriver) GetPrintSpeed() (string, error)                    { return "N/A", nil }
-func (d *NativeDriver) GetCurrentTemplate() (string, error)               { return d.curTemplate, nil }
-func (d *NativeDriver) SetDispenserMode(mode int) error                   { return nil }
-func (d *NativeDriver) SetPause(pause bool) error                         { return nil }
+func (d *NativeDriver) GetTemplateFields(t string) ([]string, error) {
+	return []string{"18", "19", "20", "21"}, nil
+}
+func (d *NativeDriver) GetRemainingRibbon() (string, error)       { return "N/A", nil }
+func (d *NativeDriver) GetQueueCapacity(q string) (string, error) { return "N/A", nil }
+func (d *NativeDriver) GetPrintSpeed() (string, error)            { return "N/A", nil }
+func (d *NativeDriver) GetCurrentTemplate() (string, error)       { return d.curTemplate, nil }
+func (d *NativeDriver) SetDispenserMode(mode int) error           { return nil }
+func (d *NativeDriver) SetPause(pause bool) error                 { return nil }
