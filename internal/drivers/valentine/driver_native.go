@@ -116,8 +116,10 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 		return 0, err
 	}
 
+	// Защита от кривых имен из 1С:
+	// Если передано пустое, "dm_data0" или "0" — жестко используем штатное поле 20 макета ЧЗ
 	targetField := "20"
-	if fieldName != "" {
+	if fieldName != "" && fieldName != "dm_data0" && fieldName != "0" {
 		targetField = fieldName
 	}
 
@@ -125,13 +127,37 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 	for _, raw := range codes {
 		clean := d.normalizeDM(raw)
 
-		_ = d.writeCmdNoLock(fmt.Sprintf("BM[%s]%s", targetField, clean))
-		_ = d.writeCmdNoLock("FBBA--r00001---")
-		_ = d.writeCmdNoLock("FBC---r--------")
+		// 1. Загрузка данных матрицы в поле
+		cmdBM := fmt.Sprintf("BM[%s]%s", targetField, clean)
+		if err := d.writeCmdNoLock(cmdBM); err != nil {
+			return sent, fmt.Errorf("ошибка BM[%s]: %w", targetField, err)
+		}
+
+		// Обязательная технологическая пауза на растеризацию 2D-кода в RAM
+		time.Sleep(15 * time.Millisecond)
+
+		// 2. Тираж строго 1 копия
+		if err := d.writeCmdNoLock("FBBA--r00001---"); err != nil {
+			return sent, fmt.Errorf("ошибка FBBA: %w", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+
+		// 3. Взвод триггера под нож диспенсера
+		if err := d.writeCmdNoLock("FBC---r--------"); err != nil {
+			return sent, fmt.Errorf("ошибка FBC: %w", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 
 		d.totalSent++
 		sent++
 	}
+
+	slog.Info("VALENTIN-NATIVE: Пачка кодов налита в очередь",
+		"target_field", targetField,
+		"batch_size", sent,
+		"total_sent", d.totalSent,
+		"in_flight", d.totalSent-d.totalPrinted,
+	)
 
 	return sent, nil
 }
