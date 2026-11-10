@@ -104,15 +104,15 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 		"text01", text01,
 	)
 
-	// ШАГ 1: Загрузка макета из Flash (FMB) — макет накатывает свои дефолты
+	// ШАГ 1: Загрузка макета из Flash (FMB)
 	cmdFMB := fmt.Sprintf("FMB---r%s", d.curTemplate)
-	if err := d.writeRawCmdNoLock(cmdFMB, "Select Layout FMB"); err != nil {
+	if err := d.writeRawCmdNoLock(cmdFMB, "FMB"); err != nil {
 		return fmt.Errorf("сбой FMB: %w", err)
 	}
 	time.Sleep(35 * time.Millisecond)
 
-	// ШАГ 5: ВОТ ОНО! Переопределяем режим диспенсера ПОСЛЕ полей и макета:
-	if err := d.writeRawCmdNoLock("FCDC--r1-------", "Set Mode 1 after Layout"); err != nil {
+	// ШАГ 2: Перевод диспенсера в Режим 1 (строго после вызова макета, как в ручном тесте)
+	if err := d.writeRawCmdNoLock("FCDC--r1-------", "FCDC 1"); err != nil {
 		return fmt.Errorf("сбой установки FCDC 1: %w", err)
 	}
 	time.Sleep(20 * time.Millisecond)
