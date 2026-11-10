@@ -111,6 +111,12 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	}
 	time.Sleep(35 * time.Millisecond)
 
+	// ШАГ 5: ВОТ ОНО! Переопределяем режим диспенсера ПОСЛЕ полей и макета:
+	if err := d.writeRawCmdNoLock("FCDC--r1-------", "Set Mode 1 after Layout"); err != nil {
+		return fmt.Errorf("сбой установки FCDC 1: %w", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
 	// ШАГ 2: Дата производства строго в поле 18
 	if dateProd != "" {
 		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[18]%s", dateProd), "BM18"); err != nil {
@@ -131,12 +137,6 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 			return fmt.Errorf("сбой BM[21]: %w", err)
 		}
 	}
-
-	// ШАГ 5: ВОТ ОНО! Переопределяем режим диспенсера ПОСЛЕ полей и макета:
-	if err := d.writeRawCmdNoLock("FCDC--r1-------", "Set Mode 1 after Layout"); err != nil {
-		return fmt.Errorf("сбой установки FCDC 1: %w", err)
-	}
-	time.Sleep(20 * time.Millisecond)
 
 	d.totalSent = 0
 	d.inFlight = 0
