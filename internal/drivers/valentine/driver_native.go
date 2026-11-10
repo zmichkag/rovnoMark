@@ -65,6 +65,7 @@ func (d *NativeDriver) InitSession(fieldName string, maxQueue int, staticFields 
 }
 
 // SelectTemplate загружает макет и строго фильтрует статические поля (18, 19, 21)
+// SelectTemplate загружает макет и статику БЕЗ холостого взвода FBC
 func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -95,7 +96,7 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 		text01 = staticFields["21"]
 	}
 
-	slog.Info("VALENTIN-NATIVE: Покомандная загрузка макета и статики",
+	slog.Info("VALENTIN-NATIVE: Загрузка макета и статических полей",
 		"template", d.curTemplate,
 		"date_prod", dateProd,
 		"date_exp", dateExp,
@@ -103,46 +104,38 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	)
 
 	// ШАГ 1: Загрузка макета из Flash (FMB)
-	cmdFMB := fmt.Sprintf("FMB---r%s", d.curTemplate)
-	if err := d.writeRawCmdNoLock(cmdFMB); err != nil {
-		return fmt.Errorf("сбой FMB: %w", err)
+	if err := d.writeRawCmdNoLock(fmt.Sprintf("FMB---r%s", d.curTemplate), "Select Layout FMB"); err != nil {
+		return err
 	}
-	time.Sleep(35 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond) // Дополнительная пауза на десериализацию макета
 
-	// ШАГ 2: Дата производства строго в поле 18
+	// ШАГ 2: Статические поля
 	if dateProd != "" {
-		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[18]%s", dateProd)); err != nil {
-			return fmt.Errorf("сбой BM[18]: %w", err)
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[18]%s", dateProd), "Field 18 DateProd"); err != nil {
+			return err
 		}
-		time.Sleep(15 * time.Millisecond)
 	}
 
-	// ШАГ 3: Дата годности строго в поле 19
 	if dateExp != "" {
-		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[19]%s", dateExp)); err != nil {
-			return fmt.Errorf("сбой BM[19]: %w", err)
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[19]%s", dateExp), "Field 19 DateExp"); err != nil {
+			return err
 		}
-		time.Sleep(15 * time.Millisecond)
 	}
 
-	// ШАГ 4: Текст партии строго в поле 21
 	if text01 != "" {
-		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[21]%s", text01)); err != nil {
-			return fmt.Errorf("сбой BM[21]: %w", err)
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[21]%s", text01), "Field 21 Text"); err != nil {
+			return err
 		}
-		time.Sleep(15 * time.Millisecond)
 	}
 
-	// ШАГ 5: Взвод триггера FBC
-	if err := d.writeRawCmdNoLock("FBC---r--------"); err != nil {
-		return fmt.Errorf("сбой FBC: %w", err)
-	}
+	// 🛑 ВНИМАНИЕ: FBC отсюда УБРАН! Принтер не должен вставать в armed без кода!
 
 	d.totalSent = 0
 	return nil
 }
 
 // PrintBatchIndexed отправляет кадры под нож и сразу инкрементирует счетчик
+// PrintBatchIndexed осуществляет наливку кода строго в свободный буфер
 func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes []string) (int, error) {
 	if len(codes) == 0 {
 		return 0, nil
@@ -169,34 +162,27 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 		}
 		cleanCode = strings.TrimSpace(cleanCode)
 
-		// 1. Строго поле BM[20]
-		cmdBM20 := fmt.Sprintf("BM[20]%s", cleanCode)
-		if err := d.writeRawCmdNoLock(cmdBM20); err != nil {
-			return sent, fmt.Errorf("сбой отправки BM[20]: %w", err)
+		// 1. Загрузка DataMatrix строго в поле 20
+		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[20]%s", cleanCode), "BM[20] DataMatrix"); err != nil {
+			return sent, err
 		}
-		time.Sleep(15 * time.Millisecond) // Пауза на растеризацию матрицы в ОЗУ
+
+		// Пауза на растеризацию 2D матрицы в ОЗУ
+		time.Sleep(15 * time.Millisecond)
 
 		// 2. Тираж 1 копия
-		if err := d.writeRawCmdNoLock("FBBA--r00001---"); err != nil {
-			return sent, fmt.Errorf("сбой отправки FBBA: %w", err)
+		if err := d.writeRawCmdNoLock("FBBA--r00001---", "FBBA=1"); err != nil {
+			return sent, err
 		}
-		time.Sleep(5 * time.Millisecond)
 
-		// 3. Взвод печати под нож
-		if err := d.writeRawCmdNoLock("FBC---r--------"); err != nil {
-			return sent, fmt.Errorf("сбой отправки FBC: %w", err)
+		// 3. Взвод триггера под нож
+		if err := d.writeRawCmdNoLock("FBC---r--------", "FBC Arm"); err != nil {
+			return sent, err
 		}
-		time.Sleep(10 * time.Millisecond)
 
-		// Инкрементируем счетчик отправленных
 		d.totalSent++
 		sent++
 	}
-
-	slog.Info("VALENTIN-NATIVE: Код принят принтером",
-		"batch_size", sent,
-		"total_sent", d.totalSent,
-	)
 
 	return sent, nil
 }
@@ -227,22 +213,28 @@ func (d *NativeDriver) GetBufferFreeSpace() (int, error) {
 	return 1, nil
 }
 
-func (d *NativeDriver) writeRawCmdNoLock(cmd string) error {
+// writeRawCmdNoLock отправляет управляющий кадр в сокет с аппаратной задержкой.
+// desc — опциональное описание команды для отладочного лога.
+func (d *NativeDriver) writeRawCmdNoLock(cmd string, desc ...string) error {
 	frame := []byte(fmt.Sprintf("%c%s%c", SOH, cmd, ETB))
 	_ = d.conn.SetWriteDeadline(time.Now().Add(d.Timeout))
+
+	tag := "CMD"
+	if len(desc) > 0 && desc[0] != "" {
+		tag = desc[0]
+	}
+
+	// Отладочный вывод точной полезной нагрузки перед отправкой
+	slog.Debug("VALENTIN-RAW-OUT", "desc", tag, "payload", cmd)
+
 	if _, err := d.conn.Write(frame); err != nil {
 		d.closeConnNoLock()
-		return err
+		return fmt.Errorf("сбой отправки [%s]: %w", tag, err)
 	}
-	return nil
-}
 
-func (d *NativeDriver) optimizeSocket(conn net.Conn) {
-	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		_ = tcpConn.SetNoDelay(true)
-		_ = tcpConn.SetKeepAlive(true)
-		_ = tcpConn.SetKeepAlivePeriod(5 * time.Second)
-	}
+	// Аппаратный зазор на обработку прерывания микроконтроллером SPE
+	time.Sleep(15 * time.Millisecond)
+	return nil
 }
 
 func (d *NativeDriver) reconnectNoLock() error {
@@ -254,6 +246,14 @@ func (d *NativeDriver) reconnectNoLock() error {
 	d.optimizeSocket(conn)
 	d.conn = conn
 	return nil
+}
+
+func (d *NativeDriver) optimizeSocket(conn net.Conn) {
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(5 * time.Second)
+	}
 }
 
 func (d *NativeDriver) closeConnNoLock() {
