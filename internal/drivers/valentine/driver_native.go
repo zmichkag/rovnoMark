@@ -103,7 +103,7 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	// Статика
 	dateProd := staticFields["date01"]
 	dateExp := staticFields["date02"]
-	//text01 := staticFields["text01"]
+	text01 := staticFields["text01"]
 
 	if strings.TrimSpace(dateProd) == "" {
 		dateProd = staticFields["18"]
@@ -111,9 +111,9 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	if strings.TrimSpace(dateExp) == "" {
 		dateExp = staticFields["19"]
 	}
-	//if strings.TrimSpace(text01) == "" {
-	//	text01 = staticFields["21"]
-	//}
+	if strings.TrimSpace(text01) == "" {
+		text01 = staticFields["21"]
+	}
 
 	if dateProd != "" {
 		_ = d.writeCmdNoLock(fmt.Sprintf("BM[18]%s", dateProd), "Set DateProd")
@@ -121,9 +121,9 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	if dateExp != "" {
 		_ = d.writeCmdNoLock(fmt.Sprintf("BM[19]%s", dateExp), "Set DateExp")
 	}
-	//if text01 != "" {
-	//	_ = d.writeCmdNoLock(fmt.Sprintf("BM[21]%s", text01), "Set Batch")
-	//}
+	if text01 != "" {
+		_ = d.writeCmdNoLock(fmt.Sprintf("BM[21]%s", text01), "Set Batch")
+	}
 
 	return nil
 }
