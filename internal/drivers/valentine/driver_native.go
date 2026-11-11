@@ -57,7 +57,7 @@ func (d *NativeDriver) InitSession(fieldName string, maxQueue int, staticFields 
 	}
 
 	// 1. Отключаем асинхронный спам TD"
-	_ = d.writeRawCmdNoLock("CTE---r0-------", "Disable TD Spam")
+	//_ = d.writeRawCmdNoLock("CTE---r0-------", "Disable TD Spam")
 
 	d.totalSent = 0
 	d.inFlight = 0
