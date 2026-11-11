@@ -109,12 +109,14 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 	if err := d.writeRawCmdNoLock(cmdFMB, "FMB"); err != nil {
 		return fmt.Errorf("сбой FMB: %w", err)
 	}
+	slog.Info("VALENTIN-NATIVE: FMB---r")
 	time.Sleep(10 * time.Second)
 
 	// ШАГ 2: Перевод диспенсера в Режим 1 (строго после вызова макета, как в ручном тесте)
 	if err := d.writeRawCmdNoLock("FCDC--r1-------", "FCDC 1"); err != nil {
 		return fmt.Errorf("сбой установки FCDC 1: %w", err)
 	}
+	slog.Info("VALENTIN-NATIVE: FCDC--r1")
 	time.Sleep(10 * time.Second)
 
 	// ШАГ 2: Дата производства строго в поле 18
@@ -122,6 +124,8 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[18]%s", dateProd), "BM18"); err != nil {
 			return fmt.Errorf("сбой BM[18]: %w", err)
 		}
+		slog.Info("VALENTIN-NATIVE: 18")
+		time.Sleep(10 * time.Second)
 	}
 
 	// ШАГ 3: Дата годности строго в поле 19
@@ -129,6 +133,8 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[19]%s", dateExp), "BM19"); err != nil {
 			return fmt.Errorf("сбой BM[19]: %w", err)
 		}
+		slog.Info("VALENTIN-NATIVE: 19")
+		time.Sleep(10 * time.Second)
 	}
 
 	// ШАГ 4: Текст партии строго в поле 21
@@ -136,6 +142,8 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[21]%s", text01), "BM21"); err != nil {
 			return fmt.Errorf("сбой BM[21]: %w", err)
 		}
+		slog.Info("VALENTIN-NATIVE: 21")
+		time.Sleep(10 * time.Second)
 	}
 
 	d.totalSent = 0
@@ -174,7 +182,7 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[20]%s", cleanCode), "BM20 DataMatrix"); err != nil {
 			return sent, fmt.Errorf("сбой отправки BM[20]: %w", err)
 		}
-		time.Sleep(15 * time.Millisecond) // Пауза на растеризацию 2D матрицы
+		time.Sleep(5 * time.Second) // Пауза на растеризацию 2D матрицы
 
 		// 2. Тираж 1 копия
 		if err := d.writeRawCmdNoLock("FBBA--r00001---", "FBBA 1"); err != nil {
