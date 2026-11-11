@@ -6,30 +6,33 @@ import "strings"
 type MarkingMode string
 
 const (
-	MarkingModeStream MarkingMode = "stream"
-	MarkingModeUnique MarkingMode = "unique"
+	MarkingModeStream       MarkingMode = "stream"
+	MarkingModeStreamGT0607 MarkingMode = "stream_gt06_gt07"
+	MarkingModeUnique       MarkingMode = "unique"
 )
 
 // Profile содержит настройки, относящиеся только к оборудованию Bizerba.
 type Profile struct {
-	RecordGXNET    bool
-	RecordResponse func(Response) error
-	Mode           MarkingMode
-	Conveyor       bool
-	CaptureWeight  bool
-	RecordWeight   func(printerIndex int, mark, weight string) error
-	Mapping        FieldMapping
+	RecordGXNET         bool
+	RecordResponse      func(Response) error
+	Mode                MarkingMode
+	Conveyor            bool
+	CaptureWeight       bool
+	RecordWeight        func(printerIndex int, mark, weight string) error
+	Mapping             FieldMapping
+	ExplicitGSSeparator *bool
 }
 
 // bizerbaEquipment объединяет возможности конкретной машины.
 type bizerbaEquipment struct {
-	mode            MarkingMode
-	conveyorEnabled bool
-	conveyor        conveyorController
-	unique          uniqueDataController
-	captureWeight   bool
-	recordWeight    func(printerIndex int, mark, weight string) error
-	mapping         FieldMapping
+	mode                MarkingMode
+	conveyorEnabled     bool
+	conveyor            conveyorController
+	unique              uniqueDataController
+	captureWeight       bool
+	recordWeight        func(printerIndex int, mark, weight string) error
+	mapping             FieldMapping
+	explicitGSSeparator bool
 }
 
 // conveyorController управляет конвейером Bizerba.
@@ -60,23 +63,37 @@ func configuredBizerbaEquipment(profile Profile) bizerbaEquipment {
 
 	mapping := profile.Mapping
 	if strings.TrimSpace(mapping.SerialField) == "" {
-		mapping.SerialField = "GT03"
+		if profile.Mode == MarkingModeStreamGT0607 {
+			mapping.SerialField = "GT06"
+		} else {
+			mapping.SerialField = "GT03"
+		}
 	}
 	if strings.TrimSpace(mapping.CryptoField) == "" {
-		mapping.CryptoField = "GT04"
+		if profile.Mode == MarkingModeStreamGT0607 {
+			mapping.CryptoField = "GT07"
+		} else {
+			mapping.CryptoField = "GT04"
+		}
 	}
 	if mapping.StaticMap == nil {
 		mapping.StaticMap = make(map[string]string)
 	}
 
+	explicitGSSeparator := true
+	if profile.ExplicitGSSeparator != nil {
+		explicitGSSeparator = *profile.ExplicitGSSeparator
+	}
+
 	return bizerbaEquipment{
-		mode:            profile.Mode,
-		conveyorEnabled: profile.Conveyor,
-		conveyor:        noopConveyorController{},
-		unique:          unique,
-		captureWeight:   profile.CaptureWeight,
-		recordWeight:    profile.RecordWeight,
-		mapping:         mapping,
+		mode:                profile.Mode,
+		conveyorEnabled:     profile.Conveyor,
+		conveyor:            noopConveyorController{},
+		unique:              unique,
+		captureWeight:       profile.CaptureWeight,
+		recordWeight:        profile.RecordWeight,
+		mapping:             mapping,
+		explicitGSSeparator: explicitGSSeparator,
 	}
 }
 
@@ -84,6 +101,8 @@ func normalizeProfile(profile Profile) Profile {
 	switch MarkingMode(strings.ToLower(strings.TrimSpace(string(profile.Mode)))) {
 	case MarkingModeUnique:
 		profile.Mode = MarkingModeUnique
+	case MarkingModeStreamGT0607:
+		profile.Mode = MarkingModeStreamGT0607
 	default:
 		profile.Mode = MarkingModeStream
 	}

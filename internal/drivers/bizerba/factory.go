@@ -26,11 +26,12 @@ func CreateDriver(cfg models.PrinterConfig, store WeightStore) *Driver {
 	}
 
 	profile := Profile{
-		Mode:          MarkingMode(bSettings.Mode),
-		Conveyor:      bSettings.Conveyor,
-		CaptureWeight: bSettings.CaptureWeight,
-		RecordGXNET:   bSettings.RecordGXNET,
-		Mapping:       bSettings.Mapping,
+		Mode:                MarkingMode(bSettings.Mode),
+		Conveyor:            bSettings.Conveyor,
+		CaptureWeight:       bSettings.CaptureWeight,
+		RecordGXNET:         bSettings.RecordGXNET,
+		Mapping:             bSettings.Mapping,
+		ExplicitGSSeparator: bSettings.ExplicitGSSeparator,
 		RecordResponse: func(resp Response) error {
 			if store == nil {
 				return nil

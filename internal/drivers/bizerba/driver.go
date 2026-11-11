@@ -340,6 +340,19 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 		}
 
 		if targetRegister == "" {
+			switch {
+			case matchesField(key, "date01", "date1", "date", "production_date", "дата"):
+				targetRegister = "GL06"
+			case matchesField(key, "date02", "date2", "expiry_date", "expiration_date", "срок_годности"):
+				targetRegister = "GL07"
+			case matchesField(key, "brigade", "team", "бригада"):
+				targetRegister = "GL15"
+			case matchesField(key, "design", "label_design", "дизайн"):
+				targetRegister = "GW17"
+			}
+		}
+
+		if targetRegister == "" {
 			upper := strings.ToUpper(strings.TrimSpace(key))
 			if isBizerbaRegister(upper) {
 				targetRegister = upper
@@ -351,10 +364,19 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 		}
 
 		formattedValue := val
-		if strings.HasPrefix(targetRegister, "GL0") {
-			if normDate, err := normalizeBizerbaDate(val); err == nil {
-				formattedValue = normDate
+		if targetRegister == "GL06" || targetRegister == "GL07" {
+			normDate, err := normalizeBizerbaDate(val)
+			if err != nil {
+				return err
 			}
+			formattedValue = normDate
+		}
+		if targetRegister == "GW17" {
+			design, err := normalizeBizerbaDesign(val)
+			if err != nil {
+				return err
+			}
+			formattedValue = design
 		}
 
 		if err := sendWrite(conn, "A!"+targetRegister, formattedValue, d.timeout); err != nil {
@@ -370,6 +392,16 @@ func isBizerbaRegister(reg string) bool {
 	}
 	prefix := reg[:2]
 	return prefix == "GT" || prefix == "GL" || prefix == "GW" || prefix == "GD"
+}
+
+func matchesField(value string, aliases ...string) bool {
+	value = strings.TrimSpace(value)
+	for _, alias := range aliases {
+		if strings.EqualFold(value, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Driver) GetCurrentTemplate() (string, error) {
@@ -815,9 +847,19 @@ func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (in
 	if len(codes) == 0 {
 		return 0, nil
 	}
+	if d.equipment.unique.Enabled() {
+		if _, err := buildUniqueDataFile(codes); err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("режим Bizerba UniqueData подготовил файл, но FTP-загрузка ещё не настроена; коды не переданы устройству")
+	}
 
 	marks := make([]queuedMark, 0, len(codes))
 	var activeGTIN string
+	cryptoPrefix := ""
+	if d.equipment.explicitGSSeparator {
+		cryptoPrefix = "@1D93"
+	}
 
 	for i, code := range codes {
 		parsed, err := marking.ParseAndValidateShortGS1(strings.TrimSpace(code))
@@ -835,7 +877,7 @@ func (d *Driver) PrintBatchIndexed(_ string, startIndex int, codes []string) (in
 			index:  startIndex + i,
 			code:   parsed.ToDBFormat(),
 			serial: parsed.CountryCode + parsed.Serial,
-			crypto: "@1D93" + parsed.CryptoTail,
+			crypto: cryptoPrefix + parsed.CryptoTail,
 		})
 	}
 
@@ -953,7 +995,7 @@ func (d *Driver) GetTemplates() ([]string, error) {
 }
 
 func (d *Driver) GetTemplateFields(string) ([]string, error) {
-	return []string{"date", "brigade", "DATAMATRIX"}, nil
+	return []string{"design", "date01", "date02", "brigade", "DATAMATRIX"}, nil
 }
 
 func (d *Driver) GetRemainingRibbon() (string, error) { return "N/A", nil }
@@ -963,6 +1005,17 @@ func (d *Driver) GetQueueCapacity(string) (string, error) { return "0", nil }
 func (d *Driver) GetPrintSpeed() (string, error) { return "N/A", nil }
 
 func (d *Driver) GetCurrentPrintCount() (string, error) { return "N/A", nil }
+
+// normalizeBizerbaDesign validates a user label design number. Bizerba user
+// designs start at 8192.
+func normalizeBizerbaDesign(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	design, err := strconv.Atoi(value)
+	if err != nil || design < 8192 {
+		return "", fmt.Errorf("некорректный номер пользовательской этикетки Bizerba %q; ожидается целое число не меньше 8192", value)
+	}
+	return strconv.Itoa(design), nil
+}
 
 func normalizeBizerbaDate(value string) (string, error) {
 	value = strings.TrimSpace(value)

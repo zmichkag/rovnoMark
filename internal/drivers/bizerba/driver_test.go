@@ -3,6 +3,7 @@ package bizerba
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -126,6 +127,31 @@ func TestConfiguredEquipmentProfile(t *testing.T) {
 	}
 }
 
+func TestConfiguredEquipmentStreamGT0607AndCustomMapping(t *testing.T) {
+	explicitSeparator := false
+	driver := newDriverWithProfile("Bizerba2", func() (bcsConnection, error) { return newFakeConnection(), nil }, Profile{
+		Mode:                MarkingModeStreamGT0607,
+		ExplicitGSSeparator: &explicitSeparator,
+	})
+	if driver.equipment.mapping.SerialField != "GT06" || driver.equipment.mapping.CryptoField != "GT07" {
+		t.Fatalf("stream_gt06_gt07 mapping = %#v", driver.equipment.mapping)
+	}
+	if driver.equipment.explicitGSSeparator {
+		t.Fatal("explicit GS separator was enabled")
+	}
+
+	driver = newDriverWithProfile("Bizerba2", func() (bcsConnection, error) { return newFakeConnection(), nil }, Profile{
+		Mode: MarkingModeStreamGT0607,
+		Mapping: FieldMapping{
+			SerialField: "GT51",
+			CryptoField: "GT52",
+		},
+	})
+	if driver.equipment.mapping.SerialField != "GT51" || driver.equipment.mapping.CryptoField != "GT52" {
+		t.Fatalf("custom mapping was overwritten: %#v", driver.equipment.mapping)
+	}
+}
+
 func TestSelectTemplateAcceptsGLPMaxRefreshErrorAfterPLUReadback(t *testing.T) {
 	fake := newFakeConnection()
 	fake.plu = "2644"
@@ -139,6 +165,92 @@ func TestSelectTemplateAcceptsGLPMaxRefreshErrorAfterPLUReadback(t *testing.T) {
 	want := []fakeSend{{"A!XV00|GL19|LX02", "2644"}, {"A?GL19", "0"}}
 	if !reflect.DeepEqual(sends, want) {
 		t.Fatalf("sends = %#v, want %#v", sends, want)
+	}
+}
+
+func TestSelectTemplateMapsDateAndUserLabelWithoutJSONMapping(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriver("GLPMax", func() (bcsConnection, error) { return fake, nil })
+
+	if err := driver.SelectTemplate("2644", map[string]string{
+		"date1":        "20.08.2026",
+		"expiry_date":  "2026-09-30",
+		"team":         "4",
+		"label_design": "8192",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, sends, _ := fake.snapshot()
+	want := map[fakeSend]bool{
+		{"A!GL06", "200826"}: true,
+		{"A!GL07", "300926"}: true,
+		{"A!GL15", "4"}:      true,
+		{"A!GW17", "8192"}:   true,
+	}
+	for command := range want {
+		found := false
+		for _, sent := range sends {
+			if sent == command {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("command %#v not found in %#v", command, sends)
+		}
+	}
+}
+
+func TestPrintBatchUsesGT0607WithoutExplicitGSSeparator(t *testing.T) {
+	fake := newFakeConnection()
+	explicitSeparator := false
+	driver := newDriverWithProfile("GLPMax", func() (bcsConnection, error) { return fake, nil }, Profile{
+		Mode:                MarkingModeStreamGT0607,
+		ExplicitGSSeparator: &explicitSeparator,
+	})
+	if err := driver.InitSession("DATAMATRIX", 10, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := driver.PrintBatchIndexed("DATAMATRIX", 1, []string{
+		"0104620031245728215?NFCZ<GS>93SwuV",
+	})
+	if err != nil || loaded != 1 {
+		t.Fatalf("PrintBatchIndexed() = %d, %v", loaded, err)
+	}
+	waitForSend(t, fake, fakeSend{"A!GT06", "5?NFCZ"})
+	waitForSend(t, fake, fakeSend{"A!GT07", "SwuV"})
+	if err := driver.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUniqueModeDoesNotFallBackToStream(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriverWithProfile("GLPMax", func() (bcsConnection, error) { return fake, nil }, Profile{
+		Mode: MarkingModeUnique,
+	})
+	codes := make([]string, uniqueDataMinRecords)
+	for i := range codes {
+		codes[i] = "0104620031245728215?NFCZ<GS>93SwuV"
+	}
+	loaded, err := driver.PrintBatchIndexed("DATAMATRIX", 1, codes)
+	if err == nil || loaded != 0 || !strings.Contains(err.Error(), "FTP-загрузка ещё не настроена") {
+		t.Fatalf("PrintBatchIndexed() = %d, %v", loaded, err)
+	}
+	opens, sends, _ := fake.snapshot()
+	if len(opens) != 0 || len(sends) != 0 {
+		t.Fatalf("Unique mode fell back to stream: opens=%v sends=%#v", opens, sends)
+	}
+}
+
+func TestSelectTemplateRejectsInvalidUserLabelNumber(t *testing.T) {
+	fake := newFakeConnection()
+	driver := newDriver("GLPMax", func() (bcsConnection, error) { return fake, nil })
+
+	err := driver.SelectTemplate("2644", map[string]string{"design": "17"})
+	if err == nil {
+		t.Fatal("SelectTemplate() accepted a user label number below 8192")
 	}
 }
 

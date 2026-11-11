@@ -472,19 +472,28 @@ func (tp *TaskProcessor) RunBizerbaFastPumper(ctx context.Context, lineID, taskI
 }
 
 type PrinterManager struct {
-	mu       sync.RWMutex
-	printers map[int]Printer
-	configs  map[int]models.PrinterConfig
-	states   map[int]models.PrinterState
-	logs     []models.LogEntry
+	mu            sync.RWMutex
+	printers      map[int]Printer
+	configs       map[int]models.PrinterConfig
+	states        map[int]models.PrinterState
+	logs          []models.LogEntry
+	bizerbaPollMu sync.Mutex
+	bizerbaPolls  map[int]*bizerbaPoll
 }
+
+type bizerbaPoll struct {
+	done chan struct{}
+}
+
+const bizerbaCOMHangTimeout = 10 * time.Second
 
 func NewPrinterManager() *PrinterManager {
 	return &PrinterManager{
-		printers: make(map[int]Printer),
-		configs:  make(map[int]models.PrinterConfig),
-		states:   make(map[int]models.PrinterState),
-		logs:     make([]models.LogEntry, 0),
+		printers:     make(map[int]Printer),
+		configs:      make(map[int]models.PrinterConfig),
+		states:       make(map[int]models.PrinterState),
+		logs:         make([]models.LogEntry, 0),
+		bizerbaPolls: make(map[int]*bizerbaPoll),
 	}
 }
 
@@ -606,111 +615,196 @@ func (pm *PrinterManager) BackgroundPoller(ctx context.Context, store *storage.S
 				continue
 			}
 
-			status, err := p.GetStatus()
-			var ribbon, queue, speed, curCount, curTemplate string
+			if cfg.DriverType == "bizerba" {
+				pm.startBizerbaPoll(ctx, store, id, p, cfg, lineMap, bizerbaCOMHangTimeout)
+				continue
+			}
 
-			if err == nil {
-				ribbon, _ = p.GetRemainingRibbon()
+			pm.pollPrinter(store, id, p, cfg, lineMap)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
 
-				free, errSpace := p.GetBufferFreeSpace()
-				if errSpace == nil {
-					queue = strconv.Itoa(free)
-				} else {
-					queue = "N/A"
-				}
+func (pm *PrinterManager) startBizerbaPoll(
+	ctx context.Context,
+	store *storage.Store,
+	id int,
+	p Printer,
+	cfg models.PrinterConfig,
+	lineMap map[int]int,
+	hangTimeout time.Duration,
+) {
+	pm.bizerbaPollMu.Lock()
+	if _, running := pm.bizerbaPolls[id]; running {
+		pm.bizerbaPollMu.Unlock()
+		return
+	}
+	poll := &bizerbaPoll{done: make(chan struct{})}
+	pm.bizerbaPolls[id] = poll
+	pm.bizerbaPollMu.Unlock()
 
-				speed, _ = p.GetPrintSpeed()
-				curCount, _ = p.GetCurrentPrintCount()
-				curTemplate, _ = p.GetCurrentTemplate()
+	go func() {
+		defer func() {
+			close(poll.done)
+			pm.bizerbaPollMu.Lock()
+			if pm.bizerbaPolls[id] == poll {
+				delete(pm.bizerbaPolls, id)
+			}
+			pm.bizerbaPollMu.Unlock()
+		}()
+		pm.pollPrinter(store, id, p, cfg, lineMap)
+	}()
 
-				if cfg.DriverType != "valentine_nice" && lineMap != nil {
-					if lineID, ok := lineMap[id]; ok {
-						activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
-						if errTask == nil && activeTaskID > 0 {
-							lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
-							if errIdx == nil && lastPrintedIdx >= 0 {
-								affected, errMark := store.MarkAsPrinted(activeTaskID, cfg.ID, lastPrintedIdx)
-								if errMark == nil && affected > 0 {
-									slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
-										"printer", cfg.Name,
-										"printer_id", cfg.ID,
-										"task_id", activeTaskID,
-										"last_index", lastPrintedIdx,
-										"confirmed_now", affected,
-									)
-								}
-								if lastCode, pTime, errLast := store.GetLastPrintedCodeForPrinter(activeTaskID, cfg.ID); errLast == nil {
-									pm.mu.Lock()
-									st := pm.states[id]
-									st.LastPrintedCode = lastCode
-									st.LastPrintedAt = pTime
-									st.LastPrintedIndex = lastPrintedIdx
-									pm.states[id] = st
-									pm.mu.Unlock()
-								}
-							}
+	go func() {
+		timer := time.NewTimer(hangTimeout)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.done:
+			return
+		case <-timer.C:
+		}
+
+		pm.bizerbaPollMu.Lock()
+		stillRunning := pm.bizerbaPolls[id] == poll
+		pm.bizerbaPollMu.Unlock()
+		if !stillRunning {
+			return
+		}
+
+		pm.mu.Lock()
+		oldState := pm.states[id]
+		if !strings.Contains(oldState.Status, "ЗАВИСАНИЕ COM") {
+			pID := id
+			var lineID *int
+			if idValue, ok := lineMap[id]; ok {
+				lineID = &idValue
+			}
+			message := fmt.Sprintf("ЗАВИСАНИЕ COM: опрос не завершился за %s", hangTimeout)
+			pm.addLogNoLock(store, &pID, lineID, "error", message)
+			oldState.Status = message
+			oldState.Ribbon = "N/A"
+			oldState.Queue = "N/A"
+			oldState.Speed = "N/A"
+			oldState.CurCount = "N/A"
+			oldState.CurTemplate = "N/A"
+			pm.states[id] = oldState
+		}
+		pm.mu.Unlock()
+	}()
+}
+
+func (pm *PrinterManager) pollPrinter(store *storage.Store, id int, p Printer, cfg models.PrinterConfig, lineMap map[int]int) {
+	status, err := p.GetStatus()
+	var ribbon, queue, speed, curCount, curTemplate string
+
+	if err == nil {
+		ribbon, _ = p.GetRemainingRibbon()
+
+		free, errSpace := p.GetBufferFreeSpace()
+		if errSpace == nil {
+			queue = strconv.Itoa(free)
+		} else {
+			queue = "N/A"
+		}
+
+		speed, _ = p.GetPrintSpeed()
+		curCount, _ = p.GetCurrentPrintCount()
+		curTemplate, _ = p.GetCurrentTemplate()
+
+		if cfg.DriverType != "valentine_nice" && lineMap != nil {
+			if lineID, ok := lineMap[id]; ok {
+				activeTaskID, errTask := store.GetActiveTaskByLine(lineID)
+				if errTask == nil && activeTaskID > 0 {
+					lastPrintedIdx, errIdx := p.GetLastPrintedIndex()
+					if errIdx == nil && lastPrintedIdx >= 0 {
+						affected, errMark := store.MarkAsPrinted(activeTaskID, cfg.ID, lastPrintedIdx)
+						if errMark == nil && affected > 0 {
+							slog.Info("[POLLER-SYNC] Коды подтверждены печатью",
+								"printer", cfg.Name,
+								"printer_id", cfg.ID,
+								"task_id", activeTaskID,
+								"last_index", lastPrintedIdx,
+								"confirmed_now", affected,
+							)
+						}
+						if lastCode, pTime, errLast := store.GetLastPrintedCodeForPrinter(activeTaskID, cfg.ID); errLast == nil {
+							pm.mu.Lock()
+							st := pm.states[id]
+							st.LastPrintedCode = lastCode
+							st.LastPrintedAt = pTime
+							st.LastPrintedIndex = lastPrintedIdx
+							pm.states[id] = st
+							pm.mu.Unlock()
 						}
 					}
 				}
 			}
-
-			pm.mu.Lock()
-			oldState := pm.states[id]
-			pID := id
-			var lIDPtr *int
-			if lineMap != nil {
-				if lID, ok := lineMap[id]; ok {
-					lIDPtr = &lID
-				}
-			}
-
-			if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
-				pm.addLogNoLock(store, &pID, lIDPtr, "info", fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
-			}
-
-			newState := models.PrinterState{
-				LastTemplate:     oldState.LastTemplate,
-				LastStaticHash:   oldState.LastStaticHash,
-				LastPrintedCode:  oldState.LastPrintedCode,
-				LastPrintedIndex: oldState.LastPrintedIndex,
-				LastPrintedAt:    oldState.LastPrintedAt,
-			}
-
-			isOfflineNow := err != nil
-			wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") || oldState.Status == "INITIALIZING"
-
-			if isOfflineNow && !wasOffline {
-				pm.addLogNoLock(store, &pID, lIDPtr, "error", fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))
-				newState.Status = fmt.Sprintf("ОФФЛАЙН: %v", err)
-				newState.Ribbon = "N/A"
-				newState.Queue = "N/A"
-				newState.Speed = "N/A"
-				newState.CurCount = "N/A"
-				newState.CurTemplate = "N/A"
-			} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
-				pm.addLogNoLock(store, &pID, lIDPtr, "success", "Связь восстановлена. Статус: "+status)
-				newState.Status = status
-				newState.Ribbon = ribbon
-				newState.Queue = queue
-				newState.Speed = speed
-				newState.CurCount = curCount
-				newState.CurTemplate = curTemplate
-			} else if isOfflineNow {
-				newState.Status = oldState.Status
-			} else {
-				newState.Status = status
-				newState.Ribbon = ribbon
-				newState.Queue = queue
-				newState.Speed = speed
-				newState.CurCount = curCount
-				newState.CurTemplate = curTemplate
-			}
-
-			pm.states[id] = newState
-			pm.mu.Unlock()
 		}
-		time.Sleep(2 * time.Second)
 	}
+
+	pm.mu.Lock()
+	oldState := pm.states[id]
+	pID := id
+	var lIDPtr *int
+	if lineMap != nil {
+		if lID, ok := lineMap[id]; ok {
+			lIDPtr = &lID
+		}
+	}
+
+	if oldState.CurTemplate != "" && oldState.CurTemplate != curTemplate && curTemplate != "N/A" {
+		pm.addLogNoLock(store, &pID, lIDPtr, "info", fmt.Sprintf("СМЕНА МАКЕТА: %s -> %s", oldState.CurTemplate, curTemplate))
+	}
+
+	newState := models.PrinterState{
+		LastTemplate:     oldState.LastTemplate,
+		LastStaticHash:   oldState.LastStaticHash,
+		LastPrintedCode:  oldState.LastPrintedCode,
+		LastPrintedIndex: oldState.LastPrintedIndex,
+		LastPrintedAt:    oldState.LastPrintedAt,
+	}
+
+	isOfflineNow := err != nil
+	wasOffline := strings.Contains(oldState.Status, "ОФФЛАЙН") ||
+		strings.Contains(oldState.Status, "ЗАВИСАНИЕ COM") ||
+		oldState.Status == "INITIALIZING"
+
+	if isOfflineNow && !wasOffline {
+		pm.addLogNoLock(store, &pID, lIDPtr, "error", fmt.Sprintf("ПОТЕРЯ СВЯЗИ: %v", err))
+		newState.Status = fmt.Sprintf("ОФФЛАЙН: %v", err)
+		newState.Ribbon = "N/A"
+		newState.Queue = "N/A"
+		newState.Speed = "N/A"
+		newState.CurCount = "N/A"
+		newState.CurTemplate = "N/A"
+	} else if !isOfflineNow && wasOffline && oldState.Status != "INITIALIZING" {
+		pm.addLogNoLock(store, &pID, lIDPtr, "success", "Связь восстановлена. Статус: "+status)
+		newState.Status = status
+		newState.Ribbon = ribbon
+		newState.Queue = queue
+		newState.Speed = speed
+		newState.CurCount = curCount
+		newState.CurTemplate = curTemplate
+	} else if isOfflineNow {
+		if strings.Contains(oldState.Status, "ЗАВИСАНИЕ COM") {
+			newState = oldState
+		} else {
+			newState.Status = oldState.Status
+		}
+	} else {
+		newState.Status = status
+		newState.Ribbon = ribbon
+		newState.Queue = queue
+		newState.Speed = speed
+		newState.CurCount = curCount
+		newState.CurTemplate = curTemplate
+	}
+
+	pm.states[id] = newState
+	pm.mu.Unlock()
 }
 
 func (pm *PrinterManager) addLogNoLock(store *storage.Store, printerID *int, lineID *int, eventType string, event string) {

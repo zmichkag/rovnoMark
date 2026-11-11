@@ -239,7 +239,7 @@
 
 <div id="monitoring" class="tab-content active">
     <div id="active-tasks-container">
-        <h3>🚀 Текущие задания (в работе)</h3>
+        <h3>🚀 Линии и текущие задания</h3>
         <div id="tasks-list"><div style="color: var(--text-muted);">Загрузка...</div></div>
     </div>
     <hr style="border: 1px solid #333; margin: 30px 0;">
@@ -371,7 +371,15 @@
 
     <div id="bizerba_extra_settings" class="bizerba-panel" style="display:none;">
         <div class="field"><label>BCS Device ID:</label><input type="text" id="p_bcs_device" placeholder="GLPMax"></div>
+        <div class="field"><label>Режим передачи марок:</label>
+            <select id="p_bizerba_mode">
+                <option value="stream">Поток GT03/GT04</option>
+                <option value="stream_gt06_gt07">Поток GT06/GT07</option>
+                <option value="unique">Unique (файловая выгрузка)</option>
+            </select>
+        </div>
         <div style="display:flex; gap:15px;">
+            <label><input type="checkbox" id="p_bizerba_explicit_gs" checked style="width:auto;"> Передавать @1D93</label>
             <label><input type="checkbox" id="p_capture_weight" style="width:auto;"> Фиксация веса</label>
             <label><input type="checkbox" id="p_bizerba_conveyor" style="width:auto;"> Конвейер</label>
             <label><input type="checkbox" id="p_record_gxnet" style="width:auto;"> GXNET дампы</label>
@@ -610,16 +618,47 @@
                 netText.innerText = 'Связь ОК';
             }
 
-            if (!tasks || tasks.length === 0) {
-                updateTopBars([]); // <-- ВЫЗОВ ПРИ ПУСТОМ СПИСКЕ
-                container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Активных заданий нет</div>';
+            updateTopBars(tasks); // <-- ВЫЗОВ ДЛЯ ОТРИСОВКИ АЛЕРТОВ И ПИЛЛСОВ
+
+            const tasksByLine = new Map(tasks.map(task => [Number(task.line_id), task]));
+            const activeLines = Object.values(window.linesMap).filter(line => line.is_active !== false);
+            const displayItems = activeLines.map(line => {
+                const task = tasksByLine.get(Number(line.id));
+                return task
+                    ? { ...task, _line: line }
+                    : { line_id: line.id, line_name: line.name, _line: line, _idle: true };
+            });
+
+            // Keep an active task visible even if its line configuration was removed or disabled.
+            const displayedLineIds = new Set(activeLines.map(line => Number(line.id)));
+            tasks.forEach(task => {
+                if (!displayedLineIds.has(Number(task.line_id))) displayItems.push(task);
+            });
+
+            // Printers without a line must not disappear from monitoring either.
+            const assignedPrinterIds = new Set(
+                activeLines.flatMap(line => (line.printers || []).map(printer => Number(printer.id)))
+            );
+            const unassignedPrinters = Object.values(window.printersMap).filter(printer =>
+                printer.is_active !== false && !assignedPrinterIds.has(Number(printer.id))
+            );
+            if (unassignedPrinters.length > 0) {
+                const unassignedLine = {
+                    id: 0,
+                    name: 'Без привязки к линии',
+                    printers: unassignedPrinters,
+                    scanners: []
+                };
+                displayItems.push({ line_id: 0, line_name: unassignedLine.name, _line: unassignedLine, _idle: true });
+            }
+
+            if (displayItems.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-muted); padding: 10px;">Линии и принтеры не настроены</div>';
                 return;
             }
 
-            updateTopBars(tasks); // <-- ВЫЗОВ ДЛЯ ОТРИСОВКИ АЛЕРТОВ И ПИЛЛСОВ
-
-            container.innerHTML = tasks.map(t => {
-                const line = window.linesMap[t.line_id] || {};
+            container.innerHTML = displayItems.map(t => {
+                const line = t._line || window.linesMap[t.line_id] || {};
                 const printers = (line.printers || []).filter(p => p.is_active !== false);
                 const scanners = (line.scanners || []).filter(s => s.is_active !== false);
 
@@ -677,6 +716,7 @@
                         <div style="${idx > 0 ? 'margin-top: 8px; padding-top: 8px; border-top: 1px dashed #2d2d2d;' : ''}">
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;">
                                 <b style="font-size:0.85rem; color:#fff;">🖨️ ${printer.name}</b>
+                                <span style="font-size:0.68rem; color:#888; font-family:monospace; margin-left:5px;">ID: ${printer.id}</span>
                                 <div style="display:flex; align-items:center; gap:6px;">
                                     <span style="font-size:0.7rem; color:${badgeColor}; font-weight:bold;">${printer.status || 'OK'}</span>
                                     ${printer.ip ? `<a href="${webLink}" target="_blank" class="btn" style="padding:1px 6px; font-size:0.7rem; text-decoration:none; background:#222; border-color:#444;">ВЕБ-ИНТЕРФЕЙС</a>` : ''}
@@ -736,12 +776,37 @@
                     }).join('');
                 }
 
+                if (t._idle) {
+                    return `
+                    <div class="task-card" data-line-id="${t.line_id}">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+                            <div>
+                                <b style="font-size:1.05rem; color:#fff;">${t.line_name || line.name || 'Линия'}</b>
+                                ${Number(t.line_id) > 0 ? `<span style="font-size:0.72rem; color:#888; font-family:monospace; margin-left:7px;">ID: ${t.line_id}</span>` : ''}
+                                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:3px;">${line.description || 'Задание не запущено'}</div>
+                            </div>
+                            <span style="font-size:0.7rem; color:var(--text-muted); border:1px solid #444; border-radius:12px; padding:3px 8px; white-space:nowrap;">НЕТ ЗАДАНИЯ</span>
+                        </div>
+                        <div style="background:#181818; padding:8px; border-radius:6px; border:1px solid #2d2d2d; display:flex; flex-direction:column; gap:8px;">
+                            <div>
+                                <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Принтеры (${printers.length})</div>
+                                ${printersHtml}
+                            </div>
+                            <div style="border-top:1px solid #282828; padding-top:6px;">
+                                <div style="font-size:0.68rem; color:#666; text-transform:uppercase; font-weight:bold; letter-spacing:0.05em; margin-bottom:4px;">Сканеры (${scanners.length})</div>
+                                ${scannersHtml}
+                            </div>
+                        </div>
+                    </div>`;
+                }
+
                 return `
                 <div class="task-card" data-task-id="${t.task_id}">
                     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
                         <div style="line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                             <b style="font-size:1.05rem; color: var(--primary);">#${t.task_id}</b>
                             <span style="color:#fff; font-weight:bold; margin-left:6px;">${t.line_name}</span>
+                            <span style="font-size:0.7rem; color:#888; font-family:monospace; margin-left:5px;">LINE ID: ${t.line_id}</span>
                             <span style="color:#555; margin: 0 4px;">|</span>
                             <span style="font-size:0.75rem; color:var(--text-muted);">
                                 Шаблон: <b style="color:var(--warning);">${t.template_name || '-'}</b>
@@ -945,6 +1010,8 @@
     }
 
     function renderPrintersGrid(data) {
+        window.linesMap = {};
+        window.printersMap = {};
         (data.lines || []).forEach(l => { window.linesMap[l.id] = l; });
         (data.all_printers || []).forEach(p => { window.printersMap[p.id] = p; });
     }
@@ -985,11 +1052,11 @@
                 printerRoleMap[a.printer_id] = a.role;
             });
 
-            const lineOptions = lines.map(l => `<option value="${l.id}">${l.name}</option>`).join('');
+            const lineOptions = lines.map(l => `<option value="${l.id}">ID ${l.id} — ${l.name}</option>`).join('');
             document.getElementById('p_line_assign').innerHTML = '<option value="">-- Без привязки --</option>' + lineOptions;
             document.getElementById('s_line').innerHTML = lineOptions;
             document.getElementById('s_target_device').innerHTML = '<option value="">-- Не выбран --</option>' +
-                allPrinters.map(p => `<option value="${p.id}">${p.name} (${p.ip})</option>`).join('');
+                allPrinters.map(p => `<option value="${p.id}">ID ${p.id} — ${p.name} (${p.ip})</option>`).join('');
 
             container.innerHTML = lines.map(line => {
                 const linePrinters = allPrinters.filter(p => printerLineMap[p.id] === line.id);
@@ -999,6 +1066,7 @@
                 <div style="background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
                     <div>
                         <b>🖨️ ${p.name}</b>
+                        <span style="font-size:0.72rem; color:#888; font-family:monospace; margin-left:5px;">ID: ${p.id}</span>
                         <span style="font-size:0.75rem; background:#2a2a2a; padding:2px 6px; border-radius:4px; margin-left:6px; color:var(--primary);">${printerRoleMap[p.id] || 'PRIMARY'}</span>
                         <div style="font-size:0.8rem; color:#aaa; margin-top:2px;">${p.ip}:${p.port} (${p.driver_type})</div>
                     </div>
@@ -1022,6 +1090,7 @@
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; padding-bottom:10px; margin-bottom:12px;">
                     <div>
                         <span style="font-size:1.15rem; font-weight:bold; color:#fff;">Линия: ${line.name}</span>
+                        <span style="font-size:0.75rem; color:#888; font-family:monospace; margin-left:7px;">ID: ${line.id}</span>
                         ${line.description ? `<span style="color:var(--text-muted); font-size:0.85rem; margin-left:10px;">(${line.description})</span>` : ''}
                     </div>
                     <div style="display:flex; gap:8px;">
@@ -1053,7 +1122,9 @@
                 unassignedList.innerHTML = unassignedPrinters.map(p => `
                 <div style="background:#1a1a1a; border:1px solid #333; border-radius:6px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
                     <div>
-                        <b>${p.name}</b> (${p.ip})
+                        <b>${p.name}</b>
+                        <span style="font-size:0.72rem; color:#888; font-family:monospace; margin-left:5px;">ID: ${p.id}</span>
+                        <span>(${p.ip})</span>
                         <div style="font-size:0.75rem; color:#888;">${p.driver_type}</div>
                     </div>
                     <button class="btn" style="font-size:0.75rem;" onclick="openPrinterModal(${p.id})">Привязать</button>
@@ -1128,6 +1199,8 @@
 
             const s = p.settings || {};
             document.getElementById('p_bcs_device').value = s.bcs_device || '';
+            document.getElementById('p_bizerba_mode').value = s.mode || 'stream';
+            document.getElementById('p_bizerba_explicit_gs').checked = s.explicit_gs_separator !== false;
             document.getElementById('p_capture_weight').checked = !!s.capture_weight;
             document.getElementById('p_bizerba_conveyor').checked = !!s.conveyor;
             document.getElementById('p_record_gxnet').checked = !!s.record_gxnet;
@@ -1141,6 +1214,12 @@
             document.getElementById('p_active').checked = true;
             document.getElementById('p_line_assign').value = defaultLineId || '';
             document.getElementById('p_role_assign').value = 'PRIMARY';
+            document.getElementById('p_bcs_device').value = '';
+            document.getElementById('p_bizerba_mode').value = 'stream';
+            document.getElementById('p_bizerba_explicit_gs').checked = true;
+            document.getElementById('p_capture_weight').checked = false;
+            document.getElementById('p_bizerba_conveyor').checked = false;
+            document.getElementById('p_record_gxnet').checked = false;
             document.getElementById('printer_modal_title').innerText = 'Добавить принтер';
         }
 
@@ -1168,8 +1247,14 @@
         };
 
         if (driverType === 'bizerba') {
+			const existingSettings = id && window.printersMap[id] && window.printersMap[id].settings
+				? window.printersMap[id].settings
+				: {};
             body.settings = {
+				...existingSettings,
                 bcs_device: document.getElementById('p_bcs_device').value.trim() || 'GLPMax',
+                mode: document.getElementById('p_bizerba_mode').value || 'stream',
+                explicit_gs_separator: document.getElementById('p_bizerba_explicit_gs').checked,
                 capture_weight: document.getElementById('p_capture_weight').checked,
                 conveyor: document.getElementById('p_bizerba_conveyor').checked,
                 record_gxnet: document.getElementById('p_record_gxnet').checked
