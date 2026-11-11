@@ -18,12 +18,20 @@ type NativeDriver struct {
 	mu          sync.Mutex
 	curTemplate string
 
+	// Флаг детальной трассировки сетевых байтов
+	TraceWire bool // <-- Читается из json_settings: {"trace_wire": true}
+
 	// Монотонный счетчик отправленных в буфер кодов
-	totalSent int
+	totalSent    int
+	totalPrinted int
 
 	// Ограничитель очереди "в тракте"
 	maxInFlight int
 	inFlight    int
+
+	// Управление асинхронным чтением
+	stopChan chan struct{}
+	readDone chan struct{}
 }
 
 func NewNativeDriver(ip string, port int) *NativeDriver {
@@ -31,38 +39,30 @@ func NewNativeDriver(ip string, port int) *NativeDriver {
 		port = 9100
 	}
 	return &NativeDriver{
-		Address:     ip,
-		Port:        port,
-		Timeout:     3 * time.Second,
-		conn:        nil,
-		totalSent:   0,
-		maxInFlight: 2, // Не больше 2 этикеток в тракте одновременно
-		inFlight:    0,
+		Address:      ip,
+		Port:         port,
+		Timeout:      3 * time.Second,
+		conn:         nil,
+		totalSent:    0,
+		totalPrinted: 0,
+		maxInFlight:  10, // Не больше 2 этикеток в тракте одновременно
+		inFlight:     0,
 	}
 }
 
-// InitSession только поднимает сокет и глушит спам дисплея
+// InitSession поднимает постоянное чтение сокета
 func (d *NativeDriver) InitSession(fieldName string, maxQueue int, staticFields map[string]string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.conn == nil {
-		addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
-		conn, err := net.DialTimeout("tcp", addr, d.Timeout)
-		if err != nil {
-			return fmt.Errorf("native init: ошибка подключения к %s: %w", addr, err)
-		}
-		d.optimizeSocket(conn)
-		d.conn = conn
+	if err := d.reconnectNoLock(); err != nil {
+		return fmt.Errorf("native init: ошибка сокета %s: %w", d.Address, err)
 	}
 
-	// 1. Отключаем асинхронный спам TD"
-	//_ = d.writeRawCmdNoLock("CTE---r0-------", "Disable TD Spam")
-
 	d.totalSent = 0
-	d.inFlight = 0
+	d.totalPrinted = 0
 
-	slog.Info("VALENTIN-NATIVE: Сокет поднят, спам дисплея заглушен", "addr", d.Address)
+	slog.Info("VALENTIN-NATIVE: Сессия инициализирована, запущен TD-ридер", "addr", d.Address)
 	return nil
 }
 
@@ -104,20 +104,32 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 		"text01", text01,
 	)
 
+	if err := d.writeRawCmdNoLock("FHM---rSEP1"); err != nil {
+		return fmt.Errorf("сбой FHM: %w", err)
+	}
+	slog.Info("VALENTIN-NATIVE: FHM---rSEP1")
+	time.Sleep(10 * time.Millisecond)
+
+	if err := d.writeRawCmdNoLock("FHA---r2"); err != nil {
+		return fmt.Errorf("сбой FHA: %w", err)
+	}
+	slog.Info("VALENTIN-NATIVE: FHA---r2")
+	time.Sleep(10 * time.Millisecond)
+
 	// ШАГ 1: Загрузка макета из Flash (FMB)
 	cmdFMB := fmt.Sprintf("FMB---r%s", d.curTemplate)
 	if err := d.writeRawCmdNoLock(cmdFMB, "FMB"); err != nil {
 		return fmt.Errorf("сбой FMB: %w", err)
 	}
 	slog.Info("VALENTIN-NATIVE: FMB---r")
-	time.Sleep(10 * time.Second)
+	time.Sleep(10 * time.Millisecond)
 
 	// ШАГ 2: Перевод диспенсера в Режим 1 (строго после вызова макета, как в ручном тесте)
 	if err := d.writeRawCmdNoLock("FCDC--r1-------", "FCDC 1"); err != nil {
 		return fmt.Errorf("сбой установки FCDC 1: %w", err)
 	}
 	slog.Info("VALENTIN-NATIVE: FCDC--r1")
-	time.Sleep(10 * time.Second)
+	time.Sleep(10 * time.Millisecond)
 
 	// ШАГ 2: Дата производства строго в поле 18
 	if dateProd != "" {
@@ -125,7 +137,7 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 			return fmt.Errorf("сбой BM[18]: %w", err)
 		}
 		slog.Info("VALENTIN-NATIVE: 18")
-		time.Sleep(10 * time.Second)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// ШАГ 3: Дата годности строго в поле 19
@@ -134,7 +146,7 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 			return fmt.Errorf("сбой BM[19]: %w", err)
 		}
 		slog.Info("VALENTIN-NATIVE: 19")
-		time.Sleep(10 * time.Second)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// ШАГ 4: Текст партии строго в поле 21
@@ -143,12 +155,34 @@ func (d *NativeDriver) SelectTemplate(template string, staticFields map[string]s
 			return fmt.Errorf("сбой BM[21]: %w", err)
 		}
 		slog.Info("VALENTIN-NATIVE: 21")
-		time.Sleep(10 * time.Second)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	d.totalSent = 0
 	d.inFlight = 0
 	return nil
+}
+
+// startReaderNoLock запускает фоновую горутину разбора асинхронных сообщений
+func (d *NativeDriver) startReaderNoLock() {
+	d.stopReaderNoLock()
+
+	d.stopChan = make(chan struct{})
+	d.readDone = make(chan struct{})
+
+	go d.readLoop(d.conn, d.stopChan, d.readDone)
+}
+
+func (d *NativeDriver) stopReaderNoLock() {
+	if d.stopChan != nil {
+		close(d.stopChan)
+		if d.conn != nil {
+			_ = d.conn.SetReadDeadline(time.Now()) // Прерываем блокирующий Read
+		}
+		<-d.readDone
+		d.stopChan = nil
+		d.readDone = nil
+	}
 }
 
 // PrintBatchIndexed отправляет кадры под нож
@@ -182,7 +216,7 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 		if err := d.writeRawCmdNoLock(fmt.Sprintf("BM[20]%s", cleanCode), "BM20 DataMatrix"); err != nil {
 			return sent, fmt.Errorf("сбой отправки BM[20]: %w", err)
 		}
-		time.Sleep(5 * time.Second) // Пауза на растеризацию 2D матрицы
+		time.Sleep(5 * time.Millisecond) // Пауза на растеризацию 2D матрицы
 
 		// 2. Тираж 1 копия
 		if err := d.writeRawCmdNoLock("FBBA--r00001---", "FBBA 1"); err != nil {
@@ -203,16 +237,18 @@ func (d *NativeDriver) PrintBatchIndexed(fieldName string, startIndex int, codes
 	return sent, nil
 }
 
-// GetBufferFreeSpace управляет скоростью: не дает лить бесконечно вперед
+// GetBufferFreeSpace работает неблокирующе через локальное состояние
 func (d *NativeDriver) GetBufferFreeSpace() (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Опрашиваем статус готовности ножа/диспенсера
-	d.checkDispenserReadyNoLock()
+	inFlight := d.totalSent - d.totalPrinted
+	if inFlight < 0 {
+		inFlight = 0
+	}
 
-	// Если в тракте уже висит максимальное число этикеток — тормозим ядро
-	if d.inFlight >= d.maxInFlight {
+	if inFlight >= d.maxInFlight {
+		// Очередь заполнена — ждем асинхронного подтверждения по TD
 		return 0, nil
 	}
 
@@ -246,17 +282,11 @@ func (d *NativeDriver) checkDispenserReadyNoLock() {
 	}
 }
 
-// GetCurrentPrintCount отдает подтвержденное количество
+// GetCurrentPrintCount мгновенно отдает подтвержденный объем без сетевого опроса
 func (d *NativeDriver) GetCurrentPrintCount() (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	// Считаем напечатанными те, что уже сошли из inFlight
-	confirmed := d.totalSent - d.inFlight
-	if confirmed < 0 {
-		confirmed = 0
-	}
-	return strconv.Itoa(confirmed), nil
+	return strconv.Itoa(d.totalPrinted), nil
 }
 
 func (d *NativeDriver) GetLastPrintedIndex() (int, error) {
@@ -298,6 +328,72 @@ func (d *NativeDriver) writeRawCmdNoLock(cmd string, desc ...string) error {
 	return nil
 }
 
+// readLoop парсит асинхронный поток контроллера
+func (d *NativeDriver) readLoop(conn net.Conn, stopChan chan struct{}, done chan struct{}) {
+	defer close(done)
+	buf := make([]byte, 1024)
+
+	for {
+		select {
+		case <-stopChan:
+			return
+		default:
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			slog.Debug("VALENTIN-WIRE: Сокет завершил чтение", "err", err)
+			return
+		}
+
+		if n > 0 {
+			chunk := buf[:n]
+
+			// Трассировка сырого сокета: активна ТОЛЬКО если включен флаг TraceWire
+			if d.TraceWire {
+				slog.Debug("VALENTIN-WIRE-IN",
+					"bytes_len", n,
+					"hex", fmt.Sprintf("%x", chunk),
+					"ascii", strings.ReplaceAll(string(chunk), "\x1d", "<GS>"),
+				)
+			}
+
+			// Парсинг телеметрии и схода этикеток работает ВСЕГДА
+			d.handleAsyncMessage(string(chunk))
+		}
+	}
+}
+
+// handleAsyncMessage анализирует дамп экрана TD с контроллера V1.53
+func (d *NativeDriver) handleAsyncMessage(rawMsg string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// 1. Детекция успешного схода этикетки по счетчику Dispensed
+	// На V1.53 при завершении оттиска дисплей отдает: "R 00001  D 00001"
+	if strings.Contains(rawMsg, "D 00001") {
+		d.totalPrinted++
+		if d.inFlight > 0 {
+			d.inFlight--
+		}
+
+		slog.Info("VALENTIN-NATIVE: Физический сход этикетки подтвержден по TD (D=1)",
+			"total_printed", d.totalPrinted,
+			"in_flight", d.inFlight,
+		)
+		return
+	}
+
+	// 2. Детекция ошибок протяжки / ножа / риббона
+	if strings.Contains(rawMsg, "Error") || strings.Contains(rawMsg, "Fehler") {
+		slog.Error("VALENTIN-NATIVE: Аппаратная ошибка на контроллере", "display", rawMsg)
+	}
+}
+
 func (d *NativeDriver) optimizeSocket(conn net.Conn) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
@@ -307,6 +403,8 @@ func (d *NativeDriver) optimizeSocket(conn net.Conn) {
 }
 
 func (d *NativeDriver) reconnectNoLock() error {
+	d.closeConnNoLock()
+
 	addr := net.JoinHostPort(d.Address, strconv.Itoa(d.Port))
 	conn, err := net.DialTimeout("tcp", addr, d.Timeout)
 	if err != nil {
@@ -314,6 +412,9 @@ func (d *NativeDriver) reconnectNoLock() error {
 	}
 	d.optimizeSocket(conn)
 	d.conn = conn
+
+	// Стартуем асинхронный ридер при каждом открытии сокета
+	d.startReaderNoLock()
 	return nil
 }
 
@@ -324,13 +425,7 @@ func (d *NativeDriver) closeConnNoLock() {
 	}
 }
 
-func (d *NativeDriver) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.closeConnNoLock()
-	return nil
-}
-
+// ClearQueue очищает стек заданий в RAM для прошивки V1.53
 func (d *NativeDriver) ClearQueue() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -341,14 +436,25 @@ func (d *NativeDriver) ClearQueue() error {
 		}
 	}
 
-	_ = d.writeRawCmdNoLock("FD----r0-------", "Stop")
-	_ = d.writeRawCmdNoLock("FBA---r--------", "Abort Job")
-	_ = d.writeRawCmdNoLock("FCA---r--------", "Clear Spooler")
-	_ = d.writeRawCmdNoLock("FGA---r--------", "Clear Layout")
-	_ = d.writeRawCmdNoLock("FCDC--r0-------", "Mode 0")
+	// 1. Аппаратная пауза (глушим мотор)
+	_ = d.writeRawCmdNoLock("FD----r0", "Stop")
+	time.Sleep(20 * time.Millisecond)
 
+	// 2. Сброс растра и буфера очереди в ОЗУ принтера
+	_ = d.writeRawCmdNoLock("FGA---r", "Clear Layout & Spooler")
+	time.Sleep(30 * time.Millisecond)
+
+	// 3. Сброс режима дозатора в нейтраль
+	_ = d.writeRawCmdNoLock("FCDC--r3", "Reset Dispenser Mode")
+	time.Sleep(10 * time.Millisecond)
+
+	// Сбрасываем внутренние счетчики драйвера
 	d.totalSent = 0
+	d.totalPrinted = 0
 	d.inFlight = 0
+	d.curTemplate = "" // Обязательно сбрасываем, чтобы следующий запуск заново вызвал SelectTemplate
+
+	slog.Info("VALENTIN-NATIVE: Очередь и макет V1.53 успешно сброшены в ОЗУ")
 	return nil
 }
 
