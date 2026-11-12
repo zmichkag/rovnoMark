@@ -277,6 +277,10 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Даем время асинхронным драйверам (Valentin TD, Markem Async, Bizerba)
+	// дочитать хвост подтверждений из TCP-сокетов перед снятием финального индекса
+	time.Sleep(300 * time.Millisecond)
+
 	slog.Info("[STOP] Статус задачи изменен на 'stopped'. Опрос и сведение баланса линии...",
 		"task_id", taskID, "line_id", lineID)
 

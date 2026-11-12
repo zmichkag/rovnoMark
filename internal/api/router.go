@@ -31,7 +31,7 @@ func (s *Server) InitRoutes() http.Handler {
 	mux.HandleFunc("/api/task/active", s.handleTaskActive)
 	mux.HandleFunc("/api/code/info", s.handleCodeInfo)
 	mux.HandleFunc("/api/dashboard/live", s.handleDashboardLive)
-	// Выгрузка полных срезов заданий для 1С (требование Никиты)
+	// Выгрузка полных срезов заданий для 1С
 	mux.HandleFunc("/api/task_codes/", s.handleTaskCodesDump)
 	mux.HandleFunc("/api/task_codes_scan/", s.handleTaskCodesScanDump)
 

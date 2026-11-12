@@ -26,8 +26,9 @@ type NativeDriver struct {
 	totalPrinted int
 
 	// Ограничитель очереди "в тракте"
-	maxInFlight int
-	inFlight    int
+	maxInFlight     int
+	inFlight        int
+	refillThreshold int // Порог дозаливки (например, 3 при maxInFlight = 10)
 
 	// Управление асинхронным чтением
 	stopChan chan struct{}
@@ -39,14 +40,15 @@ func NewNativeDriver(ip string, port int) *NativeDriver {
 		port = 9100
 	}
 	return &NativeDriver{
-		Address:      ip,
-		Port:         port,
-		Timeout:      3 * time.Second,
-		conn:         nil,
-		totalSent:    0,
-		totalPrinted: 0,
-		maxInFlight:  10, // Не больше 2 этикеток в тракте одновременно
-		inFlight:     0,
+		Address:         ip,
+		Port:            port,
+		Timeout:         3 * time.Second,
+		conn:            nil,
+		totalSent:       0,
+		totalPrinted:    0,
+		maxInFlight:     10, // Не больше 10 этикеток в тракте одновременно
+		inFlight:        0,
+		refillThreshold: 5,
 	}
 }
 
@@ -55,14 +57,17 @@ func (d *NativeDriver) InitSession(fieldName string, maxQueue int, staticFields 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.reconnectNoLock(); err != nil {
-		return fmt.Errorf("native init: ошибка сокета %s: %w", d.Address, err)
+	if d.conn == nil {
+		if err := d.reconnectNoLock(); err != nil {
+			return fmt.Errorf("native init: ошибка сокета %s: %w", d.Address, err)
+		}
 	}
 
 	d.totalSent = 0
 	d.totalPrinted = 0
+	d.inFlight = 0
 
-	slog.Info("VALENTIN-NATIVE: Сессия инициализирована, запущен TD-ридер", "addr", d.Address)
+	slog.Info("VALENTIN-NATIVE: Сессия инициализирована, TD-ридер активен", "addr", d.Address)
 	return nil
 }
 
@@ -247,12 +252,17 @@ func (d *NativeDriver) GetBufferFreeSpace() (int, error) {
 		inFlight = 0
 	}
 
-	if inFlight >= d.maxInFlight {
-		// Очередь заполнена — ждем асинхронного подтверждения по TD
+	// Пока в тракте больше порога упреждения — не дергаем БД
+	if inFlight > d.refillThreshold {
 		return 0, nil
 	}
 
-	return 1, nil
+	freeSlots := d.maxInFlight - inFlight
+	if freeSlots <= 0 {
+		return 0, nil
+	}
+
+	return freeSlots, nil
 }
 
 // checkDispenserReadyNoLock проверяет освобождение диспенсера
@@ -292,21 +302,13 @@ func (d *NativeDriver) GetCurrentPrintCount() (string, error) {
 func (d *NativeDriver) GetLastPrintedIndex() (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	confirmed := d.totalSent - d.inFlight
-	if confirmed < 0 {
-		confirmed = 0
-	}
-	return confirmed, nil
+	return d.totalPrinted, nil
 }
 
 func (d *NativeDriver) GetTotalPrints() (int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	confirmed := int64(d.totalSent - d.inFlight)
-	if confirmed < 0 {
-		confirmed = 0
-	}
-	return confirmed, nil
+	return int64(d.totalPrinted), nil
 }
 
 func (d *NativeDriver) writeRawCmdNoLock(cmd string, desc ...string) error {
@@ -369,28 +371,37 @@ func (d *NativeDriver) readLoop(conn net.Conn, stopChan chan struct{}, done chan
 }
 
 // handleAsyncMessage анализирует дамп экрана TD с контроллера V1.53
+// handleAsyncMessage анализирует дамп экрана TD с контроллера V1.53
 func (d *NativeDriver) handleAsyncMessage(rawMsg string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// 1. Детекция успешного схода этикетки по счетчику Dispensed
-	// На V1.53 при завершении оттиска дисплей отдает: "R 00001  D 00001"
-	if strings.Contains(rawMsg, "D 00001") {
-		d.totalPrinted++
-		if d.inFlight > 0 {
-			d.inFlight--
+	// Разбиваем чанк строго по терминатору кадра ETB (0x17),
+	// чтобы не терять события при склейке нескольких пакетов в одном TCP Read
+	frames := strings.Split(rawMsg, string(byte(ETB)))
+	detected := 0
+
+	for _, frame := range frames {
+		if strings.Contains(frame, "D 00001") {
+			detected++
+		}
+		if strings.Contains(frame, "Error") || strings.Contains(frame, "Fehler") {
+			slog.Error("VALENTIN-NATIVE: Аппаратная ошибка на контроллере", "display", frame)
+		}
+	}
+
+	if detected > 0 {
+		d.totalPrinted += detected
+		d.inFlight -= detected
+		if d.inFlight < 0 {
+			d.inFlight = 0
 		}
 
 		slog.Info("VALENTIN-NATIVE: Физический сход этикетки подтвержден по TD (D=1)",
+			"detected", detected,
 			"total_printed", d.totalPrinted,
 			"in_flight", d.inFlight,
 		)
-		return
-	}
-
-	// 2. Детекция ошибок протяжки / ножа / риббона
-	if strings.Contains(rawMsg, "Error") || strings.Contains(rawMsg, "Fehler") {
-		slog.Error("VALENTIN-NATIVE: Аппаратная ошибка на контроллере", "display", rawMsg)
 	}
 }
 

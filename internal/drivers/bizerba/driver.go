@@ -75,6 +75,40 @@ type Driver struct {
 	captureDone   chan struct{}
 }
 
+type deduplicationEntry struct {
+	msgType   string
+	timestamp time.Time
+}
+
+type pw02Deduplicator struct {
+	seen map[string]deduplicationEntry
+	ttl  time.Duration
+}
+
+func newPW02Deduplicator() *pw02Deduplicator {
+	return &pw02Deduplicator{
+		seen: make(map[string]deduplicationEntry),
+		ttl:  5 * time.Second,
+	}
+}
+
+func (d *pw02Deduplicator) shouldProcess(handle, msgType string, now time.Time) bool {
+	for k, v := range d.seen {
+		if now.Sub(v.timestamp) > d.ttl {
+			delete(d.seen, k)
+		}
+	}
+	if entry, ok := d.seen[handle]; ok && now.Sub(entry.timestamp) <= d.ttl {
+		return false
+	}
+	d.seen[handle] = deduplicationEntry{msgType: msgType, timestamp: now}
+	return true
+}
+
+func (d *pw02Deduplicator) reset() {
+	d.seen = make(map[string]deduplicationEntry)
+}
+
 // New создаёт драйвер для устройства с указанным именем подключения в BCS.
 // Значения host и port для COM-драйвера не используются.
 func New(_ string, _ int, device string) *Driver {
@@ -304,41 +338,47 @@ func (d *Driver) updateStaticFieldsOn(conn bcsConnection, fields map[string]stri
 			continue
 		}
 
-		// 1. Ищем регистр весов по карте StaticMap
 		targetRegister := ""
-		if reg, ok := d.equipment.mapping.StaticMap[key]; ok && reg != "" {
-			targetRegister = strings.ToUpper(strings.TrimSpace(reg))
-		} else {
-			for mapKey, mapReg := range d.equipment.mapping.StaticMap {
-				if strings.EqualFold(mapKey, key) && mapReg != "" {
-					targetRegister = strings.ToUpper(strings.TrimSpace(mapReg))
-					break
+		// 1. Ищем в StaticMap (без учёта регистра)
+		for mapKey, mapReg := range d.equipment.mapping.StaticMap {
+			if strings.EqualFold(strings.TrimSpace(mapKey), strings.TrimSpace(key)) && strings.TrimSpace(mapReg) != "" {
+				targetRegister = strings.ToUpper(strings.TrimSpace(mapReg))
+				break
+			}
+		}
+
+		// 2. Fallback: если в StaticMap пусто, проверяем стандартные имена и прямые регистры
+		if targetRegister == "" {
+			lowerKey := strings.ToLower(strings.TrimSpace(key))
+			switch lowerKey {
+			case "date", "date01", "production_date", "дата":
+				targetRegister = "GL06"
+			case "date02", "exp_date", "expiration_date", "годен_до":
+				targetRegister = "GL07"
+			case "brigade", "team", "бригада":
+				targetRegister = "GL15"
+			default:
+				upper := strings.ToUpper(strings.TrimSpace(key))
+				if isBizerbaRegister(upper) {
+					targetRegister = upper
 				}
 			}
 		}
 
-		// 2. Если в маппинге нет — проверяем, вдруг сам ключ является регистром Bizerba (напр. "GL06", "GT02")
-		if targetRegister == "" {
-			upper := strings.ToUpper(strings.TrimSpace(key))
-			if isBizerbaRegister(upper) {
-				targetRegister = upper
-			}
-		}
-
-		// Если соответствия нет — поле предназначено не для Bizerba, пропускаем
 		if targetRegister == "" {
 			continue
 		}
 
-		// 3. Если поле относится к датам Bizerba (GL06, GL07, GL08) — нормализуем под формат ddMMyy
 		formattedValue := val
-		if strings.HasPrefix(targetRegister, "GL0") {
-			if normDate, err := normalizeBizerbaDate(val); err == nil {
-				formattedValue = normDate
+		// Регистры дат Bizerba: GL06 (Дата 1), GL07 (Дата 2), GL08 (Дата 3)
+		if targetRegister == "GL06" || targetRegister == "GL07" || targetRegister == "GL08" {
+			normDate, err := normalizeBizerbaDate(val)
+			if err != nil {
+				return fmt.Errorf("некорректная дата для поля %s (%s=%q): %w", targetRegister, key, val, err)
 			}
+			formattedValue = normDate
 		}
 
-		// 4. Отправляем команду в весы: A!REG|VAL
 		if err := sendWrite(conn, "A!"+targetRegister, formattedValue, d.timeout); err != nil {
 			return fmt.Errorf("ошибка установки поля Bizerba %s (%s=%q): %w", targetRegister, key, formattedValue, err)
 		}
@@ -538,9 +578,16 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 
 	var pending []queuedMark
 	var active *queuedMark
+	dedup := newPW02Deduplicator()
 
 	serialReg := d.equipment.mapping.SerialField
+	if serialReg == "" {
+		serialReg = "GT03"
+	}
 	cryptoReg := d.equipment.mapping.CryptoField
+	if cryptoReg == "" {
+		cryptoReg = "GT04"
+	}
 
 	clearMarkFields := func() error {
 		if err := sendWrite(conn, "A!"+serialReg, "", d.timeout); err != nil {
@@ -569,7 +616,6 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 	}
 
 	for {
-		// Шаг 1: Разгрузка очереди входящих управляющих запросов без блокировки
 		drainRequests := true
 		for drainRequests {
 			select {
@@ -606,12 +652,14 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 				case "call":
 					req.resp <- sessionResponse{err: req.call(conn)}
 				case "prepare":
+					dedup.reset()
 					err := d.updateStaticFieldsOn(conn, req.prepared.staticFields)
 					if err == nil {
 						capacity = req.prepared.capacity
 					}
 					req.resp <- sessionResponse{err: err}
 				case "stop", "close":
+					dedup.reset()
 					_ = clearMarkFields()
 					err := sendWrite(conn, "A!GWC3", "0", d.timeout)
 					req.resp <- sessionResponse{err: err}
@@ -622,7 +670,6 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 			}
 		}
 
-		// Шаг 2: Чтение спонтанных пакетов взвешивания с контролируемым таймаутом
 		payload, status, receiveErr := conn.ReceiveOne(spontaneousQueue, receivePollTimeout)
 		if receiveErr != nil {
 			s.setError(receiveErr)
@@ -635,54 +682,85 @@ func (d *Driver) runSession(s *markSession, capacity int, staticFields map[strin
 			return
 		}
 
-		// Шаг 3: Обработка факта взвешивания / проезда упаковки
-		isWeightPackage := status != bcsStatusTimeout && hasField(payload, "PV01")
-		isPassingPackage := status != bcsStatusTimeout && hasField(payload, "PW05")
+		if status == bcsStatusTimeout {
+			if active == nil {
+				time.Sleep(10 * time.Millisecond)
+			}
+			continue
+		}
 
-		if active != nil && (isWeightPackage || isPassingPackage) {
-			weight := ""
-			var weightErr error
-			switch {
-			case isWeightPackage && d.equipment.captureWeight:
-				weight, weightErr = bizerbaWeight(payload)
-			case isPassingPackage:
+		if hasField(payload, "PW05") {
+			slog.Debug("Bizerba: получено сервисное сообщение PW05 (пропуск)", "packet", payload)
+			continue
+		}
+
+		msgType := ""
+		switch {
+		case hasField(payload, "PV01"):
+			msgType = "PV01"
+		case hasField(payload, "PV04"):
+			msgType = "PV04"
+		case hasField(payload, "PV05"):
+			msgType = "PV05"
+		default:
+			continue
+		}
+
+		if active == nil {
+			continue
+		}
+
+		handle, hasHandle := bizerbaFieldValue(payload, "PW02")
+		handle = strings.TrimSpace(handle)
+		if !hasHandle || handle == "" {
+			slog.Warn("Bizerba: сообщение без корректного PW02 пропущено", "type", msgType, "packet", payload)
+			continue
+		}
+
+		if !dedup.shouldProcess(handle, msgType, time.Now()) {
+			slog.Debug("Bizerba: повторное сообщение для PW02 в окне 5с пропущено", "handle", handle, "type", msgType)
+			continue
+		}
+
+		weight := ""
+		switch msgType {
+		case "PV01", "PV04":
+			if d.equipment.captureWeight {
+				w, err := bizerbaWeight(payload)
+				if err != nil {
+					slog.Warn("Bizerba: сообщение отклонено из-за некорректного/отсутствующего PD00", "type", msgType, "err", err, "packet", payload)
+					delete(dedup.seen, handle)
+					continue
+				}
+				weight = w
+			} else {
 				weight = "0"
 			}
+		case "PV05":
+			weight = "0"
+		}
 
-			if weight != "" || weightErr != nil {
-				switch {
-				case weightErr != nil:
-					slog.Error("Не удалось извлечь вес из пакета Bizerba", "mark", active.code, "err", weightErr, "packet", payload)
-				case d.equipment.recordWeight == nil:
-					slog.Error("Для Bizerba не настроено хранилище веса напечатанной марки", "mark", active.code, "weight", weight)
-				default:
-					if recordErr := d.equipment.recordWeight(active.index, active.code, weight); recordErr != nil {
-						slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", recordErr)
-					}
-				}
-			}
-
-			d.mu.Lock()
-			d.lastPrinted = active.index
-			d.mu.Unlock()
-			active = nil
-
-			if err := installNext(); err != nil {
-				s.setError(err)
-				_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
-				return
-			}
-
-			if active == nil && len(pending) == 0 {
-				if err := clearMarkFields(); err != nil {
-					slog.Warn("Не удалось очистить поля марки в конце очереди Bizerba", "err", err)
-				}
+		if weight != "" && d.equipment.recordWeight != nil {
+			if err := d.equipment.recordWeight(active.index, active.code, weight); err != nil {
+				slog.Error("Не удалось сохранить вес напечатанной марки", "mark", active.code, "weight", weight, "err", err)
 			}
 		}
 
-		// Шаг 4: Защита процессора от холостого хода при статус-таймауте
-		if status == bcsStatusTimeout && active == nil {
-			time.Sleep(10 * time.Millisecond)
+		d.mu.Lock()
+		d.lastPrinted = active.index
+		d.mu.Unlock()
+		active = nil
+
+		if err := installNext(); err != nil {
+			s.setError(err)
+			_ = sendWrite(conn, "A!GWC3", "0", d.timeout)
+			return
+		}
+
+		if active == nil && len(pending) == 0 {
+			if err := clearMarkFields(); err != nil {
+				slog.Warn("Не удалось очистить поля марки в конце очереди Bizerba", "err", err)
+			}
 		}
 	}
 }
@@ -943,17 +1021,37 @@ func firstField(fields map[string]string, names ...string) string {
 // normalizeBizerbaDate преобразует поддерживаемые представления даты в формат ddMMyy.
 func normalizeBizerbaDate(value string) (string, error) {
 	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("пустая дата")
+	}
+
+	// Если уже ddMMyy (6 цифр)
 	if len(value) == 6 {
 		if _, err := time.Parse("020106", value); err == nil {
 			return value, nil
 		}
 	}
-	for _, layout := range []string{"02.01.2006", "2006-01-02", time.RFC3339} {
-		if parsed, err := time.Parse(layout, value); err == nil {
+
+	// Если yyyyMMdd (8 цифр, частый формат 1С)
+	if len(value) == 8 {
+		if parsed, err := time.Parse("20060102", value); err == nil {
 			return parsed.Format("020106"), nil
 		}
 	}
-	return "", fmt.Errorf("неподдерживаемый формат даты Bizerba %q; ожидается ddMMyy, dd.MM.yyyy или yyyy-MM-dd", value)
+
+	// Отрезаем время, если 1С прислала "2026-11-12T08:00:00" или "12.11.2026 00:00:00"
+	datePart := value
+	if idx := strings.IndexAny(value, " T"); idx != -1 {
+		datePart = value[:idx]
+	}
+
+	for _, layout := range []string{"02.01.2006", "2006-01-02", "02/01/2006"} {
+		if parsed, err := time.Parse(layout, datePart); err == nil {
+			return parsed.Format("020106"), nil
+		}
+	}
+
+	return "", fmt.Errorf("неподдерживаемый формат даты Bizerba %q", value)
 }
 
 // cloneFields создаёт независимую копию набора статических полей.
