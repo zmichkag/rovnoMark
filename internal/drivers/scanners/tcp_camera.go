@@ -164,6 +164,16 @@ func normalizeScannedCode(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimPrefix(value, "]d2")
 	value = strings.ReplaceAll(value, marking.ASCII_GS, "<GS>")
+
+	// Если камера настроена на вывод AI в скобках: (01)046...(21)5...(93)...
+	if strings.HasPrefix(value, "(01)") {
+		value = strings.Replace(value, "(01)", "01", 1)
+		value = strings.Replace(value, "(21)", "21", 1)
+		value = strings.Replace(value, "(91)", "<GS>91", 1)
+		value = strings.Replace(value, "(92)", "<GS>92", 1)
+		value = strings.Replace(value, "(93)", "<GS>93", 1)
+	}
+
 	if parsed, err := marking.ParseAndValidateShortGS1(value); err == nil {
 		return parsed.ToDBFormat()
 	}
