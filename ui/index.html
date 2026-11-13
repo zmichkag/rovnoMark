@@ -370,6 +370,20 @@
         </div>
     </div>
 
+    <!-- Универсальный маппинг полей -->
+    <div id="field_mapping_block" style="background:#141414; padding:10px; border-radius:6px; border:1px solid #333; margin: 10px 0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-weight:bold; font-size:0.8rem; color:var(--primary);">Маппинг полей (1С → Макет принтера)</span>
+            <button type="button" class="btn" style="padding:2px 8px; font-size:0.75rem;" onclick="addMappingRow()">+ Поле</button>
+        </div>
+        <div id="mapping_rows_container" style="display:flex; flex-direction:column; gap:6px;">
+            <!-- Сюда рендерятся строки -->
+        </div>
+        <div style="font-size:0.72rem; color:var(--text-muted); margin-top:6px;">
+            Пример: ключ <code>date01</code> → поле <code>BM[18]</code> (Valentin) или <code>date1</code> (Markem)
+        </div>
+    </div>
+
     <div id="bizerba_extra_settings" class="bizerba-panel" style="display:none;">
         <div class="field"><label>BCS Device ID:</label><input type="text" id="p_bcs_device" placeholder="GLPMax"></div>
         <div style="display:flex; gap:15px;">
@@ -1178,13 +1192,21 @@
             is_active: document.getElementById('p_active').checked
         };
 
+        const settings = {};
         if (driverType === 'bizerba') {
-            body.settings = {
-                bcs_device: document.getElementById('p_bcs_device').value.trim() || 'GLPMax',
-                capture_weight: document.getElementById('p_capture_weight').checked,
-                conveyor: document.getElementById('p_bizerba_conveyor').checked,
-                record_gxnet: document.getElementById('p_record_gxnet').checked
-            };
+            settings.bcs_device = document.getElementById('p_bcs_device').value.trim() || 'GLPMax';
+            settings.capture_weight = document.getElementById('p_capture_weight').checked;
+            settings.conveyor = document.getElementById('p_bizerba_conveyor').checked;
+            settings.record_gxnet = document.getElementById('p_record_gxnet').checked;
+        }
+
+        const fieldMap = collectMappingRows();
+        if (Object.keys(fieldMap).length > 0) {
+            settings.field_map = fieldMap;
+        }
+
+        if (Object.keys(settings).length > 0) {
+            body.settings = settings;
         }
 
         const saveRes = await fetch('/api/printers/add', {
@@ -1317,6 +1339,43 @@
         } catch (e) {
             content.innerHTML = `<div style="color:var(--danger);">Ошибка загрузки: ${e.message}</div>`;
         }
+    }
+
+    function addMappingRow(sourceKey = '', targetField = '') {
+        const container = document.getElementById('mapping_rows_container');
+        const row = document.createElement('div');
+        row.className = 'mapping-row';
+        row.style = 'display:grid; grid-template-columns: 1fr 20px 1fr 28px; gap:5px; align-items:center;';
+        row.innerHTML = `
+        <input type="text" class="map-src" placeholder="Поле 1С (date01)" value="${sourceKey}" style="padding:5px; font-size:0.8rem;">
+        <span style="text-align:center; color:#666;">→</span>
+        <input type="text" class="map-dst" placeholder="Поле принтера (BM[18])" value="${targetField}" style="padding:5px; font-size:0.8rem;">
+        <button type="button" class="btn" style="padding:4px; color:var(--danger); border-color:#444;" onclick="this.parentElement.remove()">✕</button>
+    `;
+        container.appendChild(row);
+    }
+
+    function renderMappingRows(settingsObj) {
+        const container = document.getElementById('mapping_rows_container');
+        container.innerHTML = '';
+        const map = (settingsObj && settingsObj.field_map) ? settingsObj.field_map : {};
+        const keys = Object.keys(map);
+        if (keys.length === 0) {
+            return; // Пусто — работают дефолтные правила драйвера
+        }
+        keys.forEach(k => addMappingRow(k, map[k]));
+    }
+
+    function collectMappingRows() {
+        const fieldMap = {};
+        document.querySelectorAll('#mapping_rows_container .mapping-row').forEach(row => {
+            const src = row.querySelector('.map-src').value.trim();
+            const dst = row.querySelector('.map-dst').value.trim();
+            if (src && dst) {
+                fieldMap[src] = dst;
+            }
+        });
+        return fieldMap;
     }
 
     setInterval(fetchPrintersStatus, 5000);

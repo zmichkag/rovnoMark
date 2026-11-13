@@ -1,6 +1,7 @@
 package valentine
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -35,21 +36,25 @@ type NativeDriver struct {
 	readDone chan struct{}
 }
 
-func NewNativeDriver(ip string, port int) *NativeDriver {
+func NewNativeDriver(ip string, port int, settings json.RawMessage) *NativeDriver {
 	if port <= 0 {
 		port = 9100
 	}
-	return &NativeDriver{
+	d := &NativeDriver{
 		Address:         ip,
 		Port:            port,
 		Timeout:         3 * time.Second,
 		conn:            nil,
 		totalSent:       0,
 		totalPrinted:    0,
-		maxInFlight:     10, // Не больше 10 этикеток в тракте одновременно
+		maxInFlight:     10,
 		inFlight:        0,
 		refillThreshold: 5,
 	}
+	if len(settings) > 0 {
+		_ = json.Unmarshal(settings, d)
+	}
+	return d
 }
 
 // InitSession поднимает постоянное чтение сокета
@@ -331,6 +336,45 @@ func (d *NativeDriver) writeRawCmdNoLock(cmd string, desc ...string) error {
 }
 
 // readLoop парсит асинхронный поток контроллера
+//func (d *NativeDriver) readLoop(conn net.Conn, stopChan chan struct{}, done chan struct{}) {
+//	defer close(done)
+//	buf := make([]byte, 1024)
+//
+//	for {
+//		select {
+//		case <-stopChan:
+//			return
+//		default:
+//		}
+//
+//		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+//		n, err := conn.Read(buf)
+//		if err != nil {
+//			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+//				continue
+//			}
+//			slog.Debug("VALENTIN-WIRE: Сокет завершил чтение", "err", err)
+//			return
+//		}
+//
+//		if n > 0 {
+//			chunk := buf[:n]
+//
+//			// Трассировка сырого сокета: активна ТОЛЬКО если включен флаг TraceWire
+//			if d.TraceWire {
+//				slog.Debug("VALENTIN-WIRE-IN",
+//					"bytes_len", n,
+//					"hex", fmt.Sprintf("%x", chunk),
+//					"ascii", strings.ReplaceAll(string(chunk), "\x1d", "<GS>"),
+//				)
+//			}
+//
+//			// Парсинг телеметрии и схода этикеток работает ВСЕГДА
+//			d.handleAsyncMessage(string(chunk))
+//		}
+//	}
+//}
+
 func (d *NativeDriver) readLoop(conn net.Conn, stopChan chan struct{}, done chan struct{}) {
 	defer close(done)
 	buf := make([]byte, 1024)
@@ -342,48 +386,43 @@ func (d *NativeDriver) readLoop(conn net.Conn, stopChan chan struct{}, done chan
 		default:
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 		n, err := conn.Read(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
-			slog.Debug("VALENTIN-WIRE: Сокет завершил чтение", "err", err)
+			slog.Debug("VALENTIN-WIRE: Сокет закрыт", "err", err)
 			return
 		}
 
 		if n > 0 {
 			chunk := buf[:n]
-
-			// Трассировка сырого сокета: активна ТОЛЬКО если включен флаг TraceWire
-			if d.TraceWire {
-				slog.Debug("VALENTIN-WIRE-IN",
-					"bytes_len", n,
-					"hex", fmt.Sprintf("%x", chunk),
-					"ascii", strings.ReplaceAll(string(chunk), "\x1d", "<GS>"),
-				)
-			}
-
-			// Парсинг телеметрии и схода этикеток работает ВСЕГДА
+			// Полный Hex и ASCII дамп входящих данных
+			slog.Info("VALENTIN-WIRE-IN",
+				"bytes_len", n,
+				"hex", fmt.Sprintf("%x", chunk),
+				"ascii", strings.ReplaceAll(string(chunk), "\x1d", "<GS>"),
+			)
 			d.handleAsyncMessage(string(chunk))
 		}
 	}
 }
 
-// handleAsyncMessage анализирует дамп экрана TD с контроллера V1.53
-// handleAsyncMessage анализирует дамп экрана TD с контроллера V1.53
 func (d *NativeDriver) handleAsyncMessage(rawMsg string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Разбиваем чанк строго по терминатору кадра ETB (0x17),
-	// чтобы не терять события при склейке нескольких пакетов в одном TCP Read
 	frames := strings.Split(rawMsg, string(byte(ETB)))
 	detected := 0
 
 	for _, frame := range frames {
-		if strings.Contains(frame, "D 00001") {
-			detected++
+		// Ловим факт завершения цикла печати/схода по ключевым признакам ответа немецкого контроллера
+		if strings.Contains(frame, "Print") || strings.Contains(frame, "D 00001") || strings.Contains(frame, "D 0000") {
+			// Проверяем, чтобы это не был пустой мусор без R/D индикаторов
+			if strings.Contains(frame, "R ") || strings.Contains(frame, "D ") {
+				detected++
+			}
 		}
 		if strings.Contains(frame, "Error") || strings.Contains(frame, "Fehler") {
 			slog.Error("VALENTIN-NATIVE: Аппаратная ошибка на контроллере", "display", frame)
@@ -397,8 +436,8 @@ func (d *NativeDriver) handleAsyncMessage(rawMsg string) {
 			d.inFlight = 0
 		}
 
-		slog.Info("VALENTIN-NATIVE: Физический сход этикетки подтвержден по TD (D=1)",
-			"detected", detected,
+		slog.Info("VALENTIN-NATIVE: Физический цикл подтвержден по TD",
+			"detected_in_chunk", detected,
 			"total_printed", d.totalPrinted,
 			"in_flight", d.inFlight,
 		)
