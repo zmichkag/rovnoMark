@@ -188,6 +188,42 @@ type LogFilter struct {
 	Offset    int       `json:"offset"`
 }
 
+// GetFieldMap извлекает таблицу маппинга полей из settings_json.
+func (p *PrinterConfig) GetFieldMap() map[string]string {
+	var raw struct {
+		FieldMap map[string]string `json:"field_map"`
+	}
+	if len(p.Settings) > 0 {
+		_ = json.Unmarshal(p.Settings, &raw)
+	}
+	if raw.FieldMap == nil {
+		return make(map[string]string)
+	}
+	return raw.FieldMap
+}
+
+// ResolveFieldName возвращает целевое имя поля принтера или исходный ключ, если маппинг не задан.
+func (p *PrinterConfig) ResolveFieldName(sourceKey string) string {
+	return ResolveKeyFromMap(p.GetFieldMap(), sourceKey)
+}
+
+// ResolveKeyFromMap — общая потокобезопасная функция резолвинга ключа по карте маппинга.
+// Используется как моделью, так и внутри драйверов.
+func ResolveKeyFromMap(fMap map[string]string, sourceKey string) string {
+	if len(fMap) == 0 || strings.TrimSpace(sourceKey) == "" {
+		return sourceKey
+	}
+	if target, ok := fMap[sourceKey]; ok && strings.TrimSpace(target) != "" {
+		return strings.TrimSpace(target)
+	}
+	for k, v := range fMap {
+		if strings.EqualFold(strings.TrimSpace(k), strings.TrimSpace(sourceKey)) && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return sourceKey
+}
+
 type TaskState string
 
 const (

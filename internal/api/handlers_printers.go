@@ -138,6 +138,8 @@ func (s *Server) handlePrintersAdd(w http.ResponseWriter, r *http.Request) {
 		s.manager.AddPrinter(cfg, videojet.New(cfg.IP, cfg.Port))
 	case "valentine_nice":
 		s.manager.AddPrinter(cfg, valentine.NewNiceLabelDriver(cfg.ID, cfg.IP, cfg.Port))
+	case "valentine_native":
+		s.manager.AddPrinter(cfg, valentine.NewNativeDriver(cfg.IP, cfg.Port, cfg.Settings))
 	case "markem":
 		s.manager.AddPrinter(cfg, markem.New(cfg.IP, cfg.Port, "Actor1"))
 	case "markem_async":
